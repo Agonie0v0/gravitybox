@@ -50,8 +50,8 @@ export const GLOSSARY_RULES: { en: RegExp; zh: string; forbid: string[]; note: s
 ];
 export const preservedIdentifier = (key: string) => [
   '!text-black','/abns/…','Alt','Android (main)','Aoede','Arlo','Ayu','Ayu Dark','Ayu Light','Ayu Mirage','BoN','Buganizer','Cascadia Code','Cascadia Mono','Catppuccin',
-  'Catppuccin Frappe','Catppuccin Latte','Catppuccin Macchiato','Catppuccin Mocha','Charon','Chromium','Cleo','Consolas','Cookie','Courier New','Ctrl',
-  'Dracula','Fenrir','Finn','Fira Code','Fira Mono','Flash','Fola','Gemini 2.5 Flash Image','Gemini 3 Pro Image','Gemini 3.1 Flash Image','Gemini Enterprise','Gero',
+  'Catppuccin Frappe','Catppuccin Latte','Catppuccin Macchiato','Catppuccin Mocha','Charon','Chromium','Cleo','Cmd+Enter','Command+Enter','Consolas','Cookie','Courier New','Ctrl',
+  'Dracula','Enter','Fenrir','Finn','Fira Code','Fira Mono','Flash','Fola','Gemini 2.5 Flash Image','Gemini 3 Pro Image','Gemini 3.1 Flash Image','Gemini Enterprise','Gero',
   'Google Antigravity SDK','Google Chat','Google Chrome','Google Sans','Google Sans Code','Google Sans Text','Google3',
   'Gruvbox','Gruvbox Dark','Gruvbox Light','Gruvbox Material','Hack','Inconsolata','Inter','items-start overflow-y-auto overflow-x-hidden [&>*]:my-auto','JetBrains Mono','Jetski','Kore','Leda','Linux','Lora','MacOS',
   'Menlo','Monaco','Monokai','Monokai Dimmed','Monokai Pro','my-gcp-project-id','Neno','Nord','Olin','One Dark','One Dark Pro','One Light','Orus','PID','PID ',

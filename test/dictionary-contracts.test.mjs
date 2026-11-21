@@ -345,6 +345,19 @@ test('P1-37/P1-39：dict/base.json 无首尾空格，HUD 与 engine.js 术语和
   const baseDict = JSON.parse(baseRaw);
   const zhPack = JSON.parse(zhPackRaw);
 
+  assert.equal(baseDict['Enter'], 'Enter');
+  assert.equal(baseDict['Cmd+Enter'], 'Cmd+Enter');
+  assert.equal(baseDict['Command+Enter'], 'Command+Enter');
+  assert.equal(baseDict['Orchestrator Settings'], '编排器设置');
+  assert.equal(baseDict['Orchestrator Model'], '编排器模型');
+  assert.equal(baseDict['Executor Model'], '执行器模型');
+  assert.equal(baseDict['Input Box'], '对话输入框');
+  assert.equal(baseDict['Choose which key sends a message in the chat composer.'], '选择在对话输入框中发送消息的按键。');
+  const { classifyCoverage } = await import('../dist/coverage.js');
+  assert.equal(classifyCoverage('Enter', 'Enter'), 'preserved');
+  assert.equal(classifyCoverage('Cmd+Enter', 'Cmd+Enter'), 'preserved');
+  assert.equal(classifyCoverage('Command+Enter', 'Command+Enter'), 'preserved');
+
   const untrimmed = [];
   for (const [k, v] of Object.entries(baseDict)) {
     if (k !== k.trim() || (typeof v === 'string' && v !== v.trim())) {
