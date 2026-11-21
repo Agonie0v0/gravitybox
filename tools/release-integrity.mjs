@@ -39,6 +39,7 @@ export async function sourceDigest(root) {
   for (const doc of [
     'LICENSE',
     'SECURITY.md',
+    'README.zh-CN.md',
     'README_EN.md',
     'CHANGELOG.md',
     'PROJECT.md',

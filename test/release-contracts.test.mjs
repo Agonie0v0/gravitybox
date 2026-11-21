@@ -42,7 +42,7 @@ describeContractGroup("发行完整性 · release-1.1.1-contracts", { concurrenc
     for (const dirName of ['src', 'runtime', 'native', 'tools', 'test', 'dict', 'ui-strings', 'assets/screenshots', 'licenses', '.github/workflows']) {
       await mkdir(join(d, dirName), { recursive: true });
     }
-    for (const fileName of ['package-lock.json', 'tsconfig.json', 'README.md', 'THIRD_PARTY_NOTICES.md', 'README_EN.md', 'CHANGELOG.md', 'PROJECT.md']) {
+    for (const fileName of ['package-lock.json', 'tsconfig.json', 'README.md', 'README.zh-CN.md', 'THIRD_PARTY_NOTICES.md', 'README_EN.md', 'CHANGELOG.md', 'PROJECT.md']) {
       await writeFile(join(d, fileName), 'fixture');
     }
     await writeFile(join(d, 'package.json'), '{"version":"1.1.1"}');
@@ -76,6 +76,7 @@ describeContractGroup("发行完整性 · release-1.1.1-contracts", { concurrenc
     }
     await writeFile(join(d, 'package.json'), '{"version":"1.1.1"}');
     await writeFile(join(d, 'README.md'), '<h1>GravityBox</h1>\n(`GravityBox v1.1.1`)\n');
+    await writeFile(join(d, 'README.zh-CN.md'), '<h1>GravityBox</h1>\n(`GravityBox v1.1.0`)\n');
     await writeFile(join(d, 'README_EN.md'), '<h1>GravityBox</h1>\n(`GravityBox v1.1.0`)\n');
     await writeFile(join(d, 'CHANGELOG.md'), '## [Unreleased]\n\n## [1.1.0] - 2026-11-01\n\n[Unreleased]: https://github.com/example/repo/compare/v1.1.0...HEAD\n[1.1.0]: https://github.com/example/repo/compare/v1.0.0...v1.1.0\n');
     await writeFile(join(d, 'PROJECT.md'), '# PROJECT.md — GravityBox (`1.1.0`)\n');
@@ -89,6 +90,7 @@ describeContractGroup("发行完整性 · release-1.1.1-contracts", { concurrenc
     });
     assert.equal(sourceCheck.ok, false);
     assert.ok(sourceCheck.checked >= 6);
+    assert.ok(sourceCheck.issues.some(i => i.code === 'DOC_VERSION_MISMATCH' && i.file === 'README.zh-CN.md'));
     assert.ok(sourceCheck.issues.some(i => i.code === 'DOC_VERSION_MISMATCH' && i.file === 'README_EN.md'));
     assert.ok(sourceCheck.issues.some(i => i.code === 'DOC_VERSION_MISMATCH' && i.file === 'PROJECT.md'));
     assert.ok(sourceCheck.issues.some(i => i.code === 'DOC_VERSION_MISMATCH' && i.file === 'assets/screenshots/README.md'));

@@ -339,4 +339,59 @@ if let darkOverview = darkMainPages["overview"], let darkMenu = darkMenuUsage {
     print("✓ 已合成 [Dark] hero-dark.png (\(heroDark.pixelsWide)x\(heroDark.pixelsHigh))")
 }
 
+// 6. 生成英文版主界面、菜单栏、维护弹窗与 Hero 全景图 (en-*.png)
+var enLightPages: [String: NSBitmapImageRep] = [:]
+var enDarkPages: [String: NSBitmapImageRep] = [:]
+for (idx, name) in pageNames.enumerated() {
+    if let rep = loadRep(from: sourceDir.appendingPathComponent("en-light-1100x760-\(idx).png")) {
+        let polished = polishMainWindow(rep, isDark: false)
+        try! savePNG(polished, to: targetDir.appendingPathComponent("en-\(name).png"))
+        enLightPages[name] = polished
+        print("✓ 已生成 [EN Light] en-\(name).png (\(polished.pixelsWide)x\(polished.pixelsHigh))")
+    }
+    if let rep = loadRep(from: sourceDir.appendingPathComponent("en-dark-1100x760-\(idx).png")) {
+        let polished = polishMainWindow(rep, isDark: true)
+        try! savePNG(polished, to: targetDir.appendingPathComponent("en-dark-\(name).png"))
+        enDarkPages[name] = polished
+        print("✓ 已生成 [EN Dark] en-dark-\(name).png (\(polished.pixelsWide)x\(polished.pixelsHigh))")
+    }
+}
+
+var enLightMenuUsage: NSBitmapImageRep? = nil
+var enDarkMenuUsage: NSBitmapImageRep? = nil
+for (tab, outputName) in menuTabs {
+    if let rep = loadRep(from: sourceDir.appendingPathComponent("en-light-menu-panel-\(tab).png")) {
+        let polished = polishMenuPanel(rep, isDark: false)
+        try! savePNG(polished, to: targetDir.appendingPathComponent("en-\(outputName).png"))
+        if tab == "usage" { enLightMenuUsage = polished }
+        print("✓ 已生成 [EN Light] en-\(outputName).png (\(polished.pixelsWide)x\(polished.pixelsHigh))")
+    }
+    if let rep = loadRep(from: sourceDir.appendingPathComponent("en-dark-menu-panel-\(tab).png")) {
+        let polished = polishMenuPanel(rep, isDark: true)
+        try! savePNG(polished, to: targetDir.appendingPathComponent("en-dark-\(outputName).png"))
+        if tab == "usage" { enDarkMenuUsage = polished }
+        print("✓ 已生成 [EN Dark] en-dark-\(outputName).png (\(polished.pixelsWide)x\(polished.pixelsHigh))")
+    }
+}
+
+if let rep = loadRep(from: sourceDir.appendingPathComponent("en-light-maintenance-sheet.png")) {
+    try! savePNG(rep, to: targetDir.appendingPathComponent("en-maintenance.png"))
+    print("✓ 已生成 [EN Light] en-maintenance.png (\(rep.pixelsWide)x\(rep.pixelsHigh))")
+}
+if let rep = loadRep(from: sourceDir.appendingPathComponent("en-dark-maintenance-sheet.png")) {
+    try! savePNG(rep, to: targetDir.appendingPathComponent("en-dark-maintenance.png"))
+    print("✓ 已生成 [EN Dark] en-dark-maintenance.png (\(rep.pixelsWide)x\(rep.pixelsHigh))")
+}
+
+if let enOverview = enLightPages["overview"], let enMenu = enLightMenuUsage {
+    let heroEn = composeHero(mainWin: enOverview, menuWin: enMenu, isDark: false)
+    try! savePNG(heroEn, to: targetDir.appendingPathComponent("en-hero.png"))
+    print("✓ 已合成 [EN Light] en-hero.png (\(heroEn.pixelsWide)x\(heroEn.pixelsHigh))")
+}
+if let enOverviewDark = enDarkPages["overview"], let enMenuDark = enDarkMenuUsage {
+    let heroEnDark = composeHero(mainWin: enOverviewDark, menuWin: enMenuDark, isDark: true)
+    try! savePNG(heroEnDark, to: targetDir.appendingPathComponent("en-hero-dark.png"))
+    print("✓ 已合成 [EN Dark] en-hero-dark.png (\(heroEnDark.pixelsWide)x\(heroEnDark.pixelsHigh))")
+}
+
 print("== 全部超高清 Retina 实机截图与 Hero 画廊生成完成 ==")

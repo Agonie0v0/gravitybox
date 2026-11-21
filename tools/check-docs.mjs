@@ -89,6 +89,7 @@ export async function checkDocs({
   summaryPath = join(root, '文档', '当前版本验收摘要.json'),
   agentsPath = join(root, 'AGENTS.md'),
   readmePath = join(root, 'README.md'),
+  readmeZhPath = join(root, 'README.zh-CN.md'),
   readmeEnPath = join(root, 'README_EN.md'),
   changelogPath = join(root, 'CHANGELOG.md'),
   projectPath = join(root, 'PROJECT.md'),
@@ -178,6 +179,7 @@ export async function checkDocs({
 
   if (existsSync(agentsPath)) await checkDocFile('AGENTS.md', agentsPath);
   await checkDocFile('README.md', readmePath);
+  if (existsSync(readmeZhPath)) await checkDocFile('README.zh-CN.md', readmeZhPath);
   if (existsSync(readmeEnPath)) await checkDocFile('README_EN.md', readmeEnPath);
 
   if (existsSync(changelogPath) && facts.version) {

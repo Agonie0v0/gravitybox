@@ -52,7 +52,7 @@ jobs:
           while IFS= read -r file; do
             [ -z "$file" ] && continue
             case "$file" in
-              README.md|README_EN.md|CHANGELOG.md|CODE_OF_CONDUCT.md|CONTRIBUTING.md|docs/*|assets/screenshots/*|assets/model-icons/sources.json|.github/ISSUE_TEMPLATE/*|.github/PULL_REQUEST_TEMPLATE.md)
+              README.md|README.zh-CN.md|README_EN.md|CHANGELOG.md|CODE_OF_CONDUCT.md|CONTRIBUTING.md|docs/*|assets/screenshots/*|assets/model-icons/sources.json|.github/ISSUE_TEMPLATE/*|.github/PULL_REQUEST_TEMPLATE.md)
                 ;;
               *)
                 echo "Code-affecting change detected: $file"
@@ -87,7 +87,7 @@ jobs:
           node -e "
             const fs = require('node:fs');
             const path = require('node:path');
-            for (const doc of ['README.md', 'README_EN.md']) {
+            for (const doc of ['README.md', 'README.zh-CN.md', 'README_EN.md']) {
               if (!fs.existsSync(doc)) continue;
               const text = fs.readFileSync(doc, 'utf8');
               for (const m of text.matchAll(/(?:src=|!\[[^\]]*\]\()([\"']?)(?:\.\/)?(assets\/[^\"')\s>#]+)/g)) {

@@ -1517,10 +1517,11 @@ import Cocoa
             check(leaks.isEmpty, "English \(label) page must not contain untranslated Chinese labels: \(leaks)")
         }
 
-        // Capture Light/Dark English MenuPanel usage snapshots
+        // Capture Light/Dark English MenuPanel snapshots (Usage / Quota / Accounts)
         let enMenuPanel = assistant.ensureMenuPanelController()
         let enPanelHost = makeHeadlessHostWindow(width: MenuPanelController.panelWidth, height: MenuPanelController.defaultPanelHeight)
         enPanelHost.contentViewController = enMenuPanel
+        var enExtraCaptures: [String] = []
         for (theme, appearance) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
             enPanelHost.appearance = NSAppearance(named: appearance)
             enMenuPanel.selectTab(0, persist: false); enMenuPanel.panelWillOpen(); pump()
@@ -1528,9 +1529,57 @@ import Cocoa
             let panelName = "en-\(theme)-menu-panel-usage.png"
             try capture(enPanelHost.contentView!, output.appendingPathComponent(panelName))
             enCaptures.append(panelName)
+            enMenuPanel.selectTab(1, persist: false); pump()
+            enPanelHost.setContentSize(enMenuPanel.preferredContentSize); enPanelHost.contentView?.layoutSubtreeIfNeeded(); pump()
+            let quotaName = "en-\(theme)-menu-panel-quota.png"
+            try capture(enPanelHost.contentView!, output.appendingPathComponent(quotaName))
+            enExtraCaptures.append(quotaName)
+            enMenuPanel.selectTab(2, persist: false); pump()
+            enPanelHost.setContentSize(enMenuPanel.preferredContentSize); enPanelHost.contentView?.layoutSubtreeIfNeeded(); pump()
+            let accName = "en-\(theme)-menu-panel-accounts.png"
+            try capture(enPanelHost.contentView!, output.appendingPathComponent(accName))
+            enExtraCaptures.append(accName)
         }
+        enMenuPanel.selectTab(0, persist: false); pump()
         check(enMenuPanel.tokensTile.titleLabel.stringValue == "Tokens" && enMenuPanel.requestsTile.titleLabel.stringValue == "Requests" && enMenuPanel.costTile.titleLabel.stringValue == "Est. API Cost", "English MenuPanel KPI tiles must use English titles")
         enPanelHost.orderOut(nil)
+
+        // Capture Light/Dark 1100x760 English full-layout main pages & Maintenance sheet for README
+        let enFullWindowSize = NSSize(width: 1100, height: 760)
+        window.setFrame(NSRect(origin: window.frame.origin, size: enFullWindowSize), display: true)
+        for (theme, appearance) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
+            window.appearance = NSAppearance(named: appearance)
+            for page in 0..<5 {
+                assistant.selectPage(page); pump()
+                if page == 1 {
+                    waitUntil(step: 0.01, description: "en-\(theme)-1100x760 AccountsPage to settle") {
+                        !assistant.accountListInFlight
+                            && !assistant.accountListPendingRefetch
+                            && assistant.accountsPage?.activeId == activeId
+                    }
+                } else if page == 2 {
+                    waitUntil(step: 0.01, description: "en-\(theme)-1100x760 UsagePage to settle") {
+                        assistant.usagePage?.loading == false
+                    }
+                }
+                window.contentView?.layoutSubtreeIfNeeded()
+                let capName = "en-\(theme)-1100x760-\(page).png"
+                try capture(window.contentView!, output.appendingPathComponent(capName))
+                enExtraCaptures.append(capName)
+            }
+            assistant.selectPage(3); pump()
+            let enMaintSheet = MaintenanceSheetController(app: assistant)
+            enMaintSheet.sheet.appearance = NSAppearance(named: appearance)
+            enMaintSheet.cachePage.fetch(force: true); pump()
+            waitUntil(step: 0.01, description: "en-\(theme) maintSheet scan to complete") { !enMaintSheet.cachePage.busy }
+            enMaintSheet.sheet.contentView?.layoutSubtreeIfNeeded(); pump()
+            let maintLeaks = allTextValues(enMaintSheet.sheet.contentView!).filter { !allowedNativeNames.contains($0) && $0.range(of: hanPattern, options: .regularExpression) != nil }
+            check(maintLeaks.isEmpty, "English Maintenance sheet must not contain untranslated Chinese labels: \(maintLeaks)")
+            let maintName = "en-\(theme)-maintenance-sheet.png"
+            try capture(enMaintSheet.sheet.contentView!, output.appendingPathComponent(maintName))
+            enExtraCaptures.append(maintName)
+            enMaintSheet.closeSheet(); pump()
+        }
 
         // Hot-switch back to Simplified Chinese and verify restoration
         assistant.setGlobalLanguage("zh-Hans"); pump()
@@ -4757,7 +4806,7 @@ import Cocoa
             check(m4Panel.selectedEnvironmentId == "all" && m4Panel.usageEnvironmentBar.isHidden, "MenuPanel must auto-fallback stale SSH selection to all and hide usageEnvironmentBar on pure-local report")
         }
 
-        let result:[String:Any] = ["stableOnlySelectionPassed":true,"nativeLayouts":captures.count,"captures":captures,"enCaptures":enCaptures,"menuCaptures":6,"safeSwitchSharedFlowPassed":true,"emailWidthPassed":true,"partialPricingPassed":true,"headlessNoVisibleWindowLeaksPassed":true,"nativeAssertions":assertionCount,"scope":"isolated synthetic AppKit fixture; not installed-app acceptance"]
+        let result:[String:Any] = ["stableOnlySelectionPassed":true,"nativeLayouts":captures.count,"captures":captures,"enCaptures":enCaptures,"enExtraCaptures":enExtraCaptures,"menuCaptures":6,"safeSwitchSharedFlowPassed":true,"emailWidthPassed":true,"partialPricingPassed":true,"headlessNoVisibleWindowLeaksPassed":true,"nativeAssertions":assertionCount,"scope":"isolated synthetic AppKit fixture; not installed-app acceptance"]
         window.orderOut(nil)
         assertNoVisibleWindowsOnScreen("after-main-window-orderOut")
         try JSONSerialization.data(withJSONObject:result,options:[.prettyPrinted,.sortedKeys]).write(to:output.appendingPathComponent("native-ui-results.json"))
