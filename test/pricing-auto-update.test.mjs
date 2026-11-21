@@ -7,6 +7,7 @@ import {
   applyStagedNewModels,
   applyVerifiedPriceUpdate,
   buildAutoStagedAliases,
+  buildMarkdownFallbackUrl,
   bumpCatalogVersion,
   detectBlockedOrEmptyPage,
   evaluateModelConsensus,
@@ -2184,5 +2185,116 @@ test('Gemini 提取默认使用 gemini-3.8-flash + low thinkingLevel 并在汇�
   assert.equal(capturedBody?.generationConfig?.thinkingConfig?.thinkingLevel, 'low');
   assert.match(report.summaryMarkdown, /`gemini-3\.8-flash`/);
   assert.match(report.summaryMarkdown, /tokens: in=1,200 thoughts=150 out=80 total=1,430/);
+});
+
+test('CSR 空壳定价页自动回退抓取同路径 .md 并归类为 Google 厂商', async (t) => {
+  assert.equal(
+    buildMarkdownFallbackUrl('https://aistudio.google.com/docs/pricing'),
+    'https://aistudio.google.com/docs/pricing.md'
+  );
+  assert.equal(
+    buildMarkdownFallbackUrl('https://aistudio.google.com/docs/pricing/?hl=en#flash'),
+    'https://aistudio.google.com/docs/pricing.md'
+  );
+  assert.equal(buildMarkdownFallbackUrl('https://aistudio.google.com/docs/pricing.md'), null);
+  assert.equal(buildMarkdownFallbackUrl('https://aistudio.google.com/'), null);
+
+  const dir = await mkdtemp(join(tmpdir(), 'gb-pricing-csr-md-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const catalogPath = join(dir, 'model-catalog.json');
+  const feedPath = join(dir, 'pricing-feed.json');
+  const reportPath = join(dir, 'report.json');
+  await writeFile(
+    catalogPath,
+    JSON.stringify({
+      schema: 1,
+      names: { 'gemini-3.6-flash': 'Gemini 3.6 Flash' },
+      prices: {
+        'gemini-3.6-flash': {
+          model: 'gemini-3.6-flash',
+          input: 0.75,
+          output: 3.75,
+          cached: 0.075,
+          provenance: {
+            sourceUrl: 'https://aistudio.google.com/docs/pricing',
+            verification: 'confirmed',
+          },
+        },
+      },
+      activeModels: ['gemini-3.6-flash'],
+      feedModels: ['gemini-3.6-flash'],
+      pricingVersion: '2026-11-21',
+    }),
+    'utf8'
+  );
+
+  const requestedUrls = [];
+  const report = await runAutoUpdatePricing({
+    write: false,
+    nowMs: Date.parse('2026-11-21T14:00:00Z'),
+    catalogPath,
+    feedPath,
+    reportPath,
+    geminiApiKey: 'test-fake-key',
+    fetchImpl: async (url) => {
+      const target = String(url);
+      requestedUrls.push(target);
+      if (target === 'https://aistudio.google.com/docs/pricing') {
+        return new Response(
+          '<html><head><title>Gemini Developer API pricing</title></head><body><script src="/main.js"></script></body></html>',
+          { status: 200 }
+        );
+      }
+      if (target === 'https://aistudio.google.com/docs/pricing.md') {
+        return new Response(
+          `# Gemini Developer API Pricing\n\n${'Gemini Developer API token pricing per 1M tokens. '.repeat(6)}\n\n## Gemini 3.6 Flash\n| Input | $0.75 |\n| Output | $3.75 |\n| Cached | $0.075 |\n`,
+          { status: 200 }
+        );
+      }
+      if (target.includes('generativelanguage.googleapis.com')) {
+        return new Response(
+          JSON.stringify({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: JSON.stringify({
+                        pageParsedOk: true,
+                        models: [
+                          {
+                            catalogKey: 'gemini-3.6-flash',
+                            officialModelName: 'Gemini 3.6 Flash',
+                            inputPer1M: 0.75,
+                            outputPer1M: 3.75,
+                            cachedPer1M: 0.075,
+                            confidence: 'high',
+                            evidenceQuote: 'Gemini 3.6 Flash $0.75 / $3.75 / $0.075',
+                          },
+                        ],
+                      }),
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (target.includes('litellm')) {
+        return new Response(JSON.stringify({}), { status: 200 });
+      }
+      if (target.includes('openrouter')) {
+        return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      }
+      return new Response('', { status: 404 });
+    },
+  });
+
+  assert.equal(report.decision, 'no_change');
+  assert.deepEqual(report.pageAlerts, []);
+  assert.ok(requestedUrls.includes('https://aistudio.google.com/docs/pricing.md'));
+  assert.match(report.summaryMarkdown, /\| Google \| `200` \| Parsed \(1 models\) \| https:\/\/aistudio\.google\.com\/docs\/pricing\.md \|/);
 });
 

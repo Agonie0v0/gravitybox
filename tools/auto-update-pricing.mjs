@@ -23,7 +23,7 @@ const MAX_TIER_MULTIPLIER = 4.0;
 const MAX_PROMO_POST_MULTIPLIER = 5.0;
 
 const VENDOR_CONTENT_ANCHORS = [
-  { match: /cloud\.google\.com|ai\.google\.dev/i, anchor: /gemini|token|pricing/i, vendor: 'Google' },
+  { match: /cloud\.google\.com|ai\.google\.dev|aistudio\.google\.com/i, anchor: /gemini|token|pricing/i, vendor: 'Google' },
   { match: /anthropic\.com|platform\.claude\.com/i, anchor: /claude|million\s+tokens|mtok|pricing/i, vendor: 'Anthropic' },
   { match: /openai\.com/i, anchor: /gpt|token|pricing/i, vendor: 'OpenAI' },
 ];
@@ -195,6 +195,24 @@ export function detectBlockedOrEmptyPage(html, cleanText, rule) {
     return 'anchor_missing';
   }
   return null;
+}
+
+/**
+ * 为 CSR 空壳文档页生成同路径 `.md` 回退地址（例如 aistudio.google.com/docs/pricing -> pricing.md）。
+ */
+export function buildMarkdownFallbackUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.pathname.endsWith('.md')) return null;
+    const basePath = parsed.pathname.replace(/\/+$/, '');
+    if (!basePath) return null;
+    parsed.pathname = `${basePath}.md`;
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return null;
+  }
 }
 
 function stripMarkdownTableCell(rawCell) {
@@ -1843,7 +1861,8 @@ export async function runAutoUpdatePricing(options = {}) {
     const rule = VENDOR_CONTENT_ANCHORS.find((r) => r.match.test(url));
     const vendor = rule?.vendor ?? 'Upstream';
     try {
-      const res = await fetchImpl(url, {
+      let fetchUrl = url;
+      let res = await fetchImpl(fetchUrl, {
         method: 'GET',
         redirect: 'follow',
         headers: {
@@ -1852,23 +1871,50 @@ export async function runAutoUpdatePricing(options = {}) {
         },
         signal: AbortSignal.timeout(20_000),
       });
-      const html = res.ok ? await res.text() : '';
-      const cleanText = res.ok ? extractCleanPricingText(html) : '';
-      const blockReason = res.ok ? detectBlockedOrEmptyPage(html, cleanText, rule) : `http_${res.status}`;
+      let html = res.ok ? await res.text() : '';
+      let cleanText = res.ok ? extractCleanPricingText(html) : '';
+      let blockReason = res.ok ? detectBlockedOrEmptyPage(html, cleanText, rule) : `http_${res.status}`;
+
+      if (blockReason === 'empty_or_csr_shell') {
+        const mdUrl = buildMarkdownFallbackUrl(res.url || url);
+        if (mdUrl) {
+          const mdRes = await fetchImpl(mdUrl, {
+            method: 'GET',
+            redirect: 'follow',
+            headers: {
+              'User-Agent': 'GravityBox-PricingWatch/1.2 (+https://github.com/Enzoo404/gravitybox)',
+              Accept: 'text/markdown,text/plain;q=0.9,*/*;q=0.8',
+            },
+            signal: AbortSignal.timeout(20_000),
+          });
+          if (mdRes.ok) {
+            const mdText = await mdRes.text();
+            const mdCleanText = extractCleanPricingText(mdText);
+            const mdBlockReason = detectBlockedOrEmptyPage(mdText, mdCleanText, rule);
+            if (!mdBlockReason) {
+              fetchUrl = mdUrl;
+              res = mdRes;
+              html = mdText;
+              cleanText = mdCleanText;
+              blockReason = null;
+            }
+          }
+        }
+      }
 
       if (blockReason) {
-        pageAlerts.push(`[${vendor}] ${blockReason}: ${url}`);
-        probeRows.push(`| ${vendor} | \`${res.status}\` | ${blockReason} | ${url} |`);
+        pageAlerts.push(`[${vendor}] ${blockReason}: ${fetchUrl}`);
+        probeRows.push(`| ${vendor} | \`${res.status}\` | ${blockReason} | ${fetchUrl} |`);
         continue;
       }
 
       if (!geminiApiKey) {
-        probeRows.push(`| ${vendor} | \`${res.status}\` | Anchored (No Gemini Key) | ${url} |`);
+        probeRows.push(`| ${vendor} | \`${res.status}\` | Anchored (No Gemini Key) | ${fetchUrl} |`);
         continue;
       }
 
       const extracted = await extractPricesWithGemini({
-        url,
+        url: fetchUrl,
         vendor,
         cleanText,
         targetModels,
@@ -1886,12 +1932,12 @@ export async function runAutoUpdatePricing(options = {}) {
       }
 
       if (!extracted.pageParsedOk) {
-        pageAlerts.push(`[${vendor}] gemini_parse_unconfirmed: ${url}`);
-        probeRows.push(`| ${vendor} | \`${res.status}\` | Parse Low Confidence | ${url} |`);
+        pageAlerts.push(`[${vendor}] gemini_parse_unconfirmed: ${fetchUrl}`);
+        probeRows.push(`| ${vendor} | \`${res.status}\` | Parse Low Confidence | ${fetchUrl} |`);
         continue;
       }
 
-      probeRows.push(`| ${vendor} | \`${res.status}\` | Parsed (${extracted.models.length} models) | ${url} |`);
+      probeRows.push(`| ${vendor} | \`${res.status}\` | Parsed (${extracted.models.length} models) | ${fetchUrl} |`);
 
       for (const item of extracted.models) {
         const enrichedItem = {
