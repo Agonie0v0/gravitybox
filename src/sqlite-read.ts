@@ -1,6 +1,7 @@
 import { Worker } from 'node:worker_threads';
 import { randomUUID } from 'node:crypto';
 import type { HudWorkerScanRequest, HudWorkerScanResult, SummariesLookupRequest, SummariesLookupResult, UsageWorkerScanRequest, UsageWorkerScanResult } from './sqlite-worker.js';
+export type { HudWorkerScanRequest, HudWorkerScanResult, SummariesLookupRequest, SummariesLookupResult, UsageWorkerScanRequest, UsageWorkerScanResult };
 import { bt, getActiveLocale } from './i18n.js';
 
 const MAX_IDLE_WORKERS = 8;

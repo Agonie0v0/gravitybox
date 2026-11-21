@@ -37,6 +37,7 @@ export type RemoteRpcCallResult<T> =
 export interface RemoteTrajectorySummary {
   cascadeId: string;
   trajectoryId?: string;
+  trajectoryType?: number | string;
   status?: string | number;
   stepCount: number;
   parentConversationId?: string;
@@ -281,9 +282,13 @@ export function mapCortexStepStatusToNumeric(rawStatus: unknown): number {
  */
 export function isStrictSubagentSummary(
   cascadeId: string,
-  summary: Pick<RemoteTrajectorySummary, 'parentConversationId' | 'rootConversationId'> | null | undefined
+  summary: Pick<RemoteTrajectorySummary, 'parentConversationId' | 'rootConversationId' | 'trajectoryType'> | null | undefined
 ): boolean {
   if (!summary) return false;
+  if (summary.trajectoryType !== undefined && summary.trajectoryType !== null) {
+    if (summary.trajectoryType === 22 || String(summary.trajectoryType).trim() === '22') return false;
+    if (String(summary.trajectoryType).toUpperCase().includes('SIDE_QUESTION')) return false;
+  }
   if (summary.parentConversationId) return true;
   return Boolean(summary.rootConversationId && summary.rootConversationId !== cascadeId);
 }
@@ -795,7 +800,15 @@ export function mapRemoteRpcToHudInput(params: MapRemoteRpcToHudInputParams): Co
     mainLinked.genMetadata?.plannerModelName ||
     params.summary?.requestedModel;
 
-  const isSubagentTrajectory = isStrictSubagentSummary(params.conversationId, params.summary);
+  const isBtwTrajectory = Boolean(
+    params.summary &&
+      params.summary.trajectoryType !== undefined &&
+      params.summary.trajectoryType !== null &&
+      (params.summary.trajectoryType === 22 ||
+        String(params.summary.trajectoryType).trim() === '22' ||
+        String(params.summary.trajectoryType).toUpperCase().includes('SIDE_QUESTION'))
+  );
+  const isSubagentTrajectory = !isBtwTrajectory && isStrictSubagentSummary(params.conversationId, params.summary);
   const totalStepsOverride = isSubagentTrajectory
     ? mainSteps.length || params.summary?.stepCount || 0
     : (mainSteps.length || params.summary?.stepCount || 0) + subagentSteps;
@@ -818,6 +831,7 @@ export function mapRemoteRpcToHudInput(params: MapRemoteRpcToHudInputParams): Co
     totalStepsOverride: totalStepsOverride > 0 ? totalStepsOverride : undefined,
     allowDbActiveStepInference: true,
     isSubagentTrajectory,
+    ...(isBtwTrajectory ? { isBtwTrajectory: true } : {}),
     modelId: resolvedModelId,
     modelCapacity: params.modelCapacity,
     pricingTable: params.pricingTable,
@@ -977,9 +991,18 @@ export class SshRemoteRpcClient implements RemoteRpcClientLike {
       const pushEntry = (cid, s) => {
         if (!cid || !s || typeof s !== 'object') return;
         const tm = s.trajectoryMetadata && typeof s.trajectoryMetadata === 'object' ? s.trajectoryMetadata : {};
+        const rawTrajectoryType =
+          s.trajectoryType !== undefined
+            ? s.trajectoryType
+            : tm.trajectoryType !== undefined
+            ? tm.trajectoryType
+            : s.trajectory_type !== undefined
+            ? s.trajectory_type
+            : tm.trajectory_type;
         out.push({
           cascadeId: String(cid),
           ...(typeof s.trajectoryId === 'string' ? { trajectoryId: s.trajectoryId } : {}),
+          ...(rawTrajectoryType !== undefined && rawTrajectoryType !== null ? { trajectoryType: rawTrajectoryType } : {}),
           ...(s.status !== undefined ? { status: s.status } : {}),
           stepCount: typeof s.stepCount === 'number' ? s.stepCount : (Number(s.stepCount) || 0),
           ...(tm.parentConversationId || s.parentConversationId ? { parentConversationId: String(tm.parentConversationId || s.parentConversationId) } : {}),

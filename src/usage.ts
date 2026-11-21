@@ -116,6 +116,7 @@ export class UsageStatsManager {
   private usageLedgerEvents = new Map<string, LedgerEvent>();
   private legacyKeyIndex = new Map<string, Set<string>>();
   private pendingLedgerEvents = new Map<string, LedgerEvent>();
+  private pendingForkedClonePurges = new Map<string, Set<number>>();
   private largeLedger = false;
   private largeLedgerBaselinePresent = false;
   private ledgerUnavailable = false;
@@ -1024,6 +1025,125 @@ export class UsageStatsManager {
     this.usageLedgerDirty = true;
   }
 
+  private recordExcludedForkedClones(dbPath: string, excludedGenIndices?: number[]): void {
+    if (!Array.isArray(excludedGenIndices) || excludedGenIndices.length === 0) return;
+    const dbFile = basename(dbPath).trim();
+    if (!dbFile) return;
+    let set = this.pendingForkedClonePurges.get(dbFile);
+    if (!set) {
+      set = new Set<number>();
+      this.pendingForkedClonePurges.set(dbFile, set);
+    }
+    for (const idx of excludedGenIndices) {
+      if (typeof idx === 'number' && Number.isSafeInteger(idx) && idx >= 0) {
+        set.add(idx);
+      }
+    }
+    if (set.size === 0) {
+      this.pendingForkedClonePurges.delete(dbFile);
+    }
+  }
+
+  private removeForkedClonesFromMemory(targets: ReadonlyArray<{ dbFile: string; excludedGenIndices: number[] }>): boolean {
+    if (targets.length === 0) return false;
+    const byDb = new Map<string, Set<number>>();
+    for (const t of targets) {
+      if (!t.dbFile || t.excludedGenIndices.length === 0) continue;
+      let set = byDb.get(t.dbFile);
+      if (!set) {
+        set = new Set<number>();
+        byDb.set(t.dbFile, set);
+      }
+      for (const idx of t.excludedGenIndices) {
+        set.add(idx);
+      }
+    }
+    if (byDb.size === 0) return false;
+
+    let removedAny = false;
+    const matchesTarget = (ev: LedgerEvent): boolean => {
+      if (!ev.db_file || typeof ev.generation_index !== 'number' || !Number.isSafeInteger(ev.generation_index)) {
+        return false;
+      }
+      const set = byDb.get(ev.db_file);
+      return Boolean(set && set.has(ev.generation_index));
+    };
+
+    const keysToRemove: Array<{ key: string; legacyKey?: string }> = [];
+    for (const [key, ev] of this.usageLedgerEvents.entries()) {
+      if (matchesTarget(ev)) {
+        keysToRemove.push({ key, legacyKey: ev.legacy_event_key });
+      }
+    }
+    for (const [key, ev] of this.pendingLedgerEvents.entries()) {
+      if (matchesTarget(ev)) {
+        this.pendingLedgerEvents.delete(key);
+        removedAny = true;
+        if (ev.legacy_event_key) {
+          const oldSet = this.legacyKeyIndex.get(ev.legacy_event_key);
+          if (oldSet) {
+            oldSet.delete(key);
+            if (oldSet.size === 0) this.legacyKeyIndex.delete(ev.legacy_event_key);
+          }
+          delete this.rateLocks[ev.legacy_event_key];
+        }
+        delete this.rateLocks[key];
+      }
+    }
+    for (const { key, legacyKey } of keysToRemove) {
+      this.deleteLedgerEventFromMap(key);
+      this.pendingLedgerEvents.delete(key);
+      delete this.rateLocks[key];
+      if (legacyKey) delete this.rateLocks[legacyKey];
+      removedAny = true;
+    }
+    if (removedAny) {
+      this.usageLedgerDirty = this.pendingLedgerEvents.size > 0;
+    }
+    return removedAny;
+  }
+
+  private async purgePendingForkedClones(): Promise<void> {
+    if (this.pendingForkedClonePurges.size === 0) return;
+    if (this.ledgerUnavailable || this.archivedUnavailable || this.ledgerCorrupt) return;
+    await this.runSerializedLedgerSave(async () => {
+      if (this.pendingForkedClonePurges.size === 0) return;
+      if (this.ledgerUnavailable || this.archivedUnavailable || this.ledgerCorrupt) return;
+      const targets: Array<{ dbFile: string; excludedGenIndices: number[] }> = [];
+      for (const [dbFile, indices] of this.pendingForkedClonePurges.entries()) {
+        if (indices.size > 0) {
+          targets.push({ dbFile, excludedGenIndices: [...indices] });
+        }
+      }
+      if (targets.length === 0) {
+        this.pendingForkedClonePurges.clear();
+        return;
+      }
+      try {
+        const removedFromMemory = this.removeForkedClonesFromMemory(targets);
+        const res = await this.ledger.purgeForkedClones(targets);
+        for (const target of targets) {
+          const set = this.pendingForkedClonePurges.get(target.dbFile);
+          if (!set) continue;
+          for (const idx of target.excludedGenIndices) {
+            set.delete(idx);
+          }
+          if (set.size === 0) {
+            this.pendingForkedClonePurges.delete(target.dbFile);
+          }
+        }
+        if (removedFromMemory || res.deleted > 0) {
+          this.cachedSummariesByAccount.clear();
+          this.lastAggregationKeysByAccount.clear();
+          this.snapshots.clear();
+        }
+      } catch {
+        this.storageWarnings.add(bt('usage.warn.ledger_save_failed'));
+        this.ledgerUnavailable = true;
+      }
+    });
+  }
+
   private async saveUsageLedger(billingPricesOverride?: Record<string, ApiPricingEntry>): Promise<void> {
     if (!this.usageLedgerDirty) return;
     if (this.ledgerUnavailable || this.archivedUnavailable) return;
@@ -1079,11 +1199,15 @@ export class UsageStatsManager {
       while (cursor < activePaths.length) {
         const p = activePaths[cursor++]!;
         const res = await this.scanDatabaseEvents(p, true).catch(() => null);
-        if (res && res.events.length > 0) {
-          captured += res.events.length;
+        if (res) {
+          this.recordExcludedForkedClones(p, res.excludedForkedGenIndices);
+          if (res.events.length > 0) {
+            captured += res.events.length;
+          }
         }
       }
     }));
+    await this.purgePendingForkedClones();
     if (this.usageLedgerDirty) {
       await this.saveUsageLedger();
     }
@@ -1124,6 +1248,7 @@ export class UsageStatsManager {
       const st = await lstat(dbPath).catch(() => null);
       if (!st || !st.isFile() || st.isSymbolicLink()) continue;
       const res = await this.scanDatabaseEvents(dbPath, true);
+      this.recordExcludedForkedClones(dbPath, res.excludedForkedGenIndices);
       if (res.hasError || res.usedCached || res.skippedLargeRecords > 0) {
         throw new Error(bt('usage.err.archive_db_failed', { name: basename(dbPath), error: res.error || bt('usage.err.cannot_read') }));
       }
@@ -1147,6 +1272,7 @@ export class UsageStatsManager {
         await this.saveRateLocks();
         this.rateLocksDirty = false;
       }
+      await this.purgePendingForkedClones();
       await this.saveUsageLedger(rawPricing);
       if (this.largeLedger) await this.ledger.aggregate({ prices: rawPricing, environments: this.onlineRemoteEnvironments, remoteSyncRevision: this.remoteSyncRevision, accounts: this.knownAccounts, now: Math.floor(Date.now() / 1000) });
       if (this.ledgerUnavailable) throw Error(bt('usage.err.archive_not_persisted'));
@@ -1490,12 +1616,15 @@ export class UsageStatsManager {
     events: GenerationEvent[];
     generationsScanned: number;
     skippedLargeRecords: number;
+    excludedForkedGenIndices?: number[];
     hasError?: boolean;
     error?: string;
     usedCached?: boolean;
     cacheHit?: boolean;
   }> {
-    return scanDatabaseEventsWithContext(this.scanContext(), dbPath, bypassCache, signal);
+    const res = await scanDatabaseEventsWithContext(this.scanContext(), dbPath, bypassCache, signal);
+    this.recordExcludedForkedClones(dbPath, res.excludedForkedGenIndices);
+    return res;
   }
 
   /** Privacy-preserving request rows: metrics only, no database paths or conversation content. */
@@ -1722,6 +1851,7 @@ export class UsageStatsManager {
         const cachedEntry = this.fileCache.get(p);
         const bypassFileCache = Boolean(cachedEntry && !isFileCacheEntryReusable(cachedEntry));
         const res = await this.scanDatabaseEvents(p, bypassFileCache, signal);
+        this.recordExcludedForkedClones(p, res.excludedForkedGenIndices);
         if (!res.cacheHit) allCacheHits = false;
         if (this.largeLedger && !this.ledgerUnavailable) {
           if (!res.cacheHit || !this.largeLedgerBaselinePresent) {
@@ -1800,6 +1930,7 @@ export class UsageStatsManager {
       }
 
       await this.loadUsageLedger();
+      await this.purgePendingForkedClones();
     }
     if (this.autoRemotePricingSync && Date.now() >= this.nextAutoSyncAt) {
       void this.syncRemotePricing().catch(() => {});

@@ -26,6 +26,17 @@ export interface DiscoveredDbStat {
   at: number;
 }
 
+export type UsageWorkerScanner = (
+  req: { dbPath: string },
+  signal?: AbortSignal
+) => Promise<
+  Awaited<ReturnType<typeof runUsageDbScanInWorker>> & {
+    trajectoryType?: number;
+    forkStepIndex?: number;
+    forkParentCascadeId?: string;
+  }
+>;
+
 export interface UsageScanContext {
   discoveredStats: Map<string, DiscoveredDbStat>;
   fileCache: Map<string, FileCacheEntry>;
@@ -35,6 +46,7 @@ export interface UsageScanContext {
   loadUsageLedger: () => Promise<void>;
   upsertLedger: (event: LedgerEvent) => void;
   getLedgerEvent: (eventKey: string) => LedgerEvent | undefined;
+  scanDbWorker?: UsageWorkerScanner;
 }
 
 export interface StepLinkCandidate {
@@ -274,6 +286,7 @@ export async function scanDatabaseEvents(ctx: UsageScanContext, dbPath: string, 
   events: GenerationEvent[];
   generationsScanned: number;
   skippedLargeRecords: number;
+  excludedForkedGenIndices?: number[];
   hasError?: boolean;
   error?: string;
   usedCached?: boolean;
@@ -303,6 +316,7 @@ async function scanDatabaseEventsOnce(ctx: UsageScanContext, dbPath: string, byp
   events: GenerationEvent[];
   generationsScanned: number;
   skippedLargeRecords: number;
+  excludedForkedGenIndices?: number[];
   hasError?: boolean;
   error?: string;
   usedCached?: boolean;
@@ -363,7 +377,7 @@ async function scanDatabaseEventsOnce(ctx: UsageScanContext, dbPath: string, byp
     // ignore
   }
 
-  const workerScan = await runUsageDbScanInWorker({ dbPath }, signal);
+  const workerScan = await (ctx.scanDbWorker ?? runUsageDbScanInWorker)({ dbPath }, signal);
   if (!workerScan.ok) {
     const cached = ctx.fileCache.get(dbPath);
     const errText = workerScan.changedDuringRead ? bt('scanner.err.changed_across_batches') : workerScan.error;
@@ -432,6 +446,20 @@ async function scanDatabaseEventsOnce(ctx: UsageScanContext, dbPath: string, byp
     return { events: [], generationsScanned: 0, skippedLargeRecords: 0, hasError: false };
   }
 
+  const forkScan = workerScan as {
+    trajectoryType?: number;
+    forkStepIndex?: number;
+    forkParentCascadeId?: string;
+  };
+  const hasForkCutoff =
+    typeof forkScan.forkParentCascadeId === 'string' &&
+    forkScan.forkParentCascadeId.trim().length > 0 &&
+    typeof forkScan.forkStepIndex === 'number' &&
+    Number.isSafeInteger(forkScan.forkStepIndex) &&
+    forkScan.forkStepIndex >= 0;
+  const forkStepIndex = hasForkCutoff ? forkScan.forkStepIndex! : -1;
+  const excludedForkedGenIndices: number[] = [];
+
   const validTimestamp = (value: number) => Number.isSafeInteger(value) && value >= 946684800 && value <= Date.now() / 1000 + 86400;
   const pendingStepLinks: { event: GenerationEvent; indices: number[]; execution: Buffer | null; usage: Buffer }[] = [];
   for (const row of workerScan.genRows) {
@@ -443,6 +471,17 @@ async function scanDatabaseEventsOnce(ctx: UsageScanContext, dbPath: string, byp
     if (!row.data_blob) continue;
 
     const blob = Buffer.from(row.data_blob.buffer, row.data_blob.byteOffset, row.data_blob.byteLength);
+    let stepIndices: number[] | null | undefined;
+    if (hasForkCutoff) {
+      stepIndices = ProtobufReader.stepIndices(blob);
+      if (stepIndices !== null && stepIndices.length > 0 && stepIndices.every(i => i <= forkStepIndex)) {
+        const genIdx = Number(row.idx);
+        if (Number.isSafeInteger(genIdx) && genIdx >= 0) {
+          excludedForkedGenIndices.push(genIdx);
+        }
+        continue;
+      }
+    }
     const wrapped = ProtobufReader.findField(blob, 1);
     if (!wrapped) continue;
 
@@ -509,7 +548,7 @@ async function scanDatabaseEventsOnce(ctx: UsageScanContext, dbPath: string, byp
       ...(accountType ? { account_type: accountType } : {}),
     };
     if (timestamp === 0) {
-      const indices = ProtobufReader.stepIndices(blob);
+      const indices = stepIndices !== undefined ? stepIndices : ProtobufReader.stepIndices(blob);
       if (indices !== null) {
         pendingStepLinks.push({ event: eventObj, indices, execution: ProtobufReader.findField(blob, 4), usage });
       }
@@ -589,5 +628,12 @@ async function scanDatabaseEventsOnce(ctx: UsageScanContext, dbPath: string, byp
   });
   if (!hasError) ctx.markFileCacheDirty();
 
-  return { events, generationsScanned, skippedLargeRecords, hasError, error: timeError };
+  return {
+    events,
+    generationsScanned,
+    skippedLargeRecords,
+    ...(excludedForkedGenIndices.length > 0 ? { excludedForkedGenIndices } : {}),
+    hasError,
+    error: timeError,
+  };
 }
