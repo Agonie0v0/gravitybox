@@ -1066,6 +1066,13 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
           </main>
         </div>
         <div data-testid="orchestrator-model-row"><span id="outside-model-row-text">Orchestrator Model</span></div>
+        <div role="menu">
+          <div role="menuitem"><span>Gemini 4 Carbon</span> <span id="effort-row-suffix">Medium</span></div>
+          <div role="menuitem"><span id="effort-low">Low</span></div>
+          <div role="menuitem"><span id="effort-medium">Medium</span></div>
+          <div role="menuitem"><span id="effort-high">High</span></div>
+          <div role="menuitem"><span id="effort-xhigh">Extra High</span></div>
+        </div>
       `;
       const baseDict = JSON.parse(await readFile(join(root, 'dict/base.json'), 'utf8'));
       await cdp.evaluate(`document.body.innerHTML=${JSON.stringify(html)}`);
@@ -1079,6 +1086,11 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
       assert.equal(await text(cdp, '#orch-trigger'), 'Settings');
       assert.equal(await text(cdp, '#exec-trigger'), 'Settings');
       assert.equal(await text(cdp, '#outside-model-row-text'), 'Orchestrator Model');
+      assert.equal(await text(cdp, '#effort-row-suffix'), 'Medium');
+      assert.equal(await text(cdp, '#effort-low'), 'Low');
+      assert.equal(await text(cdp, '#effort-medium'), 'Medium');
+      assert.equal(await text(cdp, '#effort-high'), 'High');
+      assert.equal(await text(cdp, '#effort-xhigh'), 'Extra High');
     } finally {
       cdp?.close();
       if (target?.targetId) await browserCommand('Target.closeTarget', { targetId: target.targetId }).catch(error => { chromeErrors += '\nTarget cleanup: ' + error.message; });

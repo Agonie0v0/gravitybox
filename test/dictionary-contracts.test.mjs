@@ -348,6 +348,12 @@ test('P1-37/P1-39：dict/base.json 无首尾空格，HUD 与 engine.js 术语和
   assert.equal(baseDict['Enter'], 'Enter');
   assert.equal(baseDict['Cmd+Enter'], 'Cmd+Enter');
   assert.equal(baseDict['Command+Enter'], 'Command+Enter');
+  assert.equal(baseDict['Low'], 'Low');
+  assert.equal(baseDict['Medium'], 'Medium');
+  assert.equal(baseDict['High'], 'High');
+  assert.equal(baseDict['Extra'], 'Extra');
+  assert.equal(baseDict['Extra High'], 'Extra High');
+  assert.equal(baseDict['Max'], 'Max');
   assert.equal(baseDict['Orchestrator Settings'], '编排器设置');
   assert.equal(baseDict['Orchestrator Model'], '编排器模型');
   assert.equal(baseDict['Executor Model'], '执行器模型');
@@ -357,6 +363,12 @@ test('P1-37/P1-39：dict/base.json 无首尾空格，HUD 与 engine.js 术语和
   assert.equal(classifyCoverage('Enter', 'Enter'), 'preserved');
   assert.equal(classifyCoverage('Cmd+Enter', 'Cmd+Enter'), 'preserved');
   assert.equal(classifyCoverage('Command+Enter', 'Command+Enter'), 'preserved');
+  assert.equal(classifyCoverage('Low', 'Low'), 'preserved');
+  assert.equal(classifyCoverage('Medium', 'Medium'), 'preserved');
+  assert.equal(classifyCoverage('High', 'High'), 'preserved');
+  assert.equal(classifyCoverage('Extra', 'Extra'), 'preserved');
+  assert.equal(classifyCoverage('Extra High', 'Extra High'), 'preserved');
+  assert.equal(classifyCoverage('Max', 'Max'), 'preserved');
 
   const untrimmed = [];
   for (const [k, v] of Object.entries(baseDict)) {
