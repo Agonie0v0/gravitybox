@@ -301,6 +301,7 @@ class FakeShadowRoot {
       '#lbl-cache-saved',
       '#val-cache-saved',
       '#pop-ctx-prefix',
+      '#pop-ctx-role',
       '#pop-ctx-pct',
       '#pop-ctx-capacity',
       '#pop-ctx-track',
@@ -2368,8 +2369,12 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
       assert.equal(inst.shadow.querySelector('#hud-txt-context').textContent, '91%');
       assert.equal(
         inst.shadow.querySelector('#pop-ctx-prefix').textContent,
-        lang === 'en' ? 'Current Context · Exec · Hydrogen ' : '当前上下文 · 执行 · Hydrogen '
+        lang === 'en' ? 'Current Context · Hydrogen ' : '当前上下文 · Hydrogen '
       );
+      const popRole = inst.shadow.querySelector('#pop-ctx-role');
+      assert.equal(popRole.hasAttribute('hidden'), false);
+      assert.equal(popRole.classList.contains('is-role-executor'), true);
+      assert.equal(popRole.textContent, lang === 'en' ? 'Exec' : '执行');
       assert.equal(
         inst.shadow.querySelector('#lbl-ctx-peak').textContent,
         lang === 'en' ? 'Model Peak Context' : '当前模型峰值'
@@ -2378,12 +2383,13 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
       assert.equal(inst.shadow.querySelector('#hud-ctx-stages-wrap').hasAttribute('hidden'), false);
       assert.equal(
         inst.shadow.querySelector('#lbl-ctx-stages').textContent,
-        lang === 'en' ? 'Models in Session' : '本对话曾用模型'
+        lang === 'en' ? 'Prior Model Context' : '曾用模型上下文'
       );
       const listHtml = inst.shadow.querySelector('#hud-ctx-stages-list').innerHTML;
-      assert.equal(listHtml.includes(lang === 'en' ? 'Plan · Carbon' : '规划 · Carbon'), true);
+      assert.equal(listHtml.includes('<span class="hud-stage-label">Carbon</span>'), true);
+      assert.equal(listHtml.includes(lang === 'en' ? 'class="hud-role-badge is-role-planner">Plan<' : 'class="hud-role-badge is-role-planner">规划<'), true);
       assert.equal(listHtml.includes('90.2% · 462K / 512K'), true);
-      assert.equal(listHtml.includes(lang === 'en' ? 'Exec · Hydrogen' : '执行 · Hydrogen'), false, 'Option A 底部列表不得重复渲染当前活跃模型');
+      assert.equal(listHtml.includes('<span class="hud-stage-label">Hydrogen</span>'), false, 'Option A 底部列表不得重复渲染当前活跃模型');
       assert.equal(listHtml.includes('class="hud-stage-badge"'), false, 'Option A 底部列表不应出现当前活跃徽章');
       assert.equal(listHtml.includes('class="hud-stage-label"'), true);
     }
@@ -2505,18 +2511,21 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
       const inst = renderWithLang(historyMetrics, lang);
       assert.equal(
         inst.shadow.querySelector('#pop-ctx-prefix').textContent,
-        lang === 'en' ? 'Current Context · Plan · Carbon ' : '当前上下文 · 规划 · Carbon '
+        lang === 'en' ? 'Current Context · Carbon ' : '当前上下文 · Carbon '
       );
+      const popRole = inst.shadow.querySelector('#pop-ctx-role');
+      assert.equal(popRole.hasAttribute('hidden'), false);
+      assert.equal(popRole.classList.contains('is-role-planner'), true);
+      assert.equal(popRole.textContent, lang === 'en' ? 'Plan' : '规划');
       assert.equal(
         inst.shadow.querySelector('#lbl-ctx-stages').textContent,
-        lang === 'en' ? 'Models in Session' : '本对话曾用模型'
+        lang === 'en' ? 'Prior Model Context' : '曾用模型上下文'
       );
       const listHtml = inst.shadow.querySelector('#hud-ctx-stages-list').innerHTML;
       assert.equal(listHtml.includes(lang === 'en' ? 'Exec Stage' : '执行阶段'), true);
       assert.equal(listHtml.includes(lang === 'en' ? 'Pending' : '待介入'), true);
       assert.equal(listHtml.includes('hud-ctx-history-title'), false, '统一列表不应再渲染二次 history 标题');
-      assert.equal(listHtml.includes('Plan · Carbon'), false, 'Option A 底部列表不得重复渲染当前活跃规划模型');
-      assert.equal(listHtml.includes('规划 · Carbon'), false, 'Option A 底部列表不得重复渲染当前活跃规划模型');
+      assert.equal(listHtml.includes('<span class="hud-stage-label">Carbon</span>'), false, 'Option A 底部列表不得重复渲染当前活跃规划模型');
       assert.equal(listHtml.includes('<span class="hud-stage-label">Hydrogen (High)</span>'), true);
       assert.equal(listHtml.includes('<span class="hud-stage-label">3.8 Flash (High)</span>'), true);
       assert.equal(listHtml.includes('<span class="hud-stage-label">Sonnet 4.6</span>'), true);
@@ -2595,8 +2604,11 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
       const pendingInst = renderWithLang(pendingOnlyMetrics, lang);
       assert.equal(
         pendingInst.shadow.querySelector('#pop-ctx-prefix').textContent,
-        lang === 'en' ? 'Current Context · Plan · Carbon ' : '当前上下文 · 规划 · Carbon '
+        lang === 'en' ? 'Current Context · Carbon ' : '当前上下文 · Carbon '
       );
+      const pendingRole = pendingInst.shadow.querySelector('#pop-ctx-role');
+      assert.equal(pendingRole.hasAttribute('hidden'), false);
+      assert.equal(pendingRole.textContent, lang === 'en' ? 'Plan' : '规划');
       assert.equal(
         pendingInst.shadow.querySelector('#lbl-ctx-stages').textContent,
         lang === 'en' ? 'Pending Model' : '待切换模型'
@@ -2615,6 +2627,7 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
         bareInst.shadow.querySelector('#pop-ctx-prefix').textContent,
         lang === 'en' ? 'Current Context ' : '当前上下文 '
       );
+      assert.equal(bareInst.shadow.querySelector('#pop-ctx-role').hasAttribute('hidden'), true);
     }
 
     // 4. 验证渲染阶段的模型名 XSS 防护转义
@@ -3051,13 +3064,15 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
         nonOrchInst.shadow.querySelector('#pop-ctx-prefix').textContent,
         lang === 'en' ? 'Current Context · Hydrogen ' : '当前上下文 · Hydrogen '
       );
+      assert.equal(nonOrchInst.shadow.querySelector('#pop-ctx-role').hasAttribute('hidden'), true);
       assert.equal(
         nonOrchInst.shadow.querySelector('#lbl-ctx-stages').textContent,
-        lang === 'en' ? 'Models in Session' : '本对话曾用模型'
+        lang === 'en' ? 'Prior Model Context' : '曾用模型上下文'
       );
       const nonOrchListHtml = nonOrchInst.shadow.querySelector('#hud-ctx-stages-list').innerHTML;
       assert.equal(nonOrchListHtml.includes('Opus 5.5 (Medium)'), true);
-      assert.equal(nonOrchListHtml.includes(lang === 'en' ? 'Plan · Carbon' : '规划 · Carbon'), true);
+      assert.equal(nonOrchListHtml.includes('<span class="hud-stage-label">Carbon</span>'), true);
+      assert.equal(nonOrchListHtml.includes(lang === 'en' ? 'class="hud-role-badge is-role-planner">Plan<' : 'class="hud-role-badge is-role-planner">规划<'), true);
       assert.equal(nonOrchListHtml.includes('Hydrogen (High)'), false, '非 Orchestrator 下半区必须剔除当前已激活模型防重复');
       assert.equal(
         nonOrchListHtml.includes(

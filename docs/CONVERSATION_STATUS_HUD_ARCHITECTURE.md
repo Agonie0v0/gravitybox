@@ -67,7 +67,7 @@ Token 账本仅从步骤用量累计一次。生成记录用于匹配计时和�
 
 ## 多模型与 Orchestrator 统一列表合同 (Option A)
 
-- **顶部激活模型呈现**：展开“当前上下文”卡片时，当前活跃模型仅在卡片顶部标题（`#pop-ctx-prefix`）呈现；当活跃阶段在 Orchestrator 中担任 `planner` 或 `executor` 且具备有效模型短名时，顶部前缀保留角色标识（`当前上下文 · 规划 · {model}` / `当前上下文 · 执行 · {model}`，英文 `Current Context · Plan · {model}` / `Current Context · Exec · {model}`），普通模型展示 `当前上下文 · {model}` / `Current Context · {model}`。
+- **顶部激活模型呈现**：展开“当前上下文”卡片时，当前活跃模型仅在卡片顶部标题呈现（`#pop-ctx-prefix` 展示 `当前上下文 · {model}` / `Current Context · {model}`）；当活跃阶段在 Orchestrator 中担任 `planner` 或 `executor` 且具备有效模型短名时，紧随 `#pop-ctx-prefix` 右侧通过微型角色胶囊 `#pop-ctx-role` 展示 `规划` / `执行`（英文 `Plan` / `Exec`），避免双中点拼接并保证单行防折行。
 - **底部统一非活跃列表**：底部列表（`#hud-ctx-stages-list`）严格仅展示非活跃模型（`!stage.isActive`），不再重复列出当前活跃模型；取消独立 `Orchestrator 上下文` 分组标题与列表内二次 `history` 分隔标题，全部非活跃模型按平铺统一列表展示。
-- **分区标题收敛**：当全部可见非活跃阶段均尚无实测用量（`hasUsageData !== true`）时，分区标题（`#lbl-ctx-stages`）展示为“待切换模型 / Pending Model”；只要存在至少一个具备实测用量的非活跃模型，统一展示为“本对话曾用模型 / Models in Session”。
-- **物理模型去重与角色保留**：按物理 `modelId` 做 1:1 去重（待介入的 Orchestrator 阶段槽位直接吸收同 `modelId` 历史步骤并保留 `planner`/`executor` 角色），列表中每个曾经在 Orchestrator 中担任 `planner` / `executor` 的模型均保留 `规划 · ` / `执行 · `（`Plan · ` / `Exec · `）前缀。
+- **分区标题收敛**：当全部可见非活跃阶段均尚无实测用量（`hasUsageData !== true`）时，分区标题（`#lbl-ctx-stages`）展示为“待切换模型 / Pending Model”；只要存在至少一个具备实测用量的非活跃模型，统一展示为“曾用模型上下文 / Prior Model Context”。
+- **物理模型去重与角色保留**：按物理 `modelId` 做 1:1 去重（待介入的 Orchestrator 阶段槽位直接吸收同 `modelId` 历史步骤并保留 `planner`/`executor` 角色），列表中每个曾经在 Orchestrator 中担任 `planner` / `executor` 的具名模型在模型名右侧渲染 `.hud-role-badge` 角色胶囊（无具名模型的待介入占位保留“规划阶段 / 执行阶段”）。

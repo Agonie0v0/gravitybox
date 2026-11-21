@@ -1600,6 +1600,8 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
         fullTag: sr.querySelector('#hud-ctx-model-full').textContent.trim(),
         ctxPct: sr.querySelector('#hud-txt-context').textContent.trim(),
         popPrefix: sr.querySelector('#pop-ctx-prefix').textContent,
+        popRole: sr.querySelector('#pop-ctx-role')?.textContent,
+        popRoleVisible: !sr.querySelector('#pop-ctx-role')?.hasAttribute('hidden'),
         stagesTitle: sr.querySelector('#lbl-ctx-stages')?.textContent,
         stageCount: stageItems.length,
         stageTexts: stageItems.map(el => el.textContent.replace(/\\s+/g, ' ').trim()),
@@ -1613,12 +1615,14 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
     assert.equal(dualBrowserCheck.shortDisplay, 'none');
     assert.equal(dualBrowserCheck.fullTag, 'Hydrogen');
     assert.equal(dualBrowserCheck.ctxPct, '91%');
-    assert.equal(dualBrowserCheck.popPrefix, '当前上下文 · 执行 · Hydrogen ');
-    assert.equal(dualBrowserCheck.stagesTitle, '本对话曾用模型');
+    assert.equal(dualBrowserCheck.popPrefix, '当前上下文 · Hydrogen ');
+    assert.equal(dualBrowserCheck.popRoleVisible, true);
+    assert.equal(dualBrowserCheck.popRole, '执行');
+    assert.equal(dualBrowserCheck.stagesTitle, '曾用模型上下文');
     assert.equal(dualBrowserCheck.stageCount, 1, 'Option A 底部列表仅保留非活跃模型');
-    assert.match(dualBrowserCheck.stageTexts[0], /规划 · Carbon.*90\.2% · 462K \/ 512K/);
+    assert.match(dualBrowserCheck.stageTexts[0], /Carbon\s*规划.*90\.2% · 462K \/ 512K/);
 
-    // 6b. 312px 上下文卡片真实布局校验：验证 Option A 顶部角色前缀、统一“本对话曾用模型”单列表（无二次 history 标题）、312px 头部零重叠零裁切与长模型名下压缩徽章防裁切
+    // 6b. 344px 上下文卡片真实布局校验：验证顶部单行防折行（标题与容量徽章同一行）、微胶囊角色标、统一“曾用模型上下文”单列表与长模型名下压缩徽章防裁切
     const checkLongStageLayout = async ({ activeDisplayName, activeShortLabel, activeCompactLabel = 'H', activeRole = 'executor', nonActiveDisplayName }) => {
       await main.evaluate(`(() => {
         const mgr = globalThis.__GRAVITYBOX_HUD_V1__?.manager;
@@ -1668,25 +1672,30 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
         const pop = sr?.querySelector('#hud-popover-context');
         const stageLabel = sr?.querySelector('#hud-ctx-stages-list .hud-stage-item:not(.is-pending) .hud-stage-label');
         if (!pop || pop.hasAttribute('hidden') || !stageLabel) return false;
-        return Math.round(pop.getBoundingClientRect().width) === 312;
+        return Math.round(pop.getBoundingClientRect().width) === 344;
       })()`));
       return await main.evaluate(`(() => {
         const sr = document.querySelector('#__gravitybox_hud_host__').shadowRoot;
         const popCtx = sr.querySelector('#hud-popover-context');
         const popInner = popCtx.querySelector('.hud-popover-inner');
+        const titleEl = popCtx.querySelector('.hud-popover-title');
         const prefixEl = sr.querySelector('#pop-ctx-prefix');
+        const roleEl = sr.querySelector('#pop-ctx-role');
         const pctEl = sr.querySelector('#pop-ctx-pct');
         const capEl = sr.querySelector('#pop-ctx-capacity');
         const targetItem = sr.querySelector('#hud-ctx-stages-list .hud-stage-item:not(.is-pending)');
         const nameEl = targetItem?.querySelector('.hud-stage-name');
         const labelEl = targetItem?.querySelector('.hud-stage-label');
+        const itemRoleEl = targetItem?.querySelector('.hud-role-badge');
         const compEl = targetItem?.querySelector('.hud-stage-compaction');
         const valEl = targetItem?.querySelector('.hud-stage-val');
         const historyTitle = sr.querySelector('#hud-ctx-stages-list .hud-ctx-history-title');
         const pendingItem = sr.querySelector('#hud-ctx-stages-list .hud-stage-item.is-pending');
         const popRect = popCtx.getBoundingClientRect();
         const innerRect = popInner.getBoundingClientRect();
+        const titleRect = titleEl.getBoundingClientRect();
         const prefixRect = prefixEl.getBoundingClientRect();
+        const roleRect = roleEl && !roleEl.hasAttribute('hidden') ? roleEl.getBoundingClientRect() : null;
         const pctRect = pctEl.getBoundingClientRect();
         const capRect = capEl.getBoundingClientRect();
         const nameRect = nameEl.getBoundingClientRect();
@@ -1697,10 +1706,14 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
           popWidth: Math.round(popRect.width),
           innerOverflowX: popInner.scrollWidth > popInner.clientWidth,
           popPrefix: prefixEl.textContent,
-          headerZeroOverlap: !overlaps(prefixRect, pctRect) && !overlaps(prefixRect, capRect) && !overlaps(pctRect, capRect),
+          popRoleText: roleEl?.textContent ?? '',
+          popRoleVisible: Boolean(roleEl && !roleEl.hasAttribute('hidden')),
+          headerSingleLine: Math.abs(titleRect.top - capRect.top) < 8 && Math.abs(prefixRect.top - capRect.top) < 8,
+          headerZeroOverlap: !overlaps(prefixRect, pctRect) && !overlaps(prefixRect, capRect) && !overlaps(pctRect, capRect) && (!roleRect || (!overlaps(prefixRect, roleRect) && !overlaps(roleRect, pctRect) && !overlaps(roleRect, capRect))),
           headerInsideBounds:
             prefixRect.left >= innerRect.left - 0.5 &&
             prefixRect.right <= innerRect.right + 0.5 &&
+            (!roleRect || roleRect.right <= innerRect.right + 0.5) &&
             pctRect.right <= innerRect.right + 0.5 &&
             capRect.right <= innerRect.right + 0.5,
           stagesTitle: sr.querySelector('#lbl-ctx-stages')?.textContent,
@@ -1709,6 +1722,7 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
           stageCount: sr.querySelectorAll('#hud-ctx-stages-list .hud-stage-item').length,
           pendingText: pendingItem?.textContent.replace(/\\s+/g, ' ').trim(),
           labelText: labelEl?.textContent,
+          itemRoleText: itemRoleEl?.textContent ?? '',
           compText: compEl?.textContent,
           compWidth: compRect?.width ?? 0,
           compRight: compRect?.right ?? 0,
@@ -1725,17 +1739,21 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
       activeRole: 'planner',
       nonActiveDisplayName: 'Hydrogen (High)',
     });
-    assert.equal(layoutStd.popWidth, 312);
-    assert.equal(layoutStd.innerOverflowX, false, '312px 上下文弹窗不得产生横向滚动条或溢出');
-    assert.equal(layoutStd.popPrefix, '当前上下文 · 规划 · Carbon ');
-    assert.equal(layoutStd.headerZeroOverlap, true, '312px 弹窗顶部前缀、百分比与容量徽章不得重叠');
-    assert.equal(layoutStd.headerInsideBounds, true, '312px 弹窗顶部元素不得超出内边距边界');
-    assert.equal(layoutStd.stagesTitle, '本对话曾用模型');
+    assert.equal(layoutStd.popWidth, 344);
+    assert.equal(layoutStd.innerOverflowX, false, '344px 上下文弹窗不得产生横向滚动条或溢出');
+    assert.equal(layoutStd.popPrefix, '当前上下文 · Carbon ');
+    assert.equal(layoutStd.popRoleVisible, true);
+    assert.equal(layoutStd.popRoleText, '规划');
+    assert.equal(layoutStd.headerSingleLine, true, '344px 弹窗顶部标题与容量徽章必须单行对齐不折行');
+    assert.equal(layoutStd.headerZeroOverlap, true, '344px 弹窗顶部前缀、角色徽章、百分比与容量徽章不得重叠');
+    assert.equal(layoutStd.headerInsideBounds, true, '344px 弹窗顶部元素不得超出内边距边界');
+    assert.equal(layoutStd.stagesTitle, '曾用模型上下文');
     assert.equal(layoutStd.historyTitle, null, '统一单列表不应渲染二次 history 标题');
     assert.equal(layoutStd.activeInListCount, 0, 'Option A 底部列表不得包含当前活跃模型');
     assert.equal(layoutStd.stageCount, 2);
     assert.match(layoutStd.pendingText, /执行阶段.*待介入/);
-    assert.equal(layoutStd.labelText, '执行 · Hydrogen (High)');
+    assert.equal(layoutStd.labelText, 'Hydrogen (High)');
+    assert.equal(layoutStd.itemRoleText, '执行');
     assert.equal(layoutStd.compText, '2');
     assert.ok(layoutStd.compWidth > 0 && layoutStd.compWidth <= 20, '阶段压缩数字圆圈徽章必须保持紧凑单圆/小胶囊宽度');
     assert.ok(layoutStd.compRight <= layoutStd.nameRight + 0.5, `压缩徽章不得超出 .hud-stage-name 右边界 (${layoutStd.compRight} <= ${layoutStd.nameRight})`);
@@ -1747,12 +1765,16 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
       activeRole: 'executor',
       nonActiveDisplayName: 'Very Long Hydrogen Preview (High Thinking)',
     });
-    assert.equal(layoutLong.popWidth, 312);
-    assert.equal(layoutLong.innerOverflowX, false, '长模型名下 312px 上下文弹窗不得横向溢出');
-    assert.equal(layoutLong.popPrefix, '当前上下文 · 执行 · Very Long Hydrogen Preview ');
-    assert.equal(layoutLong.headerZeroOverlap, true, '长模型名下顶部前缀、百分比与容量徽章不得重叠');
+    assert.equal(layoutLong.popWidth, 344);
+    assert.equal(layoutLong.innerOverflowX, false, '长模型名下 344px 上下文弹窗不得横向溢出');
+    assert.equal(layoutLong.popPrefix, '当前上下文 · Very Long Hydrogen Preview ');
+    assert.equal(layoutLong.popRoleVisible, true);
+    assert.equal(layoutLong.popRoleText, '执行');
+    assert.equal(layoutLong.headerSingleLine, true, '长模型名下 344px 弹窗顶部仍应单行省略不折行');
+    assert.equal(layoutLong.headerZeroOverlap, true, '长模型名下顶部前缀、角色徽章、百分比与容量徽章不得重叠');
     assert.equal(layoutLong.headerInsideBounds, true, '长模型名下顶部元素不得超出内边距边界');
-    assert.equal(layoutLong.labelText, '执行 · Very Long Hydrogen Preview (High Thinking)');
+    assert.equal(layoutLong.labelText, 'Very Long Hydrogen Preview (High Thinking)');
+    assert.equal(layoutLong.itemRoleText, '执行');
     assert.equal(layoutLong.compText, '2');
     assert.ok(layoutLong.compRight <= layoutLong.nameRight + 0.5, `长模型名下压缩徽章不得被裁切 (${layoutLong.compRight} <= ${layoutLong.nameRight})`);
     assert.ok(layoutLong.compRight <= layoutLong.valLeft, `长模型名下压缩徽章不得与右侧数值重叠 (${layoutLong.compRight} <= ${layoutLong.valLeft})`);

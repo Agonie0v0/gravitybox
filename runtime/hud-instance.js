@@ -21,7 +21,7 @@ import {
 const POPOVER_WIDTHS = {
   session: 296,
   tokens: 296,
-  context: 312,
+  context: 344,
 };
 
 function isRawNumber(value) {
@@ -1342,6 +1342,7 @@ export class HudInstance {
           <div class="hud-popover-header">
             <span class="hud-popover-title">
               <span class="hud-popover-title-regular" id="pop-ctx-prefix">${this.t('popCtxPrefix')}</span>
+              <span class="hud-role-badge" id="pop-ctx-role" hidden></span>
               <span class="hud-popover-title-strong" id="pop-ctx-pct">0%</span>
             </span>
             <span class="hud-popover-badge-muted" id="pop-ctx-capacity">— / —</span>
@@ -2510,15 +2511,22 @@ export class HudInstance {
     const hasActiveRole = activeRole === 'planner' || activeRole === 'executor';
     let popCtxPrefixText = this.t('popCtxPrefix');
     if (hasTelemetry && (showMultiModel || hasActiveRole) && validShortLabel) {
-      const headerModelLabel =
-        activeRole === 'planner'
-          ? this.t('stageRolePlanner', { model: validShortLabel })
-          : activeRole === 'executor'
-          ? this.t('stageRoleExecutor', { model: validShortLabel })
-          : validShortLabel;
-      popCtxPrefixText = this.t('popCtxPrefixWithModel', { model: headerModelLabel });
+      popCtxPrefixText = this.t('popCtxPrefixWithModel', { model: validShortLabel });
     }
     setTxt('#pop-ctx-prefix', popCtxPrefixText);
+    const popRoleEl = q('#pop-ctx-role');
+    if (popRoleEl) {
+      if (hasTelemetry && validShortLabel && (activeRole === 'planner' || activeRole === 'executor')) {
+        popRoleEl.textContent =
+          activeRole === 'planner' ? this.t('stageRolePlannerBadge') : this.t('stageRoleExecutorBadge');
+        popRoleEl.className = `hud-role-badge is-role-${activeRole}`;
+        popRoleEl.removeAttribute('hidden');
+      } else {
+        popRoleEl.textContent = '';
+        popRoleEl.className = 'hud-role-badge';
+        popRoleEl.setAttribute('hidden', '');
+      }
+    }
     setTxt('#pop-ctx-pct', `${ctxPctPrefix}${formatPopoverPercent(contextRatio, c.usedRatioFormatted)}`);
     const capacityText = isRawNumber(c.capacityTokens) && c.capacityTokens > 0
       ? `${c.isFallbackCapacity ? '~' : ''}${formatDetailCompactNumber(c.capacityTokens)}` : '—';
@@ -2769,15 +2777,22 @@ export class HudInstance {
       const shortModel = hasNamedStageShort
         ? rawStageShort
         : String(stage.modelDisplayName || stage.modelId || '—');
+      const hasRoleBadge =
+        hasNamedStageShort && (stage.role === 'planner' || stage.role === 'executor');
+      const roleBadgeText = hasRoleBadge
+        ? stage.role === 'planner'
+          ? this.t('stageRolePlannerBadge')
+          : this.t('stageRoleExecutorBadge')
+        : '';
       const stageTitle =
         stage.role === 'planner'
           ? !hasNamedStageShort
             ? (this.locale === 'en' ? 'Plan Stage' : '规划阶段')
-            : this.t('stageRolePlanner', { model: shortModel })
+            : shortModel
           : stage.role === 'executor'
           ? !hasNamedStageShort
             ? this.t('stageRoleExecutorPending')
-            : this.t('stageRoleExecutor', { model: shortModel })
+            : shortModel
           : formatConciseStageModelName(stage.modelDisplayName || shortModel);
 
       let valText;
@@ -2841,6 +2856,13 @@ export class HudInstance {
         labelSpan.textContent = stageTitle;
         nameEl.appendChild(labelSpan);
 
+        if (hasRoleBadge) {
+          const roleBadge = doc.createElement('span');
+          roleBadge.className = `hud-role-badge is-role-${stage.role}`;
+          roleBadge.textContent = roleBadgeText;
+          nameEl.appendChild(roleBadge);
+        }
+
         if (isActive) {
           const badge = doc.createElement('span');
           badge.className = 'hud-stage-badge';
@@ -2878,6 +2900,9 @@ export class HudInstance {
         item.appendChild(track);
         nodes.push(item);
       } else {
+        const roleBadgeHtml = hasRoleBadge
+          ? `<span class="hud-role-badge is-role-${escapeHudHtml(stage.role)}">${escapeHudHtml(roleBadgeText)}</span>`
+          : '';
         const badgeHtml = isActive
           ? `<span class="hud-stage-badge">${escapeHudHtml(this.t('stageActiveBadge'))}</span>`
           : '';
@@ -2891,7 +2916,7 @@ export class HudInstance {
         htmlParts.push(
           `<div class="${itemClasses}"${slotAttr}${compAttr}>` +
             `<div class="hud-stage-head">` +
-              `<span class="hud-stage-name"><span class="hud-stage-dot" aria-hidden="true"></span><span class="hud-stage-label">${escapeHudHtml(stageTitle)}</span>${badgeHtml}${compBadgeHtml}</span>` +
+              `<span class="hud-stage-name"><span class="hud-stage-dot" aria-hidden="true"></span><span class="hud-stage-label">${escapeHudHtml(stageTitle)}</span>${roleBadgeHtml}${badgeHtml}${compBadgeHtml}</span>` +
               `<span class="hud-stage-val">${escapeHudHtml(valText)}</span>` +
             `</div>` +
             `<div class="hud-stage-bar-track"><div class="hud-stage-bar-fill" data-stage-ratio="${ratioClamped}" style="width:${barWidthPct}%;background-color:${barColor}"></div></div>` +

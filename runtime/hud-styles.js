@@ -50,6 +50,10 @@ export const HUD_STYLES_CSS = `
   --hud-compaction-danger-fg: #FFFFFF;
   --hud-compaction-danger-border: transparent;
   --hud-compaction-danger-shadow: 0 1px 2px rgba(185, 28, 28, 0.30), inset 0 0.5px 0 rgba(255, 255, 255, 0.24);
+  --hud-role-planner-bg: rgba(99, 102, 241, 0.12);
+  --hud-role-planner-fg: #4f46e5;
+  --hud-role-executor-bg: rgba(14, 165, 233, 0.12);
+  --hud-role-executor-fg: #0284c7;
 
   /* 骨架屏扫描动效 Tokens (Light) */
   --hud-skeleton-base: rgba(10, 10, 12, 0.04);
@@ -113,6 +117,10 @@ export const HUD_STYLES_CSS = `
   --hud-compaction-danger-fg: #FFFFFF;
   --hud-compaction-danger-border: transparent;
   --hud-compaction-danger-shadow: 0 1px 3px rgba(239, 68, 68, 0.36), inset 0 0.5px 0 rgba(255, 255, 255, 0.26);
+  --hud-role-planner-bg: rgba(129, 140, 248, 0.18);
+  --hud-role-planner-fg: #a5b4fc;
+  --hud-role-executor-bg: rgba(56, 189, 248, 0.16);
+  --hud-role-executor-fg: #7dd3fc;
 
   /* 骨架屏扫描动效 Tokens (Dark) */
   --hud-skeleton-base: rgba(255, 255, 255, 0.05);
@@ -842,6 +850,62 @@ export const HUD_STYLES_CSS = `
   font-weight: 600;
   color: var(--hud-text-primary);
   font-variant-numeric: tabular-nums;
+}
+
+#hud-popover-context .hud-popover-header {
+  flex-wrap: nowrap;
+  gap: 6px;
+}
+
+#hud-popover-context .hud-popover-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 4px;
+  flex-wrap: nowrap;
+}
+
+#hud-popover-context #pop-ctx-prefix {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#hud-popover-context #pop-ctx-pct,
+#hud-popover-context #pop-ctx-capacity {
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.hud-role-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 4.5px;
+  border-radius: 4px;
+  background-color: var(--hud-badge-bg);
+  color: var(--hud-text-secondary);
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  flex-shrink: 0;
+}
+
+.hud-role-badge[hidden] {
+  display: none !important;
+}
+
+.hud-role-badge.is-role-planner {
+  background-color: var(--hud-role-planner-bg);
+  color: var(--hud-role-planner-fg);
+}
+
+.hud-role-badge.is-role-executor {
+  background-color: var(--hud-role-executor-bg);
+  color: var(--hud-role-executor-fg);
 }
 
 .hud-popover-badge {
