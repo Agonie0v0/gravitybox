@@ -432,6 +432,7 @@ describe('HUD raw 数值精度与缺值展示', () => {
       assert.equal(text('#val-ttft-latest'), languageMode === 'en' ? '1.24s' : '1.24 秒');
       assert.equal(text('#lbl-tps-latest'), languageMode === 'en' ? 'Latest Step TPS' : '最近一步 TPS');
       assert.equal(text('#val-tps-latest'), '171 tok/s');
+      assert.equal(instance.shadow.querySelector('#row-session-compactions'), null);
       assert.equal(text('#val-turn-dur'), languageMode === 'en' ? '18s' : '18秒');
       assert.equal(text('#val-ttft'), languageMode === 'en' ? '3.85s' : '3.85 秒');
       assert.equal(text('#val-model-dur'), languageMode === 'en' ? '22m28s' : '22分28秒');
@@ -484,6 +485,7 @@ describe('HUD raw 数值精度与缺值展示', () => {
       }, languageMode);
       assert.equal(zeroComp.instance.shadow.querySelector('#hud-compaction-badge').hasAttribute('hidden'), true);
       assert.equal(zeroComp.text('#hud-compaction-badge'), '');
+      assert.equal(zeroComp.instance.shadow.querySelector('#row-session-compactions'), null);
       assert.equal(zeroComp.instance.shadow.querySelector('.capsule-context').classList.contains('has-compaction'), false);
       assert.equal(zeroComp.text('#hud-txt-session .hud-turns'), languageMode === 'en' ? '1.5KT ' : '1.5K 轮 ');
       assert.equal(zeroComp.text('#pop-session-badge'), languageMode === 'en' ? '1.5K turns 2.5M steps' : '1.5K 轮 2.5M 步');
@@ -2771,7 +2773,7 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
     });
 
     for (const lang of ['zh', 'en']) {
-      // A. 当前活跃 Carbon 自身 0 次压缩：底部会话胶囊仍显示总压缩次数 6 (danger)，但 #val-ctx-peak 不得误挂历史模型压缩后缀
+      // A. 当前活跃 Carbon/Neon 自身 0 次压缩：常驻胶囊必须隐藏徽标（不得误挂搭档/历史模型压缩数），会话总压缩数 6 展示于对话统计弹窗
       const instZeroActive = new HudInstance(`ctx-stage-comp-0-${lang}`, { languageMode: lang });
       instZeroActive.shadow = new FakeShadowRoot('open', null);
       instZeroActive.shadow.innerHTML = instZeroActive.buildHudHtml();
@@ -2779,9 +2781,18 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
       instZeroActive.applyMetricsToDom(payload0);
 
       const sessionBadge = instZeroActive.shadow.querySelector('#hud-compaction-badge');
-      assert.equal(sessionBadge.hasAttribute('hidden'), false);
-      assert.equal(sessionBadge.getAttribute('data-compaction-tier'), 'danger');
-      assert.equal(sessionBadge.textContent, '6');
+      assert.equal(sessionBadge.hasAttribute('hidden'), true, '当前展示模型未压缩时，常驻胶囊不得显示其他模型的压缩徽标');
+      assert.equal(sessionBadge.textContent, '');
+      assert.equal(instZeroActive.shadow.querySelector('.capsule-context').classList.contains('has-compaction'), false);
+      assert.equal(
+        instZeroActive.shadow.querySelector('.capsule-context').getAttribute('aria-label').includes(lang === 'en' ? 'Compacted' : '已压缩'),
+        false
+      );
+      assert.equal(instZeroActive.shadow.querySelector('#row-session-compactions'), null);
+      assert.equal(
+        instZeroActive.shadow.querySelector('#hud-popover-session').getAttribute('data-exact-summary').includes('compactions=6'),
+        true
+      );
       assert.equal(
         instZeroActive.shadow.querySelector('#val-ctx-peak').textContent,
         '256K tok',
@@ -2850,12 +2861,15 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
       assert.equal(findByClass(stageNodes[3], 'hud-stage-compaction')?.getAttribute('data-compaction-tier'), 'danger');
       assert.equal(findByClass(stageNodes[3], 'hud-stage-compaction')?.textContent, '3');
 
-      // B. 当前活跃 Carbon 自身发生 2 次压缩：#val-ctx-peak 仅展示当前模型的 2 次，且活跃行同时并存“当前”与数字圆圈“2”
+      // B. 当前活跃模型自身发生 2 次压缩：常驻胶囊与 #val-ctx-peak 均仅反映当前模型的 2 次，而对话统计弹窗展示全会话总计 8 次
       const instActiveComp = new HudInstance(`ctx-stage-comp-2-${lang}`, { languageMode: lang });
       instActiveComp.shadow = new FakeShadowRoot('open', null);
       instActiveComp.shadow.innerHTML = instActiveComp.buildHudHtml();
       const payload2 = buildMultiCompMetrics(2);
       instActiveComp.applyMetricsToDom(payload2);
+      assert.equal(instActiveComp.shadow.querySelector('#hud-compaction-badge').hasAttribute('hidden'), false);
+      assert.equal(instActiveComp.shadow.querySelector('#hud-compaction-badge').getAttribute('data-compaction-tier'), 'warn');
+      assert.equal(instActiveComp.shadow.querySelector('#hud-compaction-badge').textContent, '2');
       assert.equal(
         instActiveComp.shadow.querySelector('#val-ctx-peak').textContent,
         lang === 'en' ? '256K tok (2x compacted)' : '256K tok (已压缩 2 次)'
@@ -3050,5 +3064,116 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
 
     subInst.dispose();
     splitMain.dispose();
+  });
+
+  it('2.34.0 DOM data-context-window 探针、收窄 MutationObserver、syncAllSessions 刷新代际防竞态与通用阶段短名', () => {
+    const observedCalls = [];
+    const OrigMO = globalThis.MutationObserver;
+    const origDoc = globalThis.document;
+    globalThis.MutationObserver = class {
+      constructor(cb) { this.cb = cb; }
+      observe(target, opts) { observedCalls.push({ target, opts }); }
+      disconnect() {}
+    };
+    const fakeBody = { nodeType: 1, querySelectorAll: () => [] };
+    const fakeDocEl = { nodeType: 1 };
+    globalThis.document = {
+      body: fakeBody,
+      documentElement: fakeDocEl,
+      hidden: false,
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    try {
+      const bridgeEvents = [];
+      const manager = new AntigravityHudManager({
+        onBridgeEvent: (e) => bridgeEvents.push(e),
+      });
+      manager.start();
+
+      // 1. 验证 document.body subtree MutationObserver 不再监听全子树 style / class
+      const subtreeObs = observedCalls.find((c) => c.target === fakeBody && c.opts?.subtree === true);
+      assert.ok(subtreeObs, '应存在 document.body subtree observer');
+      assert.equal(subtreeObs.opts.attributeFilter.includes('style'), false, 'subtree observer 不得监听 style');
+      assert.equal(subtreeObs.opts.attributeFilter.includes('class'), false, 'subtree observer 不得监听 class');
+      assert.equal(subtreeObs.opts.attributeFilter.includes('data-context-window'), true);
+
+      // 2. 验证 data-context-window 解析与非品牌硬编码触发器解析
+      assert.equal(manager.parseContextWindowTokens('512k'), 512_000);
+      assert.equal(manager.parseContextWindowTokens('1M'), 1_000_000);
+      assert.equal(manager.parseContextWindowTokens('256000'), 256_000);
+      assert.equal(manager.parseContextWindowTokens('invalid'), undefined);
+
+      const mockTrigger = new FakeElement('button');
+      mockTrigger.setAttribute('data-testid', 'model-selector-trigger');
+      mockTrigger.setAttribute('data-context-window', '512k');
+      mockTrigger.setAttribute('aria-label', 'Select model, current: Orchestrator Gemini 4 Neon High');
+      mockTrigger.textContent = 'Orchestrator Gemini 4 Neon High';
+      const mockView = new FakeElement('div');
+      mockView.appendChild(mockTrigger);
+      assert.equal(manager.resolveActiveModel(mockView, 1), 'Orchestrator Gemini 4 Neon High');
+      assert.equal(manager.resolveActiveModelCapacity(mockView, 1), 512_000);
+
+      // 3. 验证 syncAllSessions 推进 sessionRevision 防止旧在途轮询包倒灌覆盖
+      const inst = new HudInstance('pane-sync', {
+        paneSlotId: 'pane-sync',
+        onBridgeEvent: (e) => bridgeEvents.push(e),
+        allocateRevision: () => manager.allocateSessionRevision(),
+      });
+      const host = new FakeElement('div');
+      const shadow = host.attachShadow({ mode: 'open' });
+      host.shadowRoot = shadow;
+      inst.host = host;
+      inst.shadow = shadow;
+      shadow.innerHTML = inst.buildHudHtml();
+      const rev1 = inst.switchConversation('conv-sync-race', 'Orchestrator Gemini 4 Neon High', false, false, 0, null, 'idle', 512_000);
+      assert.equal(bridgeEvents.at(-1)?.modelCapacity, 512_000);
+      assert.equal(inst.updateMetrics({
+        conversationId: 'conv-sync-race',
+        paneSlotId: 'pane-sync',
+        sessionRevision: rev1,
+        metricsSequence: 200,
+        updatedAt: Date.now(),
+        context: { hasUsageData: true, usedTokens: 90_000, capacityTokens: 512_000, usedRatio: 90_000 / 512_000 },
+      }), true);
+
+      manager.instances.set('pane-sync', inst);
+      manager.reconcileMounts = () => {};
+      manager.syncAllSessions();
+      const rev2 = inst.getSessionRevision();
+      assert.ok(rev2 > rev1, 'syncAllSessions 必须推进单调 sessionRevision');
+      // 旧代际在途乱序旧包 (rev1, seq=150) 必须被严格拒收
+      assert.equal(inst.updateMetrics({
+        conversationId: 'conv-sync-race',
+        paneSlotId: 'pane-sync',
+        sessionRevision: rev1,
+        metricsSequence: 150,
+        updatedAt: Date.now(),
+        context: { hasUsageData: true, usedTokens: 10_000, capacityTokens: 512_000, usedRatio: 10_000 / 512_000 },
+      }), false, '旧代际在途轮询包不得覆盖最新状态');
+      assert.equal(inst.lastMetrics.context.usedTokens, 90_000);
+
+      // 4. 验证通用阶段短名（含 Orchestrator 前缀、第三方厂商前缀与未知待介入规划阶段中性文案）
+      const listEl = new FakeElement('div');
+      inst.renderModelStagesList(
+        listEl,
+        [
+          { slotKey: 'orchestrator:planner_pending', role: 'planner', modelId: 'pending', shortLabel: '', hasUsageData: false, isActive: false },
+          { slotKey: 'model:openai-gpt-5-2', role: 'model', modelId: 'gpt-5.2', modelDisplayName: 'Orchestrator OpenAI GPT-5.2', shortLabel: 'GPT-5.2', hasUsageData: true, isActive: true, usedTokens: 50_000, capacityTokens: 200_000, usedRatio: 0.25 },
+        ],
+        false
+      );
+      assert.match(listEl.innerHTML, /规划阶段/);
+      assert.match(listEl.innerHTML, /GPT-5\.2/);
+      assert.equal(/Orchestrator|OpenAI/.test(listEl.innerHTML), false);
+
+      inst.dispose();
+      manager.dispose();
+    } finally {
+      globalThis.MutationObserver = OrigMO;
+      globalThis.document = origDoc;
+    }
   });
 });

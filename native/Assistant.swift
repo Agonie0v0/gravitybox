@@ -81,6 +81,8 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     var overview: DashboardPage?
     var accountsPage: AccountsPage?
     var usageSelectedPeriod = 0
+    var usageSelectedEnvironment: String = "all"
+    var usageSelectedAccount: String = "all"
     var usageScrollOrigin = NSPoint.zero
     var usagePage: UsagePage?
     var cachePage: CachePage?
@@ -104,6 +106,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     var menuTracking = false
     var cachedUsageReportsByPeriod: [String: [String: Any]] = [:]
     var usageLastFetchTimeByPeriod: [String: Date] = [:]
+    var usageRemoteSyncRevisionByPeriod: [String: Int] = [:]
     var usageInFlightByPeriod: [String: Bool] = [:]
     var usageGenerationByPeriod: [String: Int] = [:]
     var usagePendingForceByPeriod = Set<String>()
@@ -139,6 +142,11 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     var refreshingAccountIds = Set<String>()
     var quotaRefreshError: String?
     var quotaRefreshPollTimer: Timer?
+    var selectedContextKey: String = "local"
+    var userPinnedContext = false
+    var overviewEnvironmentKey: String = "all"
+    var remoteSessions: [[String: Any]] = []
+    var remoteQuotaRefreshing = false
     private var isBreathing = false
     private var breathingMotion: DesignMotion?
     var lastTaskRevision = -1
@@ -147,6 +155,11 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     var reachable = false
     var quotaRefreshTimer: Timer?
     var lastAutoQuotaRefreshTriggerAt: Date = .distantPast
+    var nextScheduledQuotaRefreshAt: Date?
+    var pendingAutoQuotaRefresh = false
+    var workspaceWakeObserver: NSObjectProtocol?
+    var appBecomeActiveObserver: NSObjectProtocol?
+    var lastResetOverdueRefreshByAccount: [String: (signature: String, at: Date)] = [:]
     var quotaStaleThresholdSeconds: TimeInterval {
         let minutes = configuration?.value.quotaRefreshMinutes ?? 0
         return minutes > 15 ? TimeInterval(minutes * 60 + 120) : TimeInterval(15 * 60)
@@ -274,6 +287,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         let launchedByAntigravity = CommandLine.arguments.contains("--launched-by-antigravity")
         if !loginLaunch && !launchedByAntigravity { showPanel() }
         installAntigravityLifecycleObserver()
+        installQuotaScheduleObservers()
         syncLifecycleAgentRegistration()
         // 登录项启动时没有窗口，历史上因此从未创建定时器，菜单栏配额永远不更新。
         configureRefreshTimer()
@@ -707,6 +721,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         controller.view.window?.makeFirstResponder(nil)
         installPopoverMonitors()
         refresh()
+        checkAndTriggerOverdueQuotaRefreshIfNeeded()
     }
 
     func closeMenuPopover(animated: Bool = true) {
@@ -803,7 +818,11 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
                     self.showSettings()
                     return nil
                 case "o":
-                    self.openMainWindowFromMenuPanel(tab: self.menuPanelController?.selectedTab ?? 0, usagePeriod: self.menuPanelController?.selectedPeriod ?? 0)
+                    self.openMainWindowFromMenuPanel(
+                        tab: self.menuPanelController?.selectedTab ?? 0,
+                        usagePeriod: self.menuPanelController?.selectedPeriod ?? 0,
+                        usageEnvironmentId: self.menuPanelController?.selectedEnvironmentId
+                    )
                     return nil
                 case "r":
                     self.menuPanelController?.refreshCurrentTab()
@@ -927,18 +946,25 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         quit()
     }
 
-    func openMainWindowFromMenuPanel(tab: Int, usagePeriod: Int) {
+    func openMainWindowFromMenuPanel(tab: Int, usagePeriod: Int, usageEnvironmentId: String? = nil) {
         closeMenuPopover(animated: false)
         switch tab {
         case 0:
             let targetPeriod = max(0, min(3, usagePeriod))
             usageSelectedPeriod = targetPeriod
+            let resolvedEnv: String? = usageEnvironmentId.map {
+                let t = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                return t.isEmpty ? "all" : t
+            }
+            if let resolvedEnv {
+                usageSelectedEnvironment = resolvedEnv
+            }
             usageScrollOrigin = .zero
             usagePage?.periodSegment.selectedSegment = targetPeriod
+            let hadUsagePage = (usagePage != nil)
             selectPage(2)
-            if let usagePage {
-                usagePage.periodSegment.selectedSegment = targetPeriod
-                usagePage.periodChanged(usagePage.periodSegment)
+            if hadUsagePage, let usagePage {
+                usagePage.applyExternalFilter(period: targetPeriod, environmentId: resolvedEnv)
             }
         case 1:
             selectPage(0)
@@ -1264,6 +1290,8 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
             launchApplicationButton?.setDisplayTitle(L10n.t("sidebar.open_antigravity", fallback: "打开 Antigravity"))
             if let usagePage {
                 usageSelectedPeriod = usagePage.periodSegment.selectedSegment
+                usageSelectedEnvironment = usagePage.selectedEnvironmentId
+                usageSelectedAccount = usagePage.selectedAccountId
                 if let scroll = usagePage.view as? NSScrollView {
                     usageScrollOrigin = scroll.contentView.bounds.origin
                 }
@@ -1315,7 +1343,12 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         let hadContent = !pageHost.subviews.isEmpty
         if index == currentPage && hadContent && !force { return }
         let previousPage = currentPage
-        if let usagePage { usageSelectedPeriod = usagePage.periodSegment.selectedSegment; if let scroll = usagePage.view as? NSScrollView { usageScrollOrigin = scroll.contentView.bounds.origin } }
+        if let usagePage {
+            usageSelectedPeriod = usagePage.periodSegment.selectedSegment
+            usageSelectedEnvironment = usagePage.selectedEnvironmentId
+            usageSelectedAccount = usagePage.selectedAccountId
+            if let scroll = usagePage.view as? NSScrollView { usageScrollOrigin = scroll.contentView.bounds.origin }
+        }
         currentPage = index
         if configuration.value.lastPage != index {
             configuration.value.lastPage = index
@@ -1408,17 +1441,58 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
             content.layer?.transform = CATransform3DIdentity
         }
     }
+    func isEligibleForAutoQuotaRefresh(_ acc: [String: Any]) -> Bool {
+        if acc["disabled"] as? Bool == true { return false }
+        if acc["validation_blocked"] as? Bool == true { return false }
+        if let readiness = acc["credentialReadiness"] as? [String: Any],
+           readiness["state"] as? String == "needs_authorization" { return false }
+        return true
+    }
+
+    func installQuotaScheduleObservers() {
+        #if !NATIVE_UI_TEST
+        if workspaceWakeObserver == nil {
+            workspaceWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.configureQuotaRefreshTimer(preserveSchedule: true)
+                self?.refresh()
+            }
+        }
+        if appBecomeActiveObserver == nil {
+            appBecomeActiveObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.checkAndTriggerOverdueQuotaRefreshIfNeeded()
+            }
+        }
+        #endif
+    }
+
+    func removeQuotaScheduleObservers() {
+        if let observer = workspaceWakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+            workspaceWakeObserver = nil
+        }
+        if let observer = appBecomeActiveObserver {
+            NotificationCenter.default.removeObserver(observer)
+            appBecomeActiveObserver = nil
+        }
+    }
+
     func oldestEnabledAccountQuotaTimestamp() -> TimeInterval? {
         var oldest: TimeInterval? = nil
         var hasEligible = false
         for acc in cachedAccounts {
-            if acc["disabled"] as? Bool == true { continue }
-            if acc["validation_blocked"] as? Bool == true { continue }
-            if let readiness = acc["credentialReadiness"] as? [String: Any],
-               readiness["state"] as? String == "needs_authorization" { continue }
+            guard isEligibleForAutoQuotaRefresh(acc) else { continue }
             hasEligible = true
             let quota = acc["quota"] as? [String: Any]
-            let stamp = QuotaPresentation.number(quota?["last_updated"])
+            let stamp = QuotaPresentation.number(acc["persisted_quota_last_updated"])
+                ?? QuotaPresentation.number(quota?["last_updated"])
                 ?? QuotaPresentation.number(acc["quota_last_updated"])
                 ?? 0
             if stamp <= 0 {
@@ -1432,36 +1506,119 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         }
         return hasEligible ? oldest : nil
     }
+
+    @discardableResult
+    func triggerResetOverdueRefreshIfNeeded(for account: [String: Any], now: Date = Date()) -> Bool {
+        guard !quitting, reachable, !quotaRefreshing, pendingAccountTaskId == nil else { return false }
+        guard isEligibleForAutoQuotaRefresh(account) else { return false }
+        guard let id = account["id"] as? String, !id.isEmpty, !refreshingAccountIds.contains(id) else { return false }
+        let signature = QuotaPresentation.contract(account).overdueResetSignature(at: now)
+        guard !signature.isEmpty else { return false }
+        if let prev = lastResetOverdueRefreshByAccount[id] {
+            let elapsed = now.timeIntervalSince(prev.at)
+            if prev.signature == signature && elapsed < 90.0 { return false }
+            if elapsed < 20.0 { return false }
+        }
+        lastResetOverdueRefreshByAccount[id] = (signature: signature, at: now)
+        refreshSingleAccountQuota(id: id)
+        return true
+    }
+
     func checkAndTriggerOverdueQuotaRefreshIfNeeded() {
-        guard !quitting, reachable, !quotaRefreshing, pendingAccountTaskId == nil,
-              let minutes = configuration?.value.quotaRefreshMinutes,
-              [5, 10, 15, 30, 60].contains(minutes) else { return }
-        guard Date().timeIntervalSince(lastAutoQuotaRefreshTriggerAt) >= 60.0 else { return }
-        if cachedAccounts.isEmpty {
-            if !accountListInFlight && Date().timeIntervalSince(lastAccountListFetchAt) >= 15.0 {
-                fetchAccountList(notifyPage: false)
+        guard !quitting, reachable else { return }
+        let now = Date()
+        let minutes = configuration?.value.quotaRefreshMinutes ?? 0
+        let autoEnabled = [5, 10, 15, 30, 60].contains(minutes)
+
+        if quotaRefreshing || pendingAccountTaskId != nil {
+            if autoEnabled, let scheduledAt = nextScheduledQuotaRefreshAt, now >= scheduledAt {
+                pendingAutoQuotaRefresh = true
             }
             return
         }
-        guard let oldest = oldestEnabledAccountQuotaTimestamp() else { return }
-        let age = oldest > 0 ? Date().timeIntervalSince1970 - oldest : .infinity
-        if age >= TimeInterval(minutes * 60) {
-            lastAutoQuotaRefreshTriggerAt = Date()
-            refreshAccountQuotas()
+
+        if autoEnabled {
+            let interval = TimeInterval(minutes * 60)
+            if cachedAccounts.isEmpty {
+                if !accountListInFlight && now.timeIntervalSince(lastAccountListFetchAt) >= 15.0 {
+                    fetchAccountList(notifyPage: false)
+                }
+                if pendingAutoQuotaRefresh || (nextScheduledQuotaRefreshAt.map { now >= $0 } ?? false) {
+                    if now.timeIntervalSince(lastAutoQuotaRefreshTriggerAt) >= 60.0 {
+                        pendingAutoQuotaRefresh = false
+                        lastAutoQuotaRefreshTriggerAt = now
+                        nextScheduledQuotaRefreshAt = now.addingTimeInterval(interval)
+                        refreshAccountQuotas()
+                    }
+                }
+                return
+            }
+
+            let oldest = oldestEnabledAccountQuotaTimestamp()
+            let age = oldest.map { $0 > 0 ? now.timeIntervalSince1970 - $0 : .infinity } ?? 0
+            let ageDue = oldest != nil && age >= interval
+            let wallDue = nextScheduledQuotaRefreshAt.map { now >= $0 } ?? false
+
+            if pendingAutoQuotaRefresh || ageDue || wallDue {
+                if now.timeIntervalSince(lastAutoQuotaRefreshTriggerAt) >= 60.0 {
+                    pendingAutoQuotaRefresh = false
+                    lastAutoQuotaRefreshTriggerAt = now
+                    nextScheduledQuotaRefreshAt = now.addingTimeInterval(interval)
+                    refreshAccountQuotas()
+                    return
+                }
+            }
+        } else {
+            pendingAutoQuotaRefresh = false
+        }
+
+        // 当任意启用账号出现“重置时间已过”窗口（刚重新进入 5h / 7d 计时周期）且处于可见刷新场景或开启了自动刷新时，主动纠偏单账号配额
+        let shouldAutoCorrectOverdueReset = autoEnabled || menuTracking || isMenuPanelShown || (contentVisible && currentPage <= 1)
+        if shouldAutoCorrectOverdueReset && !cachedAccounts.isEmpty {
+            for acc in cachedAccounts {
+                if triggerResetOverdueRefreshIfNeeded(for: acc, now: now) {
+                    break
+                }
+            }
         }
     }
-    func configureQuotaRefreshTimer() {
+
+    func configureQuotaRefreshTimer(preserveSchedule: Bool = false) {
         quotaRefreshTimer?.invalidate(); quotaRefreshTimer = nil
         guard let configuration, !quitting else { return }
         let minutes = configuration.value.quotaRefreshMinutes
-        guard [5, 10, 15, 30, 60].contains(minutes) else { return }
+        guard [5, 10, 15, 30, 60].contains(minutes) else {
+            nextScheduledQuotaRefreshAt = nil
+            pendingAutoQuotaRefresh = false
+            return
+        }
         let interval = TimeInterval(minutes * 60)
-        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
-            guard let self, self.reachable, !self.quotaRefreshing, self.pendingAccountTaskId == nil else { return }
-            self.lastAutoQuotaRefreshTriggerAt = Date()
+        let now = Date()
+        let targetFireDate: Date
+        if preserveSchedule, let existing = nextScheduledQuotaRefreshAt, existing > now.addingTimeInterval(1.0) {
+            targetFireDate = existing
+        } else if let oldest = oldestEnabledAccountQuotaTimestamp(), oldest > 0 {
+            let aligned = Date(timeIntervalSince1970: oldest).addingTimeInterval(interval)
+            targetFireDate = aligned > now.addingTimeInterval(1.0) ? aligned : now.addingTimeInterval(interval)
+        } else {
+            targetFireDate = now.addingTimeInterval(interval)
+        }
+        nextScheduledQuotaRefreshAt = targetFireDate
+
+        let timer = Timer(fire: targetFireDate, interval: interval, repeats: true) { [weak self] _ in
+            guard let self, !self.quitting else { return }
+            let fireNow = Date()
+            self.nextScheduledQuotaRefreshAt = fireNow.addingTimeInterval(interval)
+            guard self.reachable else { return }
+            guard !self.quotaRefreshing, self.pendingAccountTaskId == nil else {
+                self.pendingAutoQuotaRefresh = true
+                return
+            }
+            self.pendingAutoQuotaRefresh = false
+            self.lastAutoQuotaRefreshTriggerAt = fireNow
             self.refreshAccountQuotas()
         }
-        timer.tolerance = min(15.0, interval * 0.05)
+        timer.tolerance = min(5.0, interval * 0.02)
         RunLoop.main.add(timer, forMode: .common)
         quotaRefreshTimer = timer
         checkAndTriggerOverdueQuotaRefreshIfNeeded()
@@ -1534,7 +1691,12 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
             switch result {
             case .success(let value):
                 self.updateManager.cleanupAfterSuccessfulLaunch()
+                let prevRemoteSyncRevision = self.statusValue.remoteSyncRevision
                 self.reachable = true; self.recoveryAttempts = 0; self.autoRestartAttempts = 0; var raw=value["status"] as? [String:Any] ?? [:];raw["taskRevision"]=value["taskRevision"];raw["runningTasks"]=value["runningTasks"];self.statusValue=self.mergeStatusSnapshot(raw, previous:self.statusValue)
+                if self.statusValue.remoteSyncRevision > prevRemoteSyncRevision {
+                    self.usageLastFetchTimeByPeriod.removeAll()
+                }
+                self.syncRemoteSessionsFromPayload(raw["remoteSessions"] as? [[String: Any]], focusedKey: self.statusValue.focusedContextKey)
                 var taskRevAdvanced = false
                 if let rows=value["tasks"] as? [[String:Any]] {
                     self.taskRows=rows
@@ -1668,9 +1830,13 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
                     if self.reachable && rawTaskRev < self.statusValue.taskRevision { return }
                     let wasReachable = self.reachable
                     let taskChanged = self.statusValue.taskRevision != rawTaskRev
+                    let prevRemoteSyncRevision = self.statusValue.remoteSyncRevision
                     self.reachable = true
                     self.recoveryAttempts = 0
                     self.statusValue = self.mergeStatusSnapshot(raw, previous: self.statusValue)
+                    if self.statusValue.remoteSyncRevision > prevRemoteSyncRevision {
+                        self.usageLastFetchTimeByPeriod.removeAll()
+                    }
                     self.handlePricingRevisionIfChanged()
                     self.updateViews()
                     if !wasReachable || (taskChanged && (self.pendingAccountTaskId != nil || self.quotaRefreshing)) {
@@ -1695,6 +1861,14 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         if raw["pricingRevision"] == nil { merged.pricingRevision = previous.pricingRevision }
         if raw["liveAccountEmail"] == nil { merged.liveAccountEmail = previous.liveAccountEmail }
         if raw["oauthClientConfigured"] == nil { merged.oauthClientConfigured = previous.oauthClientConfigured }
+        if raw["sshWindowsCount"] == nil && raw["sshWindows"] == nil {
+            merged.sshWindowsCount = previous.sshWindowsCount
+            merged.activeSshHosts = previous.activeSshHosts
+        }
+        if raw["focusedContextKey"] == nil { merged.focusedContextKey = previous.focusedContextKey }
+        if raw["remoteObservedVersion"] == nil { merged.remoteObservedVersion = previous.remoteObservedVersion }
+        if raw["remoteSyncRevision"] == nil { merged.remoteSyncRevision = previous.remoteSyncRevision }
+        if raw["remoteSessions"] == nil { merged.remoteSessions = previous.remoteSessions }
         if let target = pendingTranslationTarget {
             merged.translationEnabled = target
             if merged.mode == "debug-port-missing" {
@@ -1714,6 +1888,153 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
             scheduleConfigurationSave()
         }
         return merged
+    }
+
+    func remoteEnvironmentId(for session: [String: Any]) -> String {
+        if let envId = (session["environmentId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !envId.isEmpty {
+            return envId
+        }
+        let rawHost = (session["hostLabel"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let host = rawHost.isEmpty ? "ssh" : rawHost.lowercased()
+        return "host:\(host)"
+    }
+
+    func overviewRemoteEnvironments() -> [(environmentId: String, hostLabel: String, session: [String: Any])] {
+        var order: [String] = []
+        var grouped: [String: (hostLabel: String, session: [String: Any])] = [:]
+        func score(_ s: [String: Any]) -> (Int, Double) {
+            let connectedScore = ((s["state"] as? String) == "connected") ? 1 : 0
+            let focusTs = (s["lastFocusedAt"] as? Double) ?? (s["observedAt"] as? Double) ?? 0
+            return (connectedScore, focusTs)
+        }
+        for row in remoteSessions {
+            let envId = remoteEnvironmentId(for: row)
+            let rawHost = (row["hostLabel"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let host = rawHost.isEmpty ? "SSH" : rawHost
+            if let existing = grouped[envId] {
+                let sNew = score(row)
+                let sOld = score(existing.session)
+                if sNew.0 > sOld.0 || (sNew.0 == sOld.0 && sNew.1 > sOld.1) {
+                    grouped[envId] = (host, row)
+                }
+            } else {
+                order.append(envId)
+                grouped[envId] = (host, row)
+            }
+        }
+        return order.compactMap { id in
+            guard let item = grouped[id] else { return nil }
+            return (environmentId: id, hostLabel: item.hostLabel, session: item.session)
+        }
+    }
+
+    func selectedOverviewRemoteSession() -> [String: Any]? {
+        guard overviewEnvironmentKey.hasPrefix("env:") else { return nil }
+        let targetEnvId = String(overviewEnvironmentKey.dropFirst("env:".count))
+        return overviewRemoteEnvironments().first { $0.environmentId == targetEnvId }?.session
+    }
+
+    func selectOverviewEnvironment(_ environmentKey: String) {
+        let nextKey: String
+        if environmentKey == "local" && !remoteSessions.isEmpty {
+            nextKey = "local"
+        } else if environmentKey.hasPrefix("env:") {
+            let envId = String(environmentKey.dropFirst("env:".count))
+            let exists = overviewRemoteEnvironments().contains { $0.environmentId == envId }
+            nextKey = exists ? environmentKey : "all"
+        } else {
+            nextKey = "all"
+        }
+        overviewEnvironmentKey = nextKey
+        overview?.handleOverviewEnvironmentChanged()
+        updateQuotaRefreshControls()
+    }
+
+    func syncRemoteSessionsFromPayload(_ sessions: [[String: Any]]?, focusedKey: String?, notifyUI: Bool = true) {
+        if let sessions {
+            remoteSessions = sessions
+        }
+        let validKeys = Set(remoteSessions.compactMap { row -> String? in
+            guard let rk = row["remoteKey"] as? String, !rk.isEmpty else { return nil }
+            return "remote:\(rk)"
+        })
+        if selectedContextKey != "local" && !validKeys.contains(selectedContextKey) {
+            selectedContextKey = "local"
+            userPinnedContext = false
+        }
+        if !userPinnedContext {
+            if let focusedKey, validKeys.contains(focusedKey) {
+                selectedContextKey = focusedKey
+            } else if let focusedKey, focusedKey == "local" {
+                selectedContextKey = "local"
+            } else if selectedContextKey != "local" && !validKeys.contains(selectedContextKey) {
+                selectedContextKey = "local"
+            }
+        }
+        let validEnvKeys = Set(overviewRemoteEnvironments().map { "env:\($0.environmentId)" })
+        if remoteSessions.isEmpty {
+            overviewEnvironmentKey = "all"
+        } else if overviewEnvironmentKey.hasPrefix("env:") && !validEnvKeys.contains(overviewEnvironmentKey) {
+            overviewEnvironmentKey = "all"
+        }
+        if notifyUI {
+            overview?.syncRemoteSessionsUI()
+            menuPanelController?.syncFromAssistant()
+        }
+    }
+
+    func selectedRemoteSession() -> [String: Any]? {
+        guard selectedContextKey.hasPrefix("remote:") else { return nil }
+        let targetKey = String(selectedContextKey.dropFirst("remote:".count))
+        return remoteSessions.first { ($0["remoteKey"] as? String) == targetKey }
+    }
+
+    func selectQuotaContext(_ contextKey: String, userInitiated: Bool = true) {
+        let nextKey: String
+        if contextKey.hasPrefix("remote:") {
+            let rk = String(contextKey.dropFirst("remote:".count))
+            let exists = remoteSessions.contains { ($0["remoteKey"] as? String) == rk }
+            nextKey = exists ? contextKey : "local"
+        } else {
+            nextKey = "local"
+        }
+        selectedContextKey = nextKey
+        userPinnedContext = userInitiated && nextKey != "local" ? true : (userInitiated ? true : userPinnedContext)
+        if nextKey == "local" && !userInitiated {
+            userPinnedContext = false
+        }
+        overview?.syncRemoteSessionsUI()
+        menuPanelController?.syncFromAssistant()
+        updateQuotaRefreshControls()
+    }
+
+    func refreshRemoteQuota(remoteKey: String? = nil, completion: (() -> Void)? = nil) {
+        guard !remoteQuotaRefreshing, reachable else { completion?(); return }
+        remoteQuotaRefreshing = true
+        updateQuotaRefreshControls()
+        menuPanelController?.syncHeaderRefreshState()
+        var payload: [String: Any] = ["command": "remote_quota_refresh"]
+        if let remoteKey, !remoteKey.isEmpty {
+            payload["remoteKey"] = remoteKey
+        }
+        bridge.send(payload) { [weak self] response in
+            guard let self else { return }
+            self.remoteQuotaRefreshing = false
+            if case .success(let value) = response {
+                if let rev = value["remoteObservedVersion"] as? Int {
+                    self.statusValue.remoteObservedVersion = rev
+                }
+                if let focused = value["focusedContextKey"] as? String {
+                    self.statusValue.focusedContextKey = focused
+                }
+                if let sessions = value["remoteSessions"] as? [[String: Any]] {
+                    self.syncRemoteSessionsFromPayload(sessions, focusedKey: self.statusValue.focusedContextKey)
+                }
+            }
+            self.updateQuotaRefreshControls()
+            self.menuPanelController?.syncFromAssistant()
+            completion?()
+        }
     }
     func presentSheetAlert(_ alert: NSAlert, completion: @escaping (NSApplication.ModalResponse) -> Void) {
         if isMenuPanelShown {

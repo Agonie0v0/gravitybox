@@ -24,6 +24,20 @@ enum ModelDisplayName {
         return [:]
     }()
 
+    private static func formatStandaloneGemini(_ strippedValue: String) -> String? {
+        guard let match = standaloneGeminiRegex?.firstMatch(
+            in: strippedValue,
+            range: NSRange(location: 0, length: (strippedValue as NSString).length)
+        ) else {
+            return nil
+        }
+        let ns = strippedValue as NSString
+        let ver = ns.substring(with: match.range(at: 1))
+        let rawSlug = ns.substring(with: match.range(at: 2))
+        let code = rawSlug.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
+        return "Gemini \(ver) \(code)"
+    }
+
     static func name(_ identifier: String) -> String {
         let names = catalogNames
         let trimmed = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -32,8 +46,12 @@ enum ModelDisplayName {
         if let name = names[value] { return name }
         if value.hasPrefix("google/"), let name = names[String(value.dropFirst(7))] { return name }
 
-        // Strip reasoning effort qualifiers in brackets (e.g. "(High)", "(Medium)", "(Low)", "(Extra Low)") while keeping non-effort qualifiers like "(Thinking)"
-        let effortSet: Set<String> = ["high", "medium", "low", "extra low", "extra-low"]
+        // Strip reasoning effort qualifiers in brackets (e.g. "(High)", "(XHigh)", "(Extra)", "(Medium)", "(Low)", "(Extra Low)") while keeping non-effort qualifiers like "(Thinking)" or "(Orchestrator)"
+        let effortSet: Set<String> = [
+            "high", "medium", "low", "extra low", "extra-low",
+            "xhigh", "extra", "extra high", "extra-high",
+            "minimal", "max"
+        ]
         for brackets in [(" (", ")"), ("（", "）"), ("(", ")")] {
             if trimmed.hasSuffix(brackets.1), let openRange = trimmed.range(of: brackets.0, options: .backwards) {
                 let baseRaw = String(trimmed[..<openRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -48,19 +66,25 @@ enum ModelDisplayName {
             }
         }
 
-        // Strip preview/thinking suffixes from known models, while keeping raw response_model variant suffixes (such as -n, -exp-a, -tiered, -trial, -high, -medium, -low) verbatim
+        // Strip preview/thinking/extra suffixes from known models, while keeping raw response_model variant suffixes (such as -n, -exp-a, -tiered, -trial, -high, -medium, -low) verbatim
         let suffixTable: [(String, String?)] = [
+            ("-extra-high-thinking", "Thinking"),
             ("-extra-low-thinking", "Thinking"),
+            ("-xhigh-thinking", "Thinking"),
+            ("-extra-thinking", "Thinking"),
             ("-high-thinking", "Thinking"),
             ("-medium-thinking", "Thinking"),
             ("-low-thinking", "Thinking"),
+            ("-minimal-thinking", "Thinking"),
+            ("-max-thinking", "Thinking"),
             ("-thinking", "Thinking"),
+            ("-extra", nil),
             ("-preview", "Preview")
         ]
         let strippedValue = value.hasPrefix("google/") ? String(value.dropFirst(7)) : value
         for (suffix, label) in suffixTable where strippedValue.hasSuffix(suffix) {
             let baseKey = String(strippedValue.dropLast(suffix.count))
-            if let baseName = names[baseKey] {
+            if let baseName = names[baseKey] ?? formatStandaloneGemini(baseKey) {
                 if let label = label, !label.isEmpty {
                     return "\(baseName) \(label)"
                 }
@@ -69,12 +93,8 @@ enum ModelDisplayName {
         }
 
         // Auto-format clean standalone Gemini 4+ codename models (e.g. gemini-4-carbon, gemini-4-neon)
-        if let match = standaloneGeminiRegex?.firstMatch(in: strippedValue, range: NSRange(location: 0, length: (strippedValue as NSString).length)) {
-            let ns = strippedValue as NSString
-            let ver = ns.substring(with: match.range(at: 1))
-            let rawSlug = ns.substring(with: match.range(at: 2))
-            let code = rawSlug.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
-            return "Gemini \(ver) \(code)"
+        if let formatted = formatStandaloneGemini(strippedValue) {
+            return formatted
         }
         return trimmed
     }
@@ -252,7 +272,7 @@ enum InterfaceText {
 
 enum ModelUsageFold {
     private static let thinkingSuffixRegex = try? NSRegularExpression(
-        pattern: "(?:-(?:extra-high|extra-low|xhigh|high|medium|low|minimal|thinking|max))+$",
+        pattern: "(?:-(?:extra-high|extra-low|xhigh|extra|high|medium|low|minimal|thinking|max))+$",
         options: [.caseInsensitive]
     )
 

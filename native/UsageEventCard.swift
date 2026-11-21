@@ -2,6 +2,8 @@ import Cocoa
 
 final class UsageEventCard: NSView {
     let modelLabel = text("", size: 12, weight: .semibold)
+    let envBadge = pillBadge("", color: Design.secondary)
+    let accountLabel = text("", size: 10.5, color: Design.secondary)
     let timeLabel = text("", size: 10.5, color: Design.secondary)
     let inputLabel = text("", size: 11, weight: .medium)
     let outputLabel = text("", size: 11, weight: .medium)
@@ -39,10 +41,32 @@ final class UsageEventCard: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         identifier = NSUserInterfaceItemIdentifier("usage-event-card")
+        modelLabel.maximumNumberOfLines = 1
         modelLabel.lineBreakMode = .byTruncatingMiddle
-        modelLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        modelLabel.cell?.wraps = false
+        modelLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        modelLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(700), for: .horizontal)
         modelLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        envBadge.label.font = .systemFont(ofSize: 10, weight: .semibold)
+        envBadge.label.lineBreakMode = .byTruncatingTail
+        envBadge.isHidden = true
+        envBadge.toolTip = nil
+        envBadge.setContentHuggingPriority(.required, for: .horizontal)
+        envBadge.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        envBadge.widthAnchor.constraint(lessThanOrEqualToConstant: 150).isActive = true
+
+        accountLabel.maximumNumberOfLines = 1
+        accountLabel.lineBreakMode = .byTruncatingMiddle
+        accountLabel.cell?.wraps = false
+        accountLabel.isHidden = true
+        accountLabel.toolTip = nil
+        accountLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        accountLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        accountLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+
         timeLabel.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+        timeLabel.setContentHuggingPriority(.required, for: .horizontal)
         timeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         timeLabel.setContentCompressionResistancePriority(.required, for: .vertical)
         func metric(_ titleLbl: NSTextField, _ value: NSTextField) -> NSView {
@@ -53,8 +77,10 @@ final class UsageEventCard: NSView {
             row.alignment = .centerY
             return row
         }
-        let heading = horizontal([modelIcon, modelLabel, flexibleSpace(), timeLabel], spacing: 8)
+        let heading = horizontal([modelIcon, modelLabel, envBadge, accountLabel, flexibleSpace(), timeLabel], spacing: 6)
+        heading.setCustomSpacing(8, after: modelIcon)
         heading.alignment = .centerY
+        heading.detachesHiddenViews = true
         let tokens = horizontal([
             metric(inputTitleLabel, inputLabel),
             metric(outputTitleLabel, outputLabel),
@@ -98,6 +124,13 @@ final class UsageEventCard: NSView {
     override func prepareForReuse() {
         super.prepareForReuse()
         hovered = false
+        envBadge.isHidden = true
+        envBadge.toolTip = nil
+        envBadge.setAccessibilityHelp(nil)
+        accountLabel.isHidden = true
+        accountLabel.stringValue = ""
+        accountLabel.toolTip = nil
+        accountLabel.setAccessibilityHelp(nil)
     }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -106,7 +139,7 @@ final class UsageEventCard: NSView {
             hovered = false
         }
     }
-    func configure(_ event: [String:Any], highlight: String = "") {
+    func configure(_ event: [String:Any], highlight: String = "", showLocalEnvironmentBadge: Bool = false) {
         inputTitleLabel.stringValue = L10n.t("usage_event.input")
         outputTitleLabel.stringValue = L10n.t("usage_event.output")
         cacheReadTitleLabel.stringValue = L10n.t("usage_event.cache_read")
@@ -133,5 +166,48 @@ final class UsageEventCard: NSView {
         inputLabel.stringValue = InterfaceText.formatInteger(intVal(event, "input_tokens")); outputLabel.stringValue = InterfaceText.formatInteger(intVal(event, "output_tokens")); cacheLabel.stringValue = InterfaceText.formatInteger(intVal(event, "cached_tokens")); cacheWriteLabel.stringValue = InterfaceText.formatInteger(intVal(event, "cache_write_tokens"))
         if let brand = ModelIcons.brands(for:model).first,let image = ModelIcons.image(brand) { modelIcon.image = image; modelIcon.contentTintColor = ModelIcons.tintColor(for: image) }
         else { modelIcon.image = NSImage(systemSymbolName:"sparkles",accessibilityDescription:nil); modelIcon.contentTintColor = Design.secondary }
+
+        let rawEnvKind = ((event["environment_kind"] as? String) ?? (event["environmentKind"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawEnvId = ((event["environment_id"] as? String) ?? (event["environmentId"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawEnvLabel = ((event["environment_label"] as? String) ?? (event["environmentLabel"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let isSsh = rawEnvKind == "ssh" || rawEnvId.hasPrefix("ssh:")
+        if isSsh {
+            let cleanedHost = UsageFilterSupport.strippedSshPrefix(rawEnvLabel.isEmpty ? rawEnvId : rawEnvLabel)
+            let badgeText = L10n.t("usage_event.env.ssh", ["host": cleanedHost.isEmpty ? rawEnvId : cleanedHost])
+            envBadge.title = badgeText
+            envBadge.tint = Design.blue
+            envBadge.isHidden = false
+        } else if showLocalEnvironmentBadge {
+            envBadge.title = L10n.t("usage_event.env.local")
+            envBadge.tint = Design.secondary
+            envBadge.isHidden = false
+        } else {
+            envBadge.isHidden = true
+        }
+
+        let rawEmail = ((event["account_email"] as? String) ?? (event["accountEmail"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawConfidence = ((event["account_confidence"] as? String) ?? (event["accountConfidence"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !rawEmail.isEmpty {
+            accountLabel.stringValue = rawEmail
+            accountLabel.textColor = Design.secondary
+            accountLabel.setAccessibilityLabel(rawEmail)
+            if rawConfidence == "inferred" {
+                accountLabel.setAccessibilityHelp(L10n.t("usage_event.env.inferred_account_tooltip"))
+            } else {
+                accountLabel.setAccessibilityHelp(nil)
+            }
+            accountLabel.isHidden = false
+        } else if isSsh || rawConfidence == "unknown" {
+            let unattributed = L10n.t("usage_event.env.unattributed_account")
+            accountLabel.stringValue = unattributed
+            accountLabel.textColor = Design.secondary.withAlphaComponent(0.75)
+            accountLabel.setAccessibilityLabel(unattributed)
+            accountLabel.setAccessibilityHelp(nil)
+            accountLabel.isHidden = false
+        } else {
+            accountLabel.stringValue = ""
+            accountLabel.setAccessibilityHelp(nil)
+            accountLabel.isHidden = true
+        }
     }
 }

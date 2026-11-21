@@ -48,12 +48,13 @@ struct AppConfiguration: Codable {
     var accountsCollapsed = false
     var menuSelectedTab = 0
     var menuUsagePeriod = 0
+    var menuUsageEnvironmentId = "all"
     var menuTrendMetric = "tokens"
     var applicationChannel = "stable"
     var appLanguage: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case autoPricingSyncEnabled, hudEnabled, quotaRefreshMinutes, schema, lastPage, navigationVersion, syncAntigravityLifecycle, autoUpdateEnabled, lastCleanedVersion, accountsCollapsed, menuSelectedTab, menuUsagePeriod, menuTrendMetric, applicationChannel, appLanguage
+        case autoPricingSyncEnabled, hudEnabled, quotaRefreshMinutes, schema, lastPage, navigationVersion, syncAntigravityLifecycle, autoUpdateEnabled, lastCleanedVersion, accountsCollapsed, menuSelectedTab, menuUsagePeriod, menuUsageEnvironmentId, menuTrendMetric, applicationChannel, appLanguage
     }
 
     init() {}
@@ -76,6 +77,8 @@ struct AppConfiguration: Codable {
         }
         menuSelectedTab = max(0, min(2, (try? container.decode(Int.self, forKey: .menuSelectedTab)) ?? 0))
         menuUsagePeriod = max(0, min(3, (try? container.decode(Int.self, forKey: .menuUsagePeriod)) ?? 0))
+        let rawMenuEnv = ((try? container.decodeIfPresent(String.self, forKey: .menuUsageEnvironmentId)) ?? "all").trimmingCharacters(in: .whitespacesAndNewlines)
+        menuUsageEnvironmentId = rawMenuEnv.isEmpty ? "all" : rawMenuEnv
         if let rawMetric = try? container.decode(String.self, forKey: .menuTrendMetric), ["tokens", "requests"].contains(rawMetric) {
             menuTrendMetric = rawMetric
         } else {

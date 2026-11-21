@@ -4,7 +4,14 @@
  */
 
 export type HudActivityPhase = 'idle' | 'generating' | 'executing';
-export type HudDataAvailability = 'loading' | 'ready' | 'partial' | 'cached' | 'unavailable';
+export type HudDataAvailability =
+  | 'loading'
+  | 'ready'
+  | 'partial'
+  | 'cached'
+  | 'unavailable'
+  | 'remote_unbridged'
+  | 'remote_stale';
 export type HudCapacitySource = 'explicit' | 'reference' | 'unknown';
 export type HudContextStageRole = 'planner' | 'executor' | 'model';
 
@@ -44,6 +51,10 @@ export interface ConversationHudMetrics {
   metricsSequence?: number;
   /** 数据可信度与可用性状态 */
   availability?: HudDataAvailability;
+  /** 指标来源环境（缺省或 'local' 为本机，'remote' 为 SSH 远程主机） */
+  sourceKind?: 'local' | 'remote';
+  /** 脱敏后的远程主机展示标签 */
+  remoteHostLabel?: string;
   /** 底层数据库/WAL 真实观测毫秒时间戳 (读失败回退旧缓存时不刷新) */
   observedAt?: number | null;
   /** 最近一次成功读取底层数据库的毫秒时间戳 */
@@ -347,6 +358,8 @@ export interface ParsedGenMetadata {
     candidateTokens: number;
   };
   modelEnum?: number;
+  planModelEnum?: number;
+  executionModelEnum?: number;
   responseModel?: string;
   modelDisplayName?: string;
   plannerModelName?: string;
@@ -363,6 +376,15 @@ export interface ParsedGenMetadata {
   streamingDurationSeconds?: number;
 }
 
+/** 从 executor_metadata.data 提取的会话级 Plan&Execute 配置与压缩阈值上限 */
+export interface ParsedExecutorMetadata {
+  planModelEnum?: number;
+  executionModelEnum?: number;
+  plannerModelName?: string;
+  maxContextTokens?: number;
+  checkpointMaxTokenLimit?: number;
+}
+
 /** 前端隔离世界向 Node.js 派发的事件负载 */
 export type HudClientEvent =
   | {
@@ -372,6 +394,7 @@ export type HudClientEvent =
       paneSlotId?: string;
       sessionRevision?: number;
       modelId?: string;
+      modelCapacity?: number;
       isStreaming?: boolean;
       activityPhase?: HudActivityPhase;
       isSubagentRunning?: boolean;
@@ -394,6 +417,7 @@ export type HudClientEvent =
       paneSlotId?: string;
       sessionRevision?: number;
       modelId?: string;
+      modelCapacity?: number;
       isStreaming?: boolean;
       activityPhase?: HudActivityPhase;
       isSubagentRunning?: boolean;
@@ -408,6 +432,7 @@ export type HudClientEvent =
       paneSlotId?: string;
       sessionRevision?: number;
       modelId: string;
+      modelCapacity?: number;
       isStreaming?: boolean;
       activityPhase?: HudActivityPhase;
       isSubagentRunning?: boolean;
@@ -422,6 +447,7 @@ export type HudClientEvent =
       paneSlotId?: string;
       sessionRevision?: number;
       modelId?: string;
+      modelCapacity?: number;
       isStreaming: boolean;
       activityPhase?: HudActivityPhase;
       isSubagentRunning?: boolean;

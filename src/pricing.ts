@@ -1,4 +1,8 @@
-import { normalizeModelId, stripModelProviderPrefix, THINKING_EFFORT_SUFFIX_RE } from './model-identity.js';
+import {
+  normalizeModelId,
+  stripModelProviderPrefix,
+  TIERED_OR_THINKING_EFFORT_SUFFIX_RE,
+} from './model-identity.js';
 import {
   MODEL_PRICES,
   getEffectiveModelPriceAlias,
@@ -210,7 +214,7 @@ export function priceStatus(price: ApiPricing | ApiPricingInterval[], now = Date
 
 const SORTED_DEFAULT_PRICE_KEYS = Object.keys(DEFAULT_API_PRICES).sort((a, b) => b.length - a.length);
 const PRICING_TABLE_SORTED_KEYS_CACHE = new WeakMap<object, readonly string[]>();
-const SUFFIX_VARIANT_RE = /^(?:extra-high|extra-low|xhigh|high|medium|low|minimal|max|thinking|latest|preview|trial|\d{8}|\d{4}-\d{2}-\d{2}|\d{3})(?:-thinking)?(?:-(?:\d{8}|\d{4}-\d{2}-\d{2}|\d{2}-\d{2}))?$/;
+const SUFFIX_VARIANT_RE = /^(?:tiered(?:-(?:extra-high|extra-low|xhigh|extra|high|medium|low|minimal|max|thinking|latest|preview|trial))?|(?:extra-high|extra-low|xhigh|extra|high|medium|low|minimal|max|thinking|latest|preview|trial|\d{8}|\d{4}-\d{2}-\d{2}|\d{3}))(?:-thinking)?(?:-(?:\d{8}|\d{4}-\d{2}-\d{2}|\d{2}-\d{2}))?$/;
 
 function getSortedPricingTableKeys(pricingTable: Record<string, ApiPricingEntry>): readonly string[] {
   if (pricingTable === DEFAULT_API_PRICES) return SORTED_DEFAULT_PRICE_KEYS;
@@ -464,6 +468,18 @@ function isPricedCatalogFlashLiteModel(
   return knownPricedKeys.has(normId) || (Boolean(normKey) && knownPricedKeys.has(normKey));
 }
 
+function isTieredVariantModelId(rawId: string): boolean {
+  const id = stripModelProviderPrefix(String(rawId ?? '')).trim();
+  if (!id) return false;
+  if (
+    /^(?:chat_|tab_)/i.test(id) ||
+    /(?:^|[-_])(?:image|flash[-_]lite|safety[-_]le|control|exp[-_][a-z0-9]+|trial)(?:$|[-_])/i.test(id)
+  ) {
+    return false;
+  }
+  return /(?:^|[-_])tiered(?:$|[-_])/i.test(id);
+}
+
 export function isInternalNonChatModelId(rawId: string): boolean {
   const id = stripModelProviderPrefix(String(rawId ?? '')).trim();
   if (!id) return false;
@@ -488,7 +504,8 @@ export function canonicalActivePricingKeys(
     const normBase = normalizeModelId(baseId);
     const matched = matchPricingKeys(baseId, extraPricingKeys);
     const isPricedFlashLite = isPricedCatalogFlashLiteModel(baseId, matched, knownPricedKeys);
-    if (!baseId || (!effectiveActive.has(normBase) && !isPricedFlashLite && isInternalNonChatModelId(baseId))) continue;
+    const isActiveTieredVariant = isTieredVariantModelId(baseId) && effectiveActive.has(matched);
+    if (!baseId || (!effectiveActive.has(normBase) && !isActiveTieredVariant && !isPricedFlashLite && isInternalNonChatModelId(baseId))) continue;
     if (matched) keys.add(matched);
   }
   if (keys.size === 0) {
@@ -530,6 +547,19 @@ export interface PricingCatalogModelInput {
   disabled?: boolean | null;
   stale?: boolean | null;
   quota_source?: string | null;
+  is_internal?: boolean | null;
+  isInternal?: boolean | null;
+  deprecated?: boolean | null;
+  non_chat_specialized?: boolean | null;
+  nonChatSpecialized?: boolean | null;
+  in_model_selector?: boolean | null;
+  inModelSelector?: boolean | null;
+  model_provider?: string | null;
+  modelProvider?: string | null;
+  max_tokens?: number | null;
+  maxTokens?: number | null;
+  max_output_tokens?: number | null;
+  maxOutputTokens?: number | null;
 }
 
 export interface PricingCatalogSourceInput {
@@ -619,6 +649,7 @@ const UNPRICED_THINKING_SUFFIX_LABELS: Record<string, string> = {
   medium: 'Medium',
   high: 'High',
   xhigh: 'XHigh',
+  extra: 'Extra',
   'extra-high': 'Extra High',
   max: 'Max',
   thinking: 'Thinking',
@@ -630,17 +661,18 @@ const UNPRICED_VARIANT_ORDER: Record<string, number> = {
   Medium: 1,
   High: 2,
   XHigh: 3,
-  'Extra High': 4,
-  'Extra Low': 5,
-  Max: 6,
-  Thinking: 7,
-  Orchestrator: 8,
+  Extra: 4,
+  'Extra High': 5,
+  'Extra Low': 6,
+  Max: 7,
+  Thinking: 8,
+  Orchestrator: 9,
 };
 
 function stripDisplayTierSuffix(displayName: string): string {
   const cleaned = displayName
-    .replace(/\s*[（(]\s*(?:extra[\s-]*high|extra[\s-]*low|xhigh|high|medium|low|minimal|max|thinking)\s*[）)]\s*$/i, '')
-    .replace(/\s+(?:extra[\s-]*high|extra[\s-]*low|xhigh|high|medium|low|minimal|max|thinking)\s*$/i, '')
+    .replace(/\s*[（(]\s*(?:extra[\s-]*high|extra[\s-]*low|xhigh|extra|high|medium|low|minimal|max|thinking)\s*[）)]\s*$/i, '')
+    .replace(/\s+(?:extra[\s-]*high|extra[\s-]*low|xhigh|extra|high|medium|low|minimal|max|thinking)\s*$/i, '')
     .trim();
   return cleaned || displayName;
 }
@@ -662,7 +694,9 @@ function foldUnpricedLiveCandidate(
     };
   }
   if (/^(?:gemini|claude|gpt|o[1-9])/.test(canonicalKey)) {
-    const suffixMatch = canonicalKey.match(/^(.+)-(extra-high|extra-low|xhigh|high|medium|low|minimal|max|thinking)$/i);
+    const suffixMatch = canonicalKey.match(
+      /^(.+?)(?:-tiered)?-(extra-high|extra-low|xhigh|extra|high|medium|low|minimal|max|thinking)$/i
+    );
     if (suffixMatch) {
       const baseKey = suffixMatch[1]!;
       const rawSuffix = suffixMatch[2]!.toLowerCase();
@@ -670,6 +704,13 @@ function foldUnpricedLiveCandidate(
         canonicalKey: baseKey,
         displayName: stripDisplayTierSuffix(rawDisplayName),
         variantLabel: UNPRICED_THINKING_SUFFIX_LABELS[rawSuffix] ?? rawSuffix,
+      };
+    }
+    const bareTieredMatch = canonicalKey.match(/^(.+)-tiered$/i);
+    if (bareTieredMatch) {
+      return {
+        canonicalKey: bareTieredMatch[1]!,
+        displayName: stripDisplayTierSuffix(rawDisplayName),
       };
     }
   }
@@ -719,16 +760,26 @@ function extractCatalogModels(
   for (const m of rawModels) {
     if (!m || typeof m !== 'object') continue;
     if (m.stale === true || m.quota_source === 'carried') continue;
+    if (m.is_internal === true || m.isInternal === true || m.deprecated === true || m.non_chat_specialized === true || m.nonChatSpecialized === true) {
+      continue;
+    }
     const rawId = String(m.model_id ?? m.id ?? m.name ?? m.model_or_alias ?? m.modelOrAlias ?? '').trim();
     if (!rawId) continue;
     const cleaned = normalizeModelId(rawId.replace(/(?:^|[-_])disabled$/i, '').trim())
-      .replace(THINKING_EFFORT_SUFFIX_RE, '');
+      .replace(TIERED_OR_THINKING_EFFORT_SUFFIX_RE, '');
     if (cleaned) siblingNormIds.add(cleaned);
   }
   const parsed: ExtractedCatalogCandidate[] = [];
   for (const m of rawModels) {
     if (!m || typeof m !== 'object') continue;
     if (m.stale === true || m.quota_source === 'carried') continue;
+    const isUpstreamInternal = m.is_internal === true || m.isInternal === true;
+    const isUpstreamDeprecated = m.deprecated === true;
+    const isUpstreamNonChat = m.non_chat_specialized === true || m.nonChatSpecialized === true;
+    if (isUpstreamInternal || isUpstreamDeprecated || isUpstreamNonChat) continue;
+    const rawInSelector = m.in_model_selector ?? m.inModelSelector;
+    const explicitlyExcludedFromSelector = rawInSelector === false;
+    const explicitlyInSelector = rawInSelector === true;
     const rawId = String(m.model_id ?? m.id ?? m.name ?? m.model_or_alias ?? m.modelOrAlias ?? '').trim();
     if (!rawId) continue;
     const hasDisabledSuffix = /(?:^|[-_])disabled$/i.test(rawId);
@@ -744,9 +795,18 @@ function extractCatalogModels(
       : null;
     const initialKey = foundPricing?.key || matchPricingKeys(baseId, extraKeys) || normBase;
     if (!initialKey || FORBIDDEN_CATALOG_KEYS.has(initialKey)) continue;
+    if (explicitlyExcludedFromSelector && !resolvedPricing && !effectiveActiveSet.has(initialKey)) {
+      continue;
+    }
     const isPricedFlashLite = isPricedCatalogFlashLiteModel(baseId, initialKey, knownPricedKeys);
+    const isActiveTieredVariant = isTieredVariantModelId(baseId) && (
+      effectiveActiveSet.has(initialKey) ||
+      Boolean(resolvedPricing) ||
+      explicitlyInSelector
+    );
     if (
       !effectiveActiveSet.has(normBase) &&
+      !isActiveTieredVariant &&
       !isPricedFlashLite &&
       isInternalNonChatModelId(baseId) &&
       !isUserVisiblePreviewChatModel(sourceKind, baseId, normBase, rawDisplayName, feedModelSet)

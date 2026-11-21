@@ -80,7 +80,7 @@ final class AppUpdateManager {
                 return Self.normalizeVersion(ver)
             }
         }
-        return "1.1.3"
+        return "1.2.0"
     }
 
     var currentBuildDisplay: String {
@@ -105,7 +105,7 @@ final class AppUpdateManager {
                 break
             }
         }
-        return buildStr.isEmpty ? "10103" : buildStr
+        return buildStr.isEmpty ? "10200" : buildStr
     }
 
     static func normalizeVersion(_ raw: String) -> String {

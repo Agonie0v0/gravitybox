@@ -282,7 +282,7 @@ final class BackendBridge {
             "maintenance_scan", "maintenance_history", "usage_summary", "usage_events",
             "usage_snapshot_release", "usage_ledger_review", "auto_switch_get",
             "account_recovery_info", "api_pricing_get", "pricing_sync_status",
-            "quota_refresh", "quota_refresh_start"
+            "quota_refresh", "quota_refresh_start", "remote_quota_refresh"
         ]
         let isReadOnlyAutoSwitch = command == "auto_switch_best" && (payload["execute"] as? Bool != true)
         let useControlThrottle = readOnlyCommands.contains(command) || isReadOnlyAutoSwitch

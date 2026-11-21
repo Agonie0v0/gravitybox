@@ -1,7 +1,18 @@
 import Cocoa
 import UniformTypeIdentifiers
 
+#if NATIVE_UI_TEST
+var saveUsageJSONTestHook: (([String: Any], String) -> Bool)?
+#endif
+
 func saveUsageJSON(_ report: [String: Any], name: String, window: NSWindow, app: Assistant, onCompletion: ((Bool) -> Void)? = nil) {
+    #if NATIVE_UI_TEST
+    if let hook = saveUsageJSONTestHook {
+        let ok = hook(report, name)
+        onCompletion?(ok)
+        return
+    }
+    #endif
     let panel = NSSavePanel(); panel.allowedContentTypes = [.json]; panel.nameFieldStringValue = name
     panel.beginSheetModal(for: window) { response in
         guard response == .OK, let url = panel.url else {
@@ -33,7 +44,7 @@ func saveUsageJSON(_ report: [String: Any], name: String, window: NSWindow, app:
 typealias PageNumberField = PolicyNumberField
 
 final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSTextFieldDelegate {
-    unowned let app: Assistant
+    weak var app: Assistant?
     let sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 540), styleMask: [.titled], backing: .buffered, defer: false)
     let search = NSSearchField()
     let searchSpinner = NSProgressIndicator()
@@ -51,6 +62,14 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
     private var handlingJumpToPage = false
     var searchDebounce: DispatchWorkItem?
     let period = DesignSegmentedControl(labels: [L10n.t("usage.period.today"), L10n.t("usage.period.7d"), L10n.t("usage.period.30d"), L10n.t("usage.period.all")], trackingMode: .selectOne, target: nil, action: nil)
+    let environmentPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    let accountPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    let filterRow: NSStackView
+    var selectedEnvironmentId: String
+    var selectedAccountId: String
+    private var availableEnvironments: [[String: Any]] = []
+    private var availableAccounts: [[String: Any]] = []
+    private var unattributedRequests = 0
     let status = text(L10n.t("usage_log.loading"), size: 11, color: Design.secondary, wrap: true)
     let previous = button(L10n.t("usage_log.prev_page"), target: nil, action: #selector(previousPage))
     let next = button(L10n.t("usage_log.next_page"), target: nil, action: #selector(nextPage))
@@ -74,8 +93,34 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
             NotificationCenter.default.removeObserver(languageObserver)
         }
     }
-    init(app: Assistant, period selected: String) {
-        self.app = app; super.init()
+    init(app: Assistant, period selected: String, environmentId: String = "all", accountId: String = "all") {
+        self.app = app
+        let trimmedEnv = environmentId.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.selectedEnvironmentId = trimmedEnv.isEmpty ? "all" : trimmedEnv
+        let trimmedAcc = accountId.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.selectedAccountId = trimmedAcc.isEmpty ? "all" : trimmedAcc
+        if let latest = app.usagePage?.latestReport {
+            self.availableEnvironments = UsageFilterSupport.extractAvailableEnvironments(from: latest)
+            self.availableAccounts = UsageFilterSupport.extractAvailableAccounts(from: latest)
+            self.unattributedRequests = UsageFilterSupport.extractUnattributedStats(from: latest).requests
+        }
+        environmentPopup.controlSize = .regular
+        environmentPopup.setAccessibilityLabel(L10n.t("usage_log.env.a11y"))
+        environmentPopup.setContentHuggingPriority(.required, for: .horizontal)
+        environmentPopup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        accountPopup.controlSize = .regular
+        accountPopup.setAccessibilityLabel(L10n.t("usage_log.account.a11y"))
+        accountPopup.setContentHuggingPriority(.required, for: .horizontal)
+        accountPopup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        filterRow = horizontal([environmentPopup, accountPopup, flexibleSpace()], spacing: 8)
+        filterRow.alignment = .centerY
+        filterRow.detachesHiddenViews = true
+        filterRow.identifier = NSUserInterfaceItemIdentifier("usage-log-filter-row")
+        super.init()
+        environmentPopup.target = self
+        environmentPopup.action = #selector(environmentChanged(_:))
+        accountPopup.target = self
+        accountPopup.action = #selector(accountChanged(_:))
         sheet.title = L10n.t("usage_log.title"); sheet.isReleasedWhenClosed = false; table.rowHeight = 64; table.backgroundColor = .clear
         search.placeholderString = L10n.t("usage_log.search_placeholder"); search.delegate = self; search.setAccessibilityLabel(L10n.t("usage_log.search_a11y"))
         period.selectedSegment = periods.firstIndex(of: selected) ?? 0; period.controlSize = .regular; period.target = self; period.action = #selector(periodChanged)
@@ -132,12 +177,15 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
         let root = vertical([
             horizontal([headerTitleLabel, flexibleSpace(), headerActions]),
             horizontal([searchRow, period], spacing: 12),
+            filterRow,
             listHost,
             status,
             horizontal([previous, next, pageNumber, pageCount, flexibleSpace(), close])
         ], spacing: 12)
+        root.detachesHiddenViews = true
         let surface = SheetVisualEffectView(); sheet.isOpaque = false; sheet.backgroundColor = .clear; sheet.contentView = surface
         let content = fixedPage(root); surface.addSubview(content); pin(content, to: surface); Design.applyControls(surface)
+        syncFilterControls()
         languageObserver = NotificationCenter.default.addObserver(
             forName: L10n.didChangeNotification,
             object: nil,
@@ -152,6 +200,7 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
     }
 
     private func syncLocalizedChrome() {
+        guard !closed, app != nil else { return }
         let title = L10n.t("usage_log.title")
         sheet.title = title
         headerTitleLabel.stringValue = title
@@ -198,10 +247,43 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
             status.stringValue = pageStatus()
         }
         updateEmptyState(failed: lastReadErrorMessage != nil)
+        environmentPopup.setAccessibilityLabel(L10n.t("usage_log.env.a11y"))
+        accountPopup.setAccessibilityLabel(L10n.t("usage_log.account.a11y"))
+        syncFilterControls()
         table.reloadData()
+    }
+
+    func syncFilterControls() {
+        let latestReport = app?.usagePage?.latestReport ?? [:]
+        let latestBreakdown = UsageFilterSupport.extractEnvironmentBreakdown(from: latestReport)
+        let hasSsh = UsageFilterSupport.hasSshEnvironment(environments: availableEnvironments, breakdown: latestBreakdown, rows: rows)
+        UsageFilterSupport.syncEnvironmentPopup(
+            environmentPopup,
+            environments: availableEnvironments,
+            selectedId: selectedEnvironmentId,
+            allTitle: L10n.t("usage_log.env.all"),
+            localTitle: L10n.t("usage_log.env.local_label"),
+            sshFormatKey: "usage_log.env.ssh_label",
+            maxWidth: 210
+        )
+        let effectiveUnattributed = max(unattributedRequests, UsageFilterSupport.extractUnattributedStats(from: latestReport).requests)
+        UsageFilterSupport.syncAccountPopup(
+            accountPopup,
+            accounts: availableAccounts,
+            cachedAccounts: app?.cachedAccounts ?? [],
+            selectedId: selectedAccountId,
+            allTitle: L10n.t("usage_log.account.all"),
+            unattributedRequests: effectiveUnattributed,
+            unattributedTitle: L10n.t("usage.account.unattributed"),
+            maxWidth: 210
+        )
+        environmentPopup.isHidden = !(hasSsh || selectedEnvironmentId != "all")
+        accountPopup.isHidden = !(accountPopup.numberOfItems > 1 || selectedAccountId != "all")
+        filterRow.isHidden = environmentPopup.isHidden && accountPopup.isHidden
     }
     func show(in window: NSWindow, onDismiss: @escaping () -> Void) {
         self.onDismiss = onDismiss
+        guard let app else { return }
         app.presentRetainedSheet(controller: self, sheet: sheet, in: window) { [weak self] _ in
             self?.onDismiss?()
         }
@@ -209,13 +291,37 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
     }
     @objc func reloadSnapshot() {
         guard !loading, !exporting else { return }
-        if let snapshotID { app.bridge.send(["command":"usage_snapshot_release","snapshotId":snapshotID]) { _ in } }
+        if let snapshotID { app?.bridge.send(["command":"usage_snapshot_release","snapshotId":snapshotID]) { _ in } }
         snapshotID = nil; offset = 0; fetch(force: true)
     }
     @objc func closeSheet() {
-        if let snapshotID { app.bridge.send(["command":"usage_snapshot_release","snapshotId":snapshotID]) { _ in } }
+        if let languageObserver {
+            NotificationCenter.default.removeObserver(languageObserver)
+            self.languageObserver = nil
+        }
+        if let snapshotID { app?.bridge.send(["command":"usage_snapshot_release","snapshotId":snapshotID]) { _ in } }
         snapshotID = nil; closed = true; requestRevision += 1; searchDebounce?.cancel(); sheet.sheetParent?.endSheet(sheet) }
     @objc func periodChanged() { offset = 0; fetch() }
+    @objc func environmentChanged(_ sender: NSPopUpButton) {
+        let next = ((sender.selectedItem?.representedObject as? String) ?? "all").trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = next.isEmpty ? "all" : next
+        guard normalized != selectedEnvironmentId else { return }
+        if let snapshotID { app?.bridge.send(["command": "usage_snapshot_release", "snapshotId": snapshotID]) { _ in } }
+        snapshotID = nil
+        selectedEnvironmentId = normalized
+        offset = 0
+        fetch()
+    }
+    @objc func accountChanged(_ sender: NSPopUpButton) {
+        let next = ((sender.selectedItem?.representedObject as? String) ?? "all").trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = next.isEmpty ? "all" : next
+        guard normalized != selectedAccountId else { return }
+        if let snapshotID { app?.bridge.send(["command": "usage_snapshot_release", "snapshotId": snapshotID]) { _ in } }
+        snapshotID = nil
+        selectedAccountId = normalized
+        offset = 0
+        fetch()
+    }
     func controlTextDidChange(_ obj: Notification) {
         guard obj.object as? NSSearchField === search else { return }
         searchDebounce?.cancel()
@@ -280,16 +386,28 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
     @objc func nextPage() { offset += 200; fetch() }
     /// F08: true when a search term is narrowing the list (period is part of the query too but the
     /// page always has a period; the confusing empty footer came from the text search).
-    var filterActive: Bool { !search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    var filterActive: Bool {
+        !search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || selectedEnvironmentId != "all"
+            || selectedAccountId != "all"
+    }
 
     @objc func clearFilters() {
         searchDebounce?.cancel()
         search.stringValue = ""
+        if selectedEnvironmentId != "all" || selectedAccountId != "all" {
+            if let snapshotID { app?.bridge.send(["command": "usage_snapshot_release", "snapshotId": snapshotID]) { _ in } }
+            snapshotID = nil
+            selectedEnvironmentId = "all"
+            selectedAccountId = "all"
+            syncFilterControls()
+        }
         offset = 0
         fetch()
     }
 
     func fetch(force: Bool = false, fromSearch: Bool = false) {
+        guard let app else { return }
         searchDebounce?.cancel(); loading = true; pageNumber.isEnabled = false
         refreshButton.setBusy(true, available: app.reachable)
         if fromSearch {
@@ -300,7 +418,18 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
         previous.isEnabled = false; next.isEnabled = false; exportButton.isEnabled = false
         status.stringValue = L10n.t("usage_log.loading"); status.textColor = Design.secondary; updateEmptyState()
         requestRevision += 1; let revision = requestRevision
-        var payload: [String:Any] = ["command": "usage_events", "period": periods[max(0, period.selectedSegment)], "query": search.stringValue, "offset": offset, "limit": 200]
+        let requestedPeriod = periods[max(0, min(periods.count - 1, period.selectedSegment))]
+        let requestedEnv = selectedEnvironmentId
+        let requestedAcc = selectedAccountId
+        var payload: [String:Any] = [
+            "command": "usage_events",
+            "period": requestedPeriod,
+            "query": search.stringValue,
+            "offset": offset,
+            "limit": 200,
+            "environmentId": requestedEnv,
+            "accountId": requestedAcc
+        ]
         if force {
             payload["force"] = true
             payload["pinSnapshot"] = true
@@ -312,12 +441,18 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
         let acquiring = snapshotID == nil || force
         app.bridge.send(payload) { [weak self] response in
             guard let self else { return }
-            guard !self.closed, revision == self.requestRevision else {
-                if acquiring, case .success(let value) = response, let id = value["snapshot_id"] as? String { self.app.bridge.send(["command":"usage_snapshot_release","snapshotId":id]) { _ in } }
+            let currentPeriod = self.periods[max(0, min(self.periods.count - 1, self.period.selectedSegment))]
+            guard !self.closed,
+                  let activeApp = self.app,
+                  revision == self.requestRevision,
+                  currentPeriod == requestedPeriod,
+                  self.selectedEnvironmentId == requestedEnv,
+                  self.selectedAccountId == requestedAcc else {
+                if acquiring, case .success(let value) = response, let id = value["snapshot_id"] as? String { self.app?.bridge.send(["command":"usage_snapshot_release","snapshotId":id]) { _ in } }
                 return
             }
             self.loading = false
-            self.refreshButton.setBusy(false, available: self.app.reachable)
+            self.refreshButton.setBusy(false, available: activeApp.reachable)
             self.searchSpinner.stopAnimation(nil); self.searchSpinner.isHidden = true
             switch response {
             case .failure(let error):
@@ -325,9 +460,45 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
                 self.lastReadErrorMessage = error.localizedDescription
                 self.rows = []; self.table.reloadData(); self.status.stringValue = L10n.t("usage_log.status.read_failed", ["error": error.localizedDescription]); self.status.textColor = accessibleDangerColor(); self.emptyTitle.stringValue = L10n.t("usage_log.empty.failed"); self.updateEmptyState(failed:true)
             case .success(let value):
+                let retPeriod = (value["period"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let retEnv = ((value["selectedEnvironmentId"] as? String) ?? (value["selected_environment_id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let retAcc = ((value["selectedAccountId"] as? String) ?? (value["selected_account_id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if (!retPeriod.isEmpty && retPeriod != requestedPeriod)
+                    || (!retEnv.isEmpty && retEnv != requestedEnv)
+                    || (!retAcc.isEmpty && retAcc != requestedAcc) {
+                    if acquiring, let id = value["snapshot_id"] as? String {
+                        activeApp.bridge.send(["command": "usage_snapshot_release", "snapshotId": id]) { _ in }
+                    }
+                    self.snapshotID = nil
+                    self.lastReadErrorMessage = L10n.t("usage.error.period_mismatch")
+                    self.rows = []
+                    self.table.reloadData()
+                    self.status.stringValue = L10n.t("usage.error.period_mismatch")
+                    self.status.textColor = accessibleDangerColor()
+                    self.emptyTitle.stringValue = L10n.t("usage_log.empty.failed")
+                    self.updateEmptyState(failed: true)
+                    return
+                }
                 self.lastReadErrorMessage = nil
                 self.snapshotID = value["snapshot_id"] as? String
                 self.rows = value["rows"] as? [[String: Any]] ?? []; self.total = intVal(value, "total")
+                let respEnvs = UsageFilterSupport.extractAvailableEnvironments(from: value)
+                if !respEnvs.isEmpty { self.availableEnvironments = respEnvs }
+                let respAccounts = UsageFilterSupport.extractAvailableAccounts(from: value)
+                if !respAccounts.isEmpty { self.availableAccounts = respAccounts }
+                let respUnattributed = UsageFilterSupport.extractUnattributedStats(from: value).requests
+                let rowHasUnattributed = self.rows.contains { row in
+                    let email = ((row["accountEmail"] as? String) ?? (row["account_email"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let accId = ((row["accountId"] as? String) ?? (row["account_id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let confidence = ((row["accountConfidence"] as? String) ?? (row["account_confidence"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    return (email.isEmpty && accId.isEmpty) || confidence == "unknown"
+                }
+                if respUnattributed > 0 {
+                    self.unattributedRequests = respUnattributed
+                } else if rowHasUnattributed {
+                    self.unattributedRequests = max(self.unattributedRequests, 1)
+                }
+                self.syncFilterControls()
                 let animateTable = Design.shouldAnimate(in: self.table)
                 if animateTable {
                     self.table.wantsLayer = true
@@ -366,30 +537,37 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
                 self.exportButton.isEnabled = self.total > 0 && self.snapshotID != nil && (value["availability"] as? String) != "unavailable"
                 self.updateEmptyState(); self.scroll.contentView.scroll(to:.zero); self.scroll.reflectScrolledClipView(self.scroll.contentView)
                 if force {
-                    self.app.usagePage?.update(force: false)
+                    activeApp.usagePage?.update(force: false)
                 }
             }
         }
     }
     private var exporting = false
     @objc func exportRows() {
-        guard !exporting, !loading, total > 0 else { return }
+        guard !exporting, !loading, total > 0, let activeApp = app else { return }
         exporting = true
         refreshButton.isEnabled = false
         exportButton.isEnabled = false
         pageNumber.isEnabled = false
         period.isEnabled = false
+        environmentPopup.isEnabled = false
+        accountPopup.isEnabled = false
         search.isEnabled = false
         previous.isEnabled = false
         next.isEnabled = false
-        let chosenPeriod = periods[max(0, period.selectedSegment)], query = search.stringValue
+        let chosenPeriod = periods[max(0, min(periods.count - 1, period.selectedSegment))]
+        let chosenEnv = selectedEnvironmentId
+        let chosenAcc = selectedAccountId
+        let query = search.stringValue
         var collected: [[String: Any]] = []; var generation: Int?; var snapshotID: String? = self.snapshotID; var scope = ""
         func finishExport(errorMsg: String? = nil) {
             exporting = false
-            refreshButton.setBusy(false, available: app.reachable)
+            refreshButton.setBusy(false, available: app?.reachable ?? false)
             exportButton.isEnabled = total > 0 && self.snapshotID != nil
             pageNumber.isEnabled = total > 0
             period.isEnabled = true
+            environmentPopup.isEnabled = true
+            accountPopup.isEnabled = true
             search.isEnabled = true
             previous.isEnabled = offset > 0
             next.isEnabled = offset + rows.count < total
@@ -398,14 +576,39 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
             }
         }
         func readPage() {
-            var payload:[String:Any] = ["command":"usage_events","period":chosenPeriod,"query":query,"offset":collected.count,"limit":500]
+            guard let activeApp = app else {
+                finishExport(errorMsg: L10n.t("usage_log.export.snapshot_changed"))
+                return
+            }
+            var payload: [String: Any] = [
+                "command": "usage_events",
+                "period": chosenPeriod,
+                "query": query,
+                "environmentId": chosenEnv,
+                "accountId": chosenAcc,
+                "offset": collected.count,
+                "limit": 500
+            ]
             if let snapshotID { payload["snapshotId"] = snapshotID }
-            app.bridge.send(payload) { [weak self] result in
+            activeApp.bridge.send(payload) { [weak self] result in
                 guard let self, !self.closed else { return }
+                guard self.selectedEnvironmentId == chosenEnv, self.selectedAccountId == chosenAcc, let currentApp = self.app else {
+                    finishExport(errorMsg: L10n.t("usage_log.export.snapshot_changed"))
+                    return
+                }
                 switch result {
                 case .failure(let error):
                     finishExport(errorMsg: L10n.t("usage_log.export.failed", ["error": error.localizedDescription]))
                 case .success(let value):
+                    let retPeriod = (value["period"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let retEnv = ((value["selectedEnvironmentId"] as? String) ?? (value["selected_environment_id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let retAcc = ((value["selectedAccountId"] as? String) ?? (value["selected_account_id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if (!retPeriod.isEmpty && retPeriod != chosenPeriod)
+                        || (!retEnv.isEmpty && retEnv != chosenEnv)
+                        || (!retAcc.isEmpty && retAcc != chosenAcc) {
+                        finishExport(errorMsg: L10n.t("usage_log.export.snapshot_changed"))
+                        return
+                    }
                     let returnedID = value["snapshot_id"] as? String
                     guard let returnedID, !returnedID.isEmpty, snapshotID == nil || snapshotID == returnedID else { finishExport(errorMsg: L10n.t("usage_log.export.snapshot_changed")); return }
                     snapshotID = returnedID
@@ -424,7 +627,16 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
                         let exportedCount = collected.count
                         let fallbackScope = scope.isEmpty ? L10n.t("usage_log.scope.default") : scope
                         self.status.stringValue = L10n.t("usage_log.export.choose_location", ["count": InterfaceText.formatInteger(exportedCount)])
-                        saveUsageJSON(["period": chosenPeriod, "query": query, "scope": scope, "generatedAt": stamp, "snapshotId":snapshotID ?? "", "rows": collected], name: L10n.t("usage_log.export.filename", ["period": chosenPeriod]), window: self.sheet, app: self.app) { [weak self] saved in
+                        saveUsageJSON([
+                            "period": chosenPeriod,
+                            "query": query,
+                            "environmentId": chosenEnv,
+                            "accountId": chosenAcc,
+                            "scope": scope,
+                            "generatedAt": stamp,
+                            "snapshotId": snapshotID ?? "",
+                            "rows": collected
+                        ], name: L10n.t("usage_log.export.filename", ["period": chosenPeriod]), window: self.sheet, app: currentApp) { [weak self] saved in
                             guard let self, !self.closed else { return }
                             finishExport()
                             if saved {
@@ -468,6 +680,9 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard rows.indices.contains(row) else { return nil }
         let card = (tableView.makeView(withIdentifier:NSUserInterfaceItemIdentifier("usage-event-card"),owner:self) as? UsageEventCard) ?? UsageEventCard(frame:.zero)
-        card.configure(rows[row], highlight: search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)); return card
+        let latestReport = app?.usagePage?.latestReport ?? [:]
+        let latestBreakdown = UsageFilterSupport.extractEnvironmentBreakdown(from: latestReport)
+        let showLocalBadge = UsageFilterSupport.hasSshEnvironment(environments: availableEnvironments, breakdown: latestBreakdown, rows: rows)
+        card.configure(rows[row], highlight: search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), showLocalEnvironmentBadge: showLocalBadge); return card
     }
 }

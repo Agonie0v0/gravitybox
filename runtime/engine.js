@@ -68,6 +68,26 @@
   }
 
   const KEY = '__GRAVITYBOX_ENGINE_V1__';
+  function reportWindowFocus() {
+    try {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (typeof globalThis.__gravityboxWindowFocus === 'function') {
+        globalThis.__gravityboxWindowFocus(String(Date.now()));
+      }
+    } catch {}
+  }
+  function handleVisibilityFocus() {
+    if (typeof document === 'undefined' || !document.hidden) reportWindowFocus();
+  }
+  function installFocusListeners() {
+    if (typeof window !== 'undefined') window.addEventListener('focus', reportWindowFocus, true);
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', handleVisibilityFocus, true);
+  }
+  function removeFocusListeners() {
+    if (typeof window !== 'undefined') window.removeEventListener('focus', reportWindowFocus, true);
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', handleVisibilityFocus, true);
+  }
+  installFocusListeners();
   if (options.translationEnabled === false) {
     // HUD-only connection: expose the lifecycle contract without installing
     // translators, project markers, mutation observers or scan collectors.
@@ -78,6 +98,7 @@
       state, getLanguageMode: () => 'en', refresh() {},
       update(next) { dictionary = next; }, setShortcutEnabled() {},
       dispose(opts) {
+        removeFocusListeners();
         if (!opts?.keepHud) { try { globalThis.__GRAVITYBOX_HUD_V1__?.dispose?.(); } catch {} }
         delete globalThis[KEY];
         if (globalThis.__GRAVITYBOX_BOOT__ === options) delete globalThis.__GRAVITYBOX_BOOT__;
@@ -90,7 +111,7 @@
   if (globalThis[KEY]) { globalThis[KEY].setShortcutEnabled?.(options.shortcutEnabled !== false); globalThis[KEY].update(options.dictionary); return; }
   let shortcutEnabled = options.path === '/fixture' && options.shortcutEnabled !== false;
   const ownedProjectMarkers = new Set();
-  const UI = '[data-gravitybox-ui],button,a[href],h1,h2,h3,h4,[role="navigation"],[role="button"],[role="menuitem"],[role="tab"],[role="option"],[role="tooltip"],[role="dialog"],[role="status"],[role="alert"],[role="banner"],label,th,td,summary,figcaption,.monaco-menu-item,[data-sonner-toast],[role="listitem"],[role="region"],[data-testid*="settings"],[data-testid*="preferences"],[data-testid*="empty"],[data-testid*="notice"],[data-testid*="banner"],[data-testid*="card"],[data-testid*="header"],[data-testid*="sidecar"],[data-testid*="trigger"],[data-testid="agent-input-box"],[contenteditable="true"][role="combobox"]+p,[data-testid="cascade-system-message-toolbar"],[data-testid="turn-cards-container"],[data-testid="side-question-followup-thinking"],[data-select-popup],[role="menu"],[role="listbox"]';
+  const UI = '[data-gravitybox-ui],button,a[href],h1,h2,h3,h4,[role="navigation"],[role="button"],[role="menuitem"],[role="tab"],[role="option"],[role="tooltip"],[role="dialog"],[role="status"],[role="alert"],[role="banner"],label,th,td,summary,figcaption,.monaco-menu-item,[data-sonner-toast],[data-testid="toast-notification"],[data-testid="ssh-connect-progress"],[data-testid="ssh-connect-error"],[data-testid="ssh-config-file"],[data-testid="ssh-machine-switcher-status"],[role="listitem"],[role="region"],[data-testid*="settings"],[data-testid*="preferences"],[data-testid*="empty"],[data-testid*="notice"],[data-testid*="banner"],[data-testid*="card"],[data-testid*="header"],[data-testid*="sidecar"],[data-testid*="trigger"],[data-testid="agent-input-box"],[contenteditable="true"][role="combobox"]+p,[data-testid="cascade-system-message-toolbar"],[data-testid="turn-cards-container"],[data-testid="side-question-followup-thinking"],[data-select-popup],[role="menu"],[role="listbox"]';
   const UI_SELECTOR = 'button, [role="button"], [role="tab"], [role="menuitem"], [role="tooltip"], [role="option"], label, option, th, td, summary, figcaption, .monaco-menu-item, [data-sonner-toast], [role="listitem"], [role="region"], h1, h2, h3, h4, [data-select-popup], [role="menu"], [role="listbox"]';
   /* PROTECTED keeps user content, code and editors in English. `[data-testid="conversation-row-sidebar"]`
      is the container the app really uses for the conversation list: its title <span> is NOT inside
@@ -116,7 +137,7 @@
   }
   function userNamed(element) {
     if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
-    if (element.closest('[data-testid*="-toggle"],[data-testid*="-trigger"],[data-testid$="-button"],[data-testid$="-select"]')) return false;
+    if (element.closest('[data-testid*="-toggle"],[data-testid*="-trigger"],[data-testid$="-button"],[data-testid$="-select"],[data-testid="ssh-config-file"],[data-testid="ssh-connect-progress"],[data-testid="ssh-connect-error"]')) return false;
     if (element.closest(USER_CONTENT)) return true;
     const anchor = element.closest('a[href]');
     if (anchor && ENTITY_HREF.test(entityAnchorPath(anchor))) return true;
@@ -600,7 +621,7 @@
     if (isRelativeTimeBadge(element)) return true;
     if (modelUiLabel(element)) return true;
     if (isDialogPromptParagraph(element)) return !blocked(element, scan);
-    if(conservative&&(!element||!element.closest('button,[role="button"],[role="tab"],[role="menuitem"],[role="tooltip"],label,h1,h2,h3,h4,a[href],[role="navigation"],[data-testid*="card"],[data-testid="cascade-system-message-toolbar"],[contenteditable="true"][role="combobox"]+p,[data-select-popup],[role="menu"],[role="listbox"],[role="option"],[data-testid*="empty"],[data-testid*="sidecar"],[data-testid*="trigger"],[data-testid*="modal"]'))&&!pluginDescription(element)&&!inSystemSettings(element,scan))return false;
+    if(conservative&&(!element||!element.closest('button,[role="button"],[role="tab"],[role="menuitem"],[role="tooltip"],[role="alert"],[role="status"],label,h1,h2,h3,h4,a[href],[role="navigation"],[data-testid*="card"],[data-testid="cascade-system-message-toolbar"],[contenteditable="true"][role="combobox"]+p,[data-select-popup],[role="menu"],[role="listbox"],[role="option"],[data-testid*="empty"],[data-testid*="sidecar"],[data-testid*="trigger"],[data-testid*="modal"],[data-testid="toast-notification"],[data-testid="ssh-connect-progress"],[data-testid="ssh-connect-error"],[data-testid="ssh-config-file"],[data-testid="ssh-machine-switcher-status"]'))&&!pluginDescription(element)&&!inSystemSettings(element,scan))return false;
     const cached = eligibleCache.get(element);
     if (cached !== undefined && cached.scan === scan) return cached.val;
     const isElig = !blocked(element, scan) && (Boolean(element.closest(UI)) || pluginDescription(element) || inSystemSettings(element,scan));
@@ -1961,6 +1982,82 @@
       pattern: /^Uses\s+standalone\s+Antigravity\s+chords\s+\(e\.g\.\s+(.+?)\)\.\s*Replaces\s+Go\s+to\s+Symbol\s+\(([^)]+)\)\s+and\s+Trigger\s+Suggest\s+\(([^)]+)\),\s*and\s+rebinds\s+VS\s+Code\s+Settings\s+to\s+(.+?)\.?$/i,
       replace: (_, s, sym, sug, cfg) =>
         `使用独立 Antigravity 组合快捷键（例如：${translateKeybindingExamples(s)}）。将替代转到符号 (${sym}) 与触发建议 (${sug})，并将 VS Code 设置重新绑定至 ${cfg}。`
+    },
+    // 14. 2.33.0 SSH 远程主机状态与连接进度动态模板（具体长句须先于泛化 Connecting to）
+    {
+      key: "Connected to {host}",
+      pattern: /^Connected\s+to\s+(.+)$/i,
+      replace: (_, h) => `已连接到 ${h}`
+    },
+    {
+      key: "SSH Config ({name})",
+      pattern: /^SSH\s+Config\s*\((.+)\)$/i,
+      replace: (_, n) => `SSH 配置（${n}）`
+    },
+    {
+      key: "{count} hidden hosts",
+      pattern: /^(\d+)\s+hidden\s+hosts?$/i,
+      replace: (_, n) => `${n} 个已隐藏主机`
+    },
+    {
+      key: "No hosts in {file} yet. Type one above.",
+      pattern: /^No\s+hosts\s+in\s+(.+?)\s+yet\.\s*Type\s+one\s+above\.?$/i,
+      replace: (_, f) => `${f} 中暂无主机，请在上方输入。`
+    },
+    {
+      key: "Remove {host} from Recent",
+      pattern: /^Remove\s+(.+?)\s+from\s+Recent$/i,
+      replace: (_, h) => `从最近项中移除 ${h}`
+    },
+    {
+      key: "Waiting for the sign-in callback on port {port}.",
+      pattern: /^Waiting\s+for\s+the\s+sign-in\s+callback\s+on\s+port\s+(\d+)\.?$/i,
+      replace: (_, p) => `正在等待端口 ${p} 上的登录回调。`
+    },
+    {
+      key: "Waiting for another window to finish installing on {host}…",
+      pattern: /^Waiting\s+for\s+another\s+window\s+to\s+finish\s+installing\s+on\s+(.+?)(?:\u2026|\.\.\.)$/i,
+      replace: (_, h) => `正在等待另一窗口完成在 ${h} 上的安装…`
+    },
+    {
+      key: "Downloading the Antigravity server on {host}…",
+      pattern: /^Downloading\s+the\s+Antigravity\s+server\s+on\s+(.+?)(?:\u2026|\.\.\.)$/i,
+      replace: (_, h) => `正在 ${h} 上下载 Antigravity 服务…`
+    },
+    {
+      key: "Uploading the Antigravity server to {host}…",
+      pattern: /^Uploading\s+the\s+Antigravity\s+server\s+to\s+(.+?)(?:\u2026|\.\.\.)$/i,
+      replace: (_, h) => `正在向 ${h} 上传 Antigravity 服务…`
+    },
+    {
+      key: "Starting the Antigravity server on {host}…",
+      pattern: /^Starting\s+the\s+Antigravity\s+server\s+on\s+(.+?)(?:\u2026|\.\.\.)$/i,
+      replace: (_, h) => `正在 ${h} 上启动 Antigravity 服务…`
+    },
+    {
+      key: "Connecting to the running server on {host}…",
+      pattern: /^Connecting\s+to\s+the\s+running\s+server\s+on\s+(.+?)(?:\u2026|\.\.\.)$/i,
+      replace: (_, h) => `正在连接到 ${h} 上运行中的服务…`
+    },
+    {
+      key: "Restarting the Antigravity server on {host}…",
+      pattern: /^Restarting\s+the\s+Antigravity\s+server\s+on\s+(.+?)(?:\u2026|\.\.\.)$/i,
+      replace: (_, h) => `正在重启 ${h} 上的 Antigravity 服务…`
+    },
+    {
+      key: "Connecting to the Antigravity server on {host}…",
+      pattern: /^Connecting\s+to\s+the\s+Antigravity\s+server\s+on\s+(.+?)(?:\u2026|\.\.\.)$/i,
+      replace: (_, h) => `正在连接到 ${h} 上的 Antigravity 服务…`
+    },
+    {
+      key: "Checking {host}…",
+      pattern: /^Checking\s+(.+?)(?:\u2026|\.\.\.)$/i,
+      replace: (_, h) => `正在检查 ${h}…`
+    },
+    {
+      key: "Connecting to {host}…",
+      pattern: /^Connecting\s+to\s+(.+?)(?:\u2026|\.\.\.)$/i,
+      replace: (_, h) => `正在连接到 ${h}…`
     }
   ];
 
@@ -2003,9 +2100,52 @@
     return undefined;
   }
 
+  function translateSshErrorText(original, el) {
+    lastMatchedKeys = [];
+    const lines = String(original).split('\n');
+    let changed = false;
+    const out = lines.map((rawLine) => {
+      const lead = rawLine.match(/^\s*/)[0];
+      const tail = rawLine.match(/\s*$/)[0];
+      const trimmed = rawLine.trim();
+      if (!trimmed || /^Logs:\s+\S+/i.test(trimmed)) return rawLine;
+      const codeMatch = trimmed.match(/^([A-Z][A-Z0-9_]{2,}:\s+)([\s\S]+)$/);
+      const codePrefix = codeMatch ? codeMatch[1] : '';
+      const body = codeMatch ? codeMatch[2] : trimmed;
+      const reportedMatch = body.match(/^(.+?)\s+reported:\s*([\s\S]*)$/);
+      if (reportedMatch) {
+        lastMatchedKeys.push('{host} reported: {detail}');
+        changed = true;
+        return `${lead}${codePrefix}${reportedMatch[1]} 返回：${reportedMatch[2]}${tail}`;
+      }
+      const normBody = normalize(body);
+      if (!normBody || /(?:https?:\/\/|^(?:\/|~\/|[A-Za-z]:\\))/.test(normBody)) return rawLine;
+      let val = entryFor(normBody);
+      if (val !== undefined) {
+        lastMatchedKeys.push(normBody);
+      } else {
+        val = matchTemplate(normBody, el);
+      }
+      if (val !== undefined && val !== body) {
+        changed = true;
+        return `${lead}${codePrefix}${val}${tail}`;
+      }
+      return rawLine;
+    });
+    return changed ? out.join('\n') : original;
+  }
+
   function translation(original,el,kind) {
     lastMatchedKeys=[];
     const key = normalize(original);
+    if (el?.closest?.('[data-testid="ssh-config-file-name"],[data-testid="ssh-config-file"]') && /\s+\(default\)$/i.test(key)) {
+      const localized = original.replace(/\s+\(default\)(\s*)$/i, '（默认）$1');
+      if (localized !== original) { lastMatchedKeys = ['{name} (Default)']; return localized; }
+    }
+    if (el?.closest?.('[data-testid="ssh-connect-error"],[data-testid="toast-notification"][data-notification-tag="ssh-connect-failed"]')
+        && (original.includes('\n') || /^.+\s+reported:\s*/i.test(key) || /^[A-Z][A-Z0-9_]{2,}:\s+/.test(key))) {
+      return translateSshErrorText(original, el);
+    }
     if (!key || /(?:https?:\/\/|^(?:\/|~\/|[A-Za-z]:\\))/.test(key)) return original;
     if (/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/.test(key)) {
       const templated = matchTemplate(key, el);
@@ -2164,6 +2304,10 @@
   function isInlineGroupContainer(el, scan = 0) {
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
     if (!eligible(el, scan) || blocked(el, scan)) return false;
+    if (el.closest?.('[data-testid="ssh-connect-error"],[data-testid="toast-notification"][data-notification-tag="ssh-connect-failed"]')
+        && ((el.textContent || '').includes('\n') || el.querySelector?.('.font-mono'))) {
+      return false;
+    }
     const children = el.childNodes;
     if (children.length < 2 || children.length > 20) return false;
     let hasText = false;
@@ -2852,6 +2996,7 @@
       if (routeTimer) { clearInterval(routeTimer); routeTimer = null; }
       try { window.removeEventListener('popstate', checkRoute); window.removeEventListener('hashchange', checkRoute); } catch {}
       pending.clear(); waiting.clear(); settingsWaiting.clear();
+      removeFocusListeners();
       if (typeof window !== 'undefined') {
         window.removeEventListener('keydown', handleKeydown, true);
       }

@@ -1,11 +1,14 @@
 import Cocoa
 
 extension Assistant {
+    private static let uiBootstrapCacheSchemaVersion = 2
+
     func loadUIBootstrapSnapshot() {
         #if !NATIVE_UI_TEST
         let url = state.appendingPathComponent("ui-bootstrap-cache-v1.json")
         guard let data = try? Data(contentsOf: url),
-              let raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+              let raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              (raw["schema"] as? Int) == Self.uiBootstrapCacheSchemaVersion else { return }
         if let dash = raw["dashboardSummary"] as? [String: Any] {
             cachedDashboardBootstrapSummary = dash
             if let usg = dash["usage"] as? [String: Any], let periodsMap = usg["periods"] as? [String: Any] {
@@ -49,7 +52,7 @@ extension Assistant {
         let targetURL = state.appendingPathComponent("ui-bootstrap-cache-v1.json")
         let work = DispatchWorkItem { [weak self] in
             guard self != nil else { return }
-            var doc: [String: Any] = ["schema": 1, "savedAt": Date().timeIntervalSince1970]
+            var doc: [String: Any] = ["schema": Self.uiBootstrapCacheSchemaVersion, "savedAt": Date().timeIntervalSince1970]
             if let dashSnap, JSONSerialization.isValidJSONObject(dashSnap) {
                 doc["dashboardSummary"] = dashSnap
             }
@@ -80,14 +83,21 @@ extension Assistant {
             item.removeValue(forKey: "periods")
             cachedUsageReportsByPeriod[p] = item
             usageLastFetchTimeByPeriod[p] = fetchedAt
+            usageRemoteSyncRevisionByPeriod[p] = statusValue.remoteSyncRevision
             usageFetchErrorsByPeriod[p] = nil
             bootstrappedUsagePeriods.remove(p)
         }
     }
 
-    func fetchUsageSummary(period: String, force: Bool = false, allowCached: Bool = true, completion: ((Result<[String: Any], Error>) -> Void)? = nil) {
-        let cacheKey = period
-        if !force && allowCached,
+    func fetchUsageSummary(period: String, environmentId: String? = nil, accountId: String? = nil, force: Bool = false, allowCached: Bool = true, completion: ((Result<[String: Any], Error>) -> Void)? = nil) {
+        let trimmedEnv = environmentId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let resolvedEnv = trimmedEnv.isEmpty ? "all" : trimmedEnv
+        let trimmedAcc = accountId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let resolvedAcc = trimmedAcc.isEmpty ? "all" : trimmedAcc
+        let isDefaultAllFilter = (resolvedEnv == "all" && resolvedAcc == "all")
+        let cacheKey = isDefaultAllFilter ? period : "\(period)|env=\(resolvedEnv)|acc=\(resolvedAcc)"
+        let cacheRevisionMatches = (usageRemoteSyncRevisionByPeriod[cacheKey] ?? statusValue.remoteSyncRevision) == statusValue.remoteSyncRevision
+        if !force && allowCached && cacheRevisionMatches,
            !bootstrappedUsagePeriods.contains(cacheKey),
            let cached = cachedUsageReportsByPeriod[cacheKey],
            let lastAt = usageLastFetchTimeByPeriod[cacheKey],
@@ -105,31 +115,39 @@ extension Assistant {
         if usageInFlightByPeriod[cacheKey] == true {
             if force {
                 usagePendingForceByPeriod.insert(cacheKey)
-                usageManualRefreshPeriods.insert(cacheKey)
-                menuPanelController?.syncHeaderRefreshState()
+                if resolvedAcc == "all" {
+                    usageManualRefreshPeriods.insert(cacheKey)
+                    menuPanelController?.syncHeaderRefreshState()
+                }
             }
             return
         }
         usageInFlightByPeriod[cacheKey] = true
         let generation = (usageGenerationByPeriod[cacheKey] ?? 0) + 1
         usageGenerationByPeriod[cacheKey] = generation
-        if force {
+        if force && resolvedAcc == "all" {
             usageManualRefreshPeriods.insert(cacheKey)
             menuPanelController?.syncHeaderRefreshState()
         }
         var payload: [String: Any] = ["command": "usage_summary", "period": period]
+        if resolvedEnv != "all" { payload["environmentId"] = resolvedEnv }
+        if resolvedAcc != "all" { payload["accountId"] = resolvedAcc }
         if force { payload["force"] = true }
         bridge.send(payload) { [weak self] response in
             guard let self else { return }
             if self.usagePendingForceByPeriod.remove(cacheKey) != nil {
                 self.usageInFlightByPeriod[cacheKey] = false
-                self.fetchUsageSummary(period: period, force: true, allowCached: false)
+                self.fetchUsageSummary(period: period, environmentId: resolvedEnv, accountId: resolvedAcc, force: true, allowCached: false)
                 return
             }
             self.usageInFlightByPeriod[cacheKey] = false
-            self.usageManualRefreshPeriods.remove(cacheKey)
+            if resolvedAcc == "all" {
+                self.usageManualRefreshPeriods.remove(cacheKey)
+            }
             guard generation >= (self.usageGenerationByPeriod[cacheKey] ?? 0) else {
-                self.menuPanelController?.syncHeaderRefreshState()
+                if resolvedAcc == "all" {
+                    self.menuPanelController?.syncHeaderRefreshState()
+                }
                 return
             }
             let fetchedAt = Date()
@@ -142,14 +160,17 @@ extension Assistant {
                 self.usageFetchErrorsByPeriod[cacheKey] = error.localizedDescription
             case .success(let value):
                 self.usageFetchErrorsByPeriod[cacheKey] = nil
-                if let periodsMap = value["periods"] as? [String: Any] {
+                self.usageRemoteSyncRevisionByPeriod[cacheKey] = self.statusValue.remoteSyncRevision
+                if isDefaultAllFilter, let periodsMap = value["periods"] as? [String: Any] {
                     self.ingestUsagePeriods(from: periodsMap, fetchedAt: fetchedAt)
                 }
                 var cleanValue = value
                 cleanValue.removeValue(forKey: "periods")
                 self.cachedUsageReportsByPeriod[cacheKey] = cleanValue
                 resolvedResponse = .success(cleanValue)
-                self.scheduleUIBootstrapSave()
+                if isDefaultAllFilter {
+                    self.scheduleUIBootstrapSave()
+                }
                 let failedCount = (cleanValue["summary"] as? [String: Any])?["failedDatabasesCount"] as? Int ?? 0
                 if failedCount == 0 {
                     self.usageAutoHealAttemptsByPeriod[cacheKey] = 0
@@ -163,7 +184,7 @@ extension Assistant {
                             guard let self else { return }
                             self.usageAutoHealPendingPeriods.remove(cacheKey)
                             guard self.reachable && !self.quitting else { return }
-                            self.fetchUsageSummary(period: period, force: false, allowCached: false)
+                            self.fetchUsageSummary(period: period, environmentId: resolvedEnv, accountId: resolvedAcc, force: false, allowCached: false)
                         }
                     }
                     #endif
@@ -172,8 +193,10 @@ extension Assistant {
                     self.usagePage?.update(force: false)
                 }
             }
-            self.menuPanelController?.onUsageReportUpdated(period: period, result: resolvedResponse)
-            self.menuPanelController?.syncHeaderRefreshState()
+            if resolvedAcc == "all" {
+                self.menuPanelController?.onUsageReportUpdated(period: period, environmentId: resolvedEnv, result: resolvedResponse)
+                self.menuPanelController?.syncHeaderRefreshState()
+            }
             for waiter in waiters { waiter(resolvedResponse) }
         }
     }
@@ -295,6 +318,7 @@ extension Assistant {
     func invalidateUsageReportCache() {
         cachedUsageReportsByPeriod.removeAll()
         usageLastFetchTimeByPeriod.removeAll()
+        usageRemoteSyncRevisionByPeriod.removeAll()
         usageFetchErrorsByPeriod.removeAll()
         bootstrappedUsagePeriods.removeAll()
         overview?.metricsKey = ""
@@ -304,7 +328,8 @@ extension Assistant {
         }
         if menuTracking || isMenuPanelShown {
             let periodKey = menuPanelController.map { MenuPanelController.periods[$0.selectedPeriod] } ?? "today"
-            fetchUsageSummary(period: periodKey, force: true, allowCached: false)
+            let envId = menuPanelController?.selectedEnvironmentId ?? "all"
+            fetchUsageSummary(period: periodKey, environmentId: envId, force: true, allowCached: false)
             menuPanelController?.syncFromAssistant()
         }
     }
@@ -390,6 +415,12 @@ extension Assistant {
                     performSwitch()
                 }
             }
+            let sshCount = payload["activeSshWindowsCount"] as? Int ?? 0
+            let sshHostsList = payload["activeSshHosts"] as? [String] ?? []
+            let sshHostsSummary = sshHostsList.isEmpty ? "SSH" : sshHostsList.joined(separator: L10n.shared.isEnglish ? ", " : "、")
+            let sshWarningSuffix = sshCount > 0
+                ? "\n\n" + L10n.t("ssh.preflight.active_windows_warning", ["count": sshCount, "hosts": sshHostsSummary])
+                : ""
             if hasRunningTask {
                 #if NATIVE_UI_TEST
                 if self.confirmSwitchForTesting != nil {
@@ -400,7 +431,7 @@ extension Assistant {
                 let busyAlert = NSAlert()
                 busyAlert.alertStyle = .warning
                 busyAlert.messageText = L10n.t("assistant_account.switch_prompt_title", ["display": display])
-                busyAlert.informativeText = L10n.t("assistant_account.switch_busy_body")
+                busyAlert.informativeText = L10n.t("assistant_account.switch_busy_body") + sshWarningSuffix
                 busyAlert.addButton(withTitle: L10n.t("assistant_account.switch_busy_confirm"))
                 busyAlert.addButton(withTitle: L10n.t("common.cancel"))
                 self.presentSheetAlert(busyAlert) { execute($0 == .alertFirstButtonReturn) }
@@ -412,9 +443,9 @@ extension Assistant {
             let alert = NSAlert()
             alert.alertStyle = .informational
             alert.messageText = L10n.t("assistant_account.switch_prompt_title", ["display": display])
-            alert.informativeText = appRunning
+            alert.informativeText = (appRunning
                 ? L10n.t("assistant_account.switch_ready_body")
-                : L10n.t("assistant_account.switch_stopped_body")
+                : L10n.t("assistant_account.switch_stopped_body")) + sshWarningSuffix
             alert.addButton(withTitle: L10n.t("assistant_account.switch_confirm"))
             alert.addButton(withTitle: L10n.t("common.cancel"))
             self.presentSheetAlert(alert) { execute($0 == .alertFirstButtonReturn) }
@@ -438,9 +469,14 @@ extension Assistant {
     }
     func finishQuotaRefresh(error: String?) {
         quotaRefreshing = false; quotaRefreshStartedAt = nil; pendingAccountTaskId = nil; quotaRefreshError = error; quotaRefreshPollTimer?.invalidate(); quotaRefreshPollTimer = nil
-        lastAutoQuotaRefreshTriggerAt = Date()
+        let now = Date()
+        lastAutoQuotaRefreshTriggerAt = now
+        pendingAutoQuotaRefresh = false
+        if let minutes = configuration?.value.quotaRefreshMinutes, [5, 10, 15, 30, 60].contains(minutes) {
+            nextScheduledQuotaRefreshAt = now.addingTimeInterval(TimeInterval(minutes * 60))
+        }
         if error == nil { singleAccountRefreshErrors.removeAll() }
-        configureQuotaRefreshTimer()
+        configureQuotaRefreshTimer(preserveSchedule: true)
         updateQuotaRefreshControls(); fetchAccountList(notifyPage: true); overview?.update(force: true); menuPanelController?.syncFromAssistant(); refresh()
     }
     func updateQuotaRefreshControls() {
@@ -450,10 +486,14 @@ extension Assistant {
             if let control = view as? QuotaRefreshButton {
                 let cid = control.identifier?.rawValue ?? ""
                 let isOverviewHeroBtn = (control === overview?.refreshQuotaButton)
-                let targetId = isOverviewHeroBtn ? overviewActiveId : cid
-                let isCardBusy = !targetId.isEmpty && refreshingAccountIds.contains(targetId)
-                let resolvedErr = (isOverviewHeroBtn && !targetId.isEmpty ? singleAccountRefreshErrors[targetId] : nil) ?? quotaRefreshError
-                control.applyGlobalRefreshState(globalBusy: quotaRefreshing, available: available, error: resolvedErr, cardBusy: isCardBusy)
+                if isOverviewHeroBtn && selectedOverviewRemoteSession() != nil {
+                    control.applyGlobalRefreshState(globalBusy: remoteQuotaRefreshing, available: available, error: nil, cardBusy: remoteQuotaRefreshing)
+                } else {
+                    let targetId = isOverviewHeroBtn ? overviewActiveId : cid
+                    let isCardBusy = !targetId.isEmpty && refreshingAccountIds.contains(targetId)
+                    let resolvedErr = (isOverviewHeroBtn && !targetId.isEmpty ? singleAccountRefreshErrors[targetId] : nil) ?? quotaRefreshError
+                    control.applyGlobalRefreshState(globalBusy: quotaRefreshing, available: available, error: resolvedErr, cardBusy: isCardBusy)
+                }
             }
             for child in view.subviews { apply(child) }
         }

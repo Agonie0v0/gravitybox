@@ -1,12 +1,14 @@
 import { ALLOWED_DATA_DIRECTORY_NAMES, applicationChannel, savedApplicationChannel, applicationTarget, detectInstalledChannels, type ApplicationChannel, type ApplicationTarget } from './application-target.js';
 import { GoogleAccountLogin } from './account-oauth.js';
 import { AccountSwitchService } from './account-switch.js';
-import { AccountsManager, accountCredentialReadiness, cleanAndLocalizeRefreshError, getGoogleClientId, getGoogleClientSecret, mergeSubscriptionTier, type Account, type QuotaData } from './accounts.js';
+import { AccountsManager, accountCredentialReadiness, cleanAndLocalizeRefreshError, getGoogleClientId, getGoogleClientSecret, hasExpiredQuotaWindow, mergeSubscriptionTier, type Account, type QuotaBucket, type QuotaData, type QuotaGroup } from './accounts.js';
+import { classifyFamily, classifyWindow, normalizeResetTime } from './quota.js';
 import { UsageStatsManager } from './usage.js';
 import {
   buildPricingCatalogPayloadSnapshot,
   readInstalledAppBundleVersion,
   readValidLiveIdeModelsSnapshot,
+  registerObservedModelsFromSource,
   sanitizeLiveIdeModelsSnapshot,
   type LiveIdeModelSnapshotEntry,
   type LiveIdeModelsSnapshot,
@@ -23,6 +25,7 @@ import {
   projectAccountForIpcNormalized as projectAccountNormalizedWithManager,
   projectAllUsagePeriodSummaries,
   projectQuotaContract,
+  projectSingleUsagePeriod,
   projectUsagePeriodSummary,
 } from './ipc-projections.js';
 export { normalizeSubscriptionTier, projectQuotaContract };
@@ -38,7 +41,15 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DictionaryStore, loadDictionary, dictionaryFromEntries, validateEntries, validateTemplateRules, resolveDictionaryForLocale } from './dictionary.js';
 import { bt, getActiveLocale, setActiveLocale, resolveInitialRuntimeLanguage, resolveLocale } from './i18n.js';
-import { Controller, type AssistantStatus } from './controller.js';
+import { Controller, type AssistantStatus, type RemoteSessionState } from './controller.js';
+import {
+  RemoteUsageSyncCoordinator,
+  buildRemoteEnvironmentId,
+  type RemoteGenerationEvent,
+  type RemoteUsageSyncReceipt,
+} from './remote-usage-sync.js';
+import type { LedgerEvent } from './usage-ledger.js';
+import type { KnownEnvironmentContext, SyncReceipt } from './usage-types.js';
 import { coverageMetricSnapshot } from './coverage.js';
 import { atomicJson, readOptionalJson, sanitizeError } from './files.js';
 import { discover } from './discovery.js';
@@ -70,24 +81,96 @@ function formatResetTime(resetTime: number | null | undefined): string {
   return !isNaN(date.getTime()) ? `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}` : String(resetTime);
 }
 
-/** 合并本机实时语言服务配额与已保存账号配额：当实时探测未返回分组/已知配额（如企业 Vertex AI）或套餐回退 FREE 时，保留已存分组、模型配额与真实高级套餐。 */
-function mergeLiveQuotaWithSaved(
+function isFutureResetIso(resetTime: unknown, nowMs: number): boolean {
+  const iso = normalizeResetTime(resetTime);
+  if (!iso) return false;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) && ms > nowMs;
+}
+
+function isExpiredResetIso(resetTime: unknown, nowMs: number): boolean {
+  const iso = normalizeResetTime(resetTime);
+  if (!iso) return false;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) && ms <= nowMs;
+}
+
+/**
+ * 合并本机实时语言服务配额与已保存账号配额：
+ * - 当实时探测未返回分组时，保留已存分组及真实 `last_updated`（避免把旧数据伪标为刚刚刷新）；
+ * - 若实时缓存返回了已过期窗口（reset_time <= nowMs），而已存配额对应语义窗口已有未过期的更新周期，则保留未过期窗口；
+ * - 实时探测未返回有效模型或套餐降级 FREE 时，保留已存模型与真实高级套餐。
+ */
+export function mergeLiveQuotaWithSaved(
   savedQuota: QuotaData | null | undefined,
-  liveQuota: QuotaData | null | undefined
+  liveQuota: QuotaData | null | undefined,
+  nowMs: number = Date.now(),
 ): QuotaData | null | undefined {
   if (!liveQuota) return savedQuota;
   if (!savedQuota) return liveQuota;
-  const hasLiveGroups = Array.isArray(liveQuota.quota_groups) && liveQuota.quota_groups.length > 0;
+  const savedGroups = savedQuota.quota_groups ?? [];
+  const liveGroups = liveQuota.quota_groups ?? [];
+  const hasLiveGroups = liveGroups.length > 0;
+  const hasSavedGroups = savedGroups.length > 0;
   const hasKnownLiveModels = Array.isArray(liveQuota.models) && liveQuota.models.some(m => m?.percentage_known || m?.own_percentage_known);
   const hasSavedModels = Array.isArray(savedQuota.models) && savedQuota.models.length > 0;
   const liveComplete = liveQuota.refresh_state?.complete === true;
   const mergedStaleGroups = liveQuota.stale_groups?.length
     ? liveQuota.stale_groups
     : (hasLiveGroups && liveComplete ? undefined : savedQuota.stale_groups);
+
+  let mergedGroups: QuotaGroup[];
+  if (!hasLiveGroups) {
+    mergedGroups = savedGroups;
+  } else if (!hasSavedGroups) {
+    mergedGroups = liveGroups;
+  } else {
+    const savedBucketsBySemantic = new Map<string, QuotaBucket>();
+    for (const sg of savedGroups) {
+      const fam = sg.family ?? classifyFamily({
+        groupName: sg.display_name,
+        description: sg.description,
+        bucketId: sg.buckets?.[0]?.bucket_id,
+      });
+      for (const sb of sg.buckets ?? []) {
+        if (sb.stale === true || sb.remaining_fraction_known === false) continue;
+        const win = sb.window ?? classifyWindow(undefined, sb.bucket_id, sb.display_name);
+        if (win === 'unspecified') continue;
+        if (isFutureResetIso(sb.reset_time, nowMs)) {
+          savedBucketsBySemantic.set(`${fam}:${win}`, sb);
+        }
+      }
+    }
+    mergedGroups = liveGroups.map(lg => {
+      const fam = lg.family ?? classifyFamily({
+        groupName: lg.display_name,
+        description: lg.description,
+        bucketId: lg.buckets?.[0]?.bucket_id,
+      });
+      const nextBuckets = (lg.buckets ?? []).map(lb => {
+        const win = lb.window ?? classifyWindow(undefined, lb.bucket_id, lb.display_name);
+        if (win !== 'unspecified' && isExpiredResetIso(lb.reset_time, nowMs)) {
+          const fresherSaved = savedBucketsBySemantic.get(`${fam}:${win}`);
+          if (fresherSaved) {
+            return { ...fresherSaved };
+          }
+        }
+        return lb;
+      });
+      return { ...lg, buckets: nextBuckets };
+    });
+  }
+
+  const effectiveLastUpdated =
+    !hasLiveGroups && hasSavedGroups && typeof savedQuota.last_updated === 'number' && savedQuota.last_updated > 0
+      ? savedQuota.last_updated
+      : liveQuota.last_updated;
+
   const merged: QuotaData = {
     ...savedQuota,
     ...liveQuota,
-    quota_groups: hasLiveGroups ? liveQuota.quota_groups : (savedQuota.quota_groups ?? []),
+    last_updated: effectiveLastUpdated,
+    quota_groups: mergedGroups,
     models: (hasLiveGroups || hasKnownLiveModels || !hasSavedModels) ? liveQuota.models : savedQuota.models,
     subscription_tier: mergeSubscriptionTier(liveQuota.subscription_tier, savedQuota.subscription_tier, {
       allowFreeDowngrade: hasLiveGroups || liveComplete || !savedQuota.subscription_tier,
@@ -155,11 +238,13 @@ export async function buildDashboardAggregate(deps: DashboardAggregateDeps): Pro
         let isLiveVerified = false;
         let quotaRefreshError = cleanAndLocalizeRefreshError((activeAcc as any)?.quota_refresh_error) ?? '';
 
+        // 同一载荷的顶层/模型/分组/英文描述倒计时统一由 reset_time 按同一参考时刻现算。
+        const dashboardNowMs = Date.now();
         if (liveAccountEmail) {
           const matchedSummary = listRes.accounts.find((a: any) => a.email.toLowerCase() === liveAccountEmail.toLowerCase());
           const matchedSaved = matchedSummary ? await deps.getAccount(matchedSummary.id) : null;
           if (matchedSaved) {
-            const mergedQuota = mergeLiveQuotaWithSaved(matchedSaved.quota, liveLs?.quota);
+            const mergedQuota = mergeLiveQuotaWithSaved(matchedSaved.quota, liveLs?.quota, dashboardNowMs);
             sourceAcc = { ...matchedSaved, ...(mergedQuota ? { quota: mergedQuota } : {}) };
             currentAccountId = matchedSaved.id;
             activeEmail = matchedSaved.email;
@@ -181,8 +266,6 @@ export async function buildDashboardAggregate(deps: DashboardAggregateDeps): Pro
           }
         }
 
-        // 同一载荷的顶层/模型/分组/英文描述倒计时统一由 reset_time 按同一参考时刻现算。
-        const dashboardNowMs = Date.now();
         const quotaOverview = sourceAcc ? deps.getAccountQuotaOverview(sourceAcc, { nowMs: dashboardNowMs }) : null;
         // 有账号但套餐缺失/空串时回落到“待确认”；完全无账号时才保留 FREE 的既有语义。
         const activeTier = (!isLiveVerified && liveAccountEmail && !currentAccountId)
@@ -243,11 +326,16 @@ export async function buildDashboardAggregate(deps: DashboardAggregateDeps): Pro
           deps.getUsageSummary(),
           deps.getPricingTable(),
         ]);
+        const isUnfilteredEnv = (summary?.selected_environment_id ?? 'all') === 'all';
+        const hasTodaySeries =
+          Array.isArray(summary?.today?.by_model) && Array.isArray(summary?.today_hourly);
         const allPeriodsProjected =
-          Array.isArray(summary?.today?.by_model) && Array.isArray(summary?.today_hourly)
+          isUnfilteredEnv && hasTodaySeries
             ? projectAllUsagePeriodSummaries(summary)
             : undefined;
-        const todayProjected = allPeriodsProjected?.today;
+        const todayProjected = allPeriodsProjected?.today ?? (hasTodaySeries ? projectSingleUsagePeriod(summary, 'today') : undefined);
+        const envBreakdown = summary.today?.environment_breakdown ?? (summary as any).environment_breakdown ?? null;
+        const selectedEnvId = summary?.selected_environment_id ?? 'all';
         usage = {
           todayTokens: summary.today.totals.total_tokens,
           totalTokens: summary.all_time.totals.total_tokens,
@@ -270,6 +358,10 @@ export async function buildDashboardAggregate(deps: DashboardAggregateDeps): Pro
           unknownTimeRecords: (summary as any).unknown_time_records ?? 0,
           unknownTimeTokens: (summary as any).unknown_time_tokens ?? 0,
           databaseDiagnostics: (summary as any).database_diagnostics ?? [],
+          selectedEnvironmentId: selectedEnvId,
+          selected_environment_id: selectedEnvId,
+          availableEnvironments: (summary as any).available_environments ?? [],
+          ...(envBreakdown ? { environmentBreakdown: envBreakdown, environment_breakdown: envBreakdown } : {}),
           ...(todayProjected ? {
             todayHourly: todayProjected.todayHourly,
             todayByModel: todayProjected.byModel,
@@ -384,6 +476,7 @@ async function run() {
   let lastLiveSnapshotDedupKey = '';
   async function persistLiveIdeModelsIfPresent(live: Parameters<typeof sanitizeLiveIdeModelsSnapshot>[0]): Promise<void> {
     if (!live?.quota?.models?.length) return;
+    registerObservedModelsFromSource(live.quota.models);
     const appVersion = await readInstalledAppBundleVersion(target.appPath);
     const snapshot = sanitizeLiveIdeModelsSnapshot(live, appVersion);
     if (!snapshot) return;
@@ -416,6 +509,7 @@ async function run() {
   });
   let accountSyncInFlight: Promise<void> | null = null;
   let accountSyncedAt = 0;
+  const cachedAccountIdsByEmail = new Map<string, string>();
   async function syncActiveAccountToUsageManager(forceSync = false): Promise<void> {
     const now = Date.now();
     if (!forceSync && now - accountSyncedAt < 4500) return;
@@ -425,6 +519,10 @@ async function run() {
         const live = await probeLiveCached().catch(() => null);
         const listRes = await accountsManager.listAccounts({ liveEmailHint: live?.email ?? null }).catch(() => null);
         if (listRes?.accounts) {
+          cachedAccountIdsByEmail.clear();
+          for (const a of listRes.accounts) {
+            if (a.email && a.id) cachedAccountIdsByEmail.set(a.email.toLowerCase(), a.id);
+          }
           usageManager.setKnownAccounts(listRes.accounts.map(a => ({
             id: a.id,
             email: a.email,
@@ -470,6 +568,19 @@ async function run() {
   if (pricePrefs) usageManager.setAutoRemotePricingSync(pricePrefs.enabled === true);
   else if (typeof configuredAutoPricingSync === 'boolean') usageManager.setAutoRemotePricingSync(configuredAutoPricingSync);
   await usageManager.hydratePricingCatalog().catch(() => {});
+  await (async () => {
+    const listRes = await accountsManager.listAccounts().catch(() => null);
+    for (const acc of listRes?.accounts ?? []) {
+      if (acc.quota?.models?.length) {
+        registerObservedModelsFromSource(acc.quota.models);
+      }
+    }
+    const installedVer = await readInstalledAppBundleVersion(target.appPath).catch(() => '');
+    const snap = installedVer ? await readValidLiveIdeModelsSnapshot(liveIdeModelsPath, installedVer).catch(() => null) : null;
+    if (snap?.models?.length) {
+      registerObservedModelsFromSource(snap.models);
+    }
+  })().catch(() => {});
   const idempotencyStore = new IdempotencyStore();
   let backendLease: ProcessLease | undefined;
 
@@ -552,10 +663,13 @@ async function run() {
   }
   catch { fallback = await loadDictionary(initialDictInfo.baseDir); }
   await store.start(fallback);
+  let stopping = false;
   let writeChain = Promise.resolve();
   let statusTasks:Tasks|undefined;
+  let syncRemoteTargetStateAndMaybeTriggerSync: () => void = () => {};
   let pendingStatus: any, writingStatus=false, lastStatusKey="", lastStatusWrite=0;
   const onStatus = (status: AssistantStatus) => {
+    syncRemoteTargetStateAndMaybeTriggerSync();
     const installState = detectInstalledChannels(channel);
     const oauthClientConfigured = Boolean(getGoogleClientId() && getGoogleClientSecret());
     const snapshot = { ...status, oauthClientConfigured, applicationChannel: channel, applicationLabel: target.label, accountSwitchSupported: target.supportsAccountSwitch, bothApplicationsInstalled: installState.bothInstalled, availableChannels: installState.channels, pricingRevision: usageManager.getPricingRevision(), taskRevision:statusTasks?.revision??0,runningTasks:statusTasks?.list().filter(t=>t.state==='running').length??0 };
@@ -569,6 +683,22 @@ async function run() {
     const port = Number(option('--fixture-port')), origin = option('--fixture-origin');
     if (!Number.isInteger(port) || !origin || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) throw new Error(bt('main.fixture_invalid'));
     fixture = { port, origin };
+  }
+  const expiredWindowRefreshAt = new Map<string, number>();
+  function scheduleExpiredQuotaCorrection(targetId: string | null, quota: QuotaData | null | undefined, nowMs: number = Date.now()): void {
+    if (stopping || fixture) return;
+    if (!hasExpiredQuotaWindow(quota, nowMs)) return;
+    const key = targetId || '__live_unsaved__';
+    const lastAttempt = expiredWindowRefreshAt.get(key) ?? 0;
+    if (nowMs - lastAttempt < 60_000) return;
+    expiredWindowRefreshAt.set(key, nowMs);
+    if (targetId) {
+      void accountsManager.refreshQuota(targetId).catch(() => {});
+    } else {
+      void accountsManager.probeLiveLanguageServer(globalThis.fetch, { forceRefresh: true })
+        .then(res => persistLiveIdeModelsIfPresent(res))
+        .catch(() => {});
+    }
   }
   let applyChain = Promise.resolve();
   const shortcutEnabled = !!fixture;
@@ -613,6 +743,227 @@ async function run() {
     reloadDictionary: async () => { await store.reload(); await applyChain; if (store.lastError) throw new Error(store.lastError); },
     onStatus,
   });
+  let lastConnectedRemoteEnvs = new Map<string, { hostLabel: string; state: string; email: string }>();
+  const lastRemoteHeartbeatAtMs = new Map<string, number>();
+  const remoteLastSyncedAtSec = new Map<string, number>();
+  const remoteSyncCoordinator = new RemoteUsageSyncCoordinator({
+    stateDir,
+    getTargets: () => controller.getConnectedRemoteRpcTargets(),
+    ledger: {
+      receipts: () => usageManager.getSyncReceipts(),
+      save: async (
+        events: RemoteGenerationEvent[],
+        options?: { billingPrices?: Record<string, unknown>; receipts?: RemoteUsageSyncReceipt[] }
+      ) => {
+        const res = await usageManager.ingestRemoteUsageBatch(
+          events as LedgerEvent[],
+          (options?.receipts ?? []) as SyncReceipt[],
+          options?.billingPrices ? { billingPrices: options.billingPrices as Record<string, any> } : undefined
+        );
+        if (options?.receipts) {
+          for (const rec of options.receipts) {
+            if (rec?.environment_id && rec.committed_at > 0) {
+              const prev = remoteLastSyncedAtSec.get(rec.environment_id) ?? 0;
+              if (rec.committed_at > prev) remoteLastSyncedAtSec.set(rec.environment_id, rec.committed_at);
+            }
+          }
+        }
+        return res;
+      },
+    },
+    resolveMatchedLocalAccountId: (email: string) => cachedAccountIdsByEmail.get(email.trim().toLowerCase()) ?? null,
+    getBillingPrices: () => usageManager.getBillingPricingTable(),
+    onCommitted: () => {
+      syncRemoteTargetStateAndMaybeTriggerSync();
+      if (!stopping) {
+        onStatus(controller.snapshot());
+      }
+    },
+  });
+  syncRemoteTargetStateAndMaybeTriggerSync = () => {
+    if (stopping) return;
+    const targets = controller.getConnectedRemoteRpcTargets();
+    const sessions = controller.getRemoteSessionsSnapshot();
+    const envMap = new Map<string, KnownEnvironmentContext>();
+    const currentConnected = new Map<string, { hostLabel: string; state: string; email: string }>();
+    let shouldTriggerSync = false;
+
+    for (const t of targets) {
+      const lastSynced = remoteLastSyncedAtSec.get(t.environmentId);
+      const online = t.state !== 'disconnected';
+      envMap.set(t.environmentId, {
+        id: t.environmentId,
+        kind: 'ssh',
+        host_label: t.hostLabel,
+        label: t.hostLabel,
+        online,
+        ...(lastSynced !== undefined ? { last_synced_at: lastSynced } : {}),
+      });
+      if (online) {
+        currentConnected.set(t.environmentId, { hostLabel: t.hostLabel, state: t.state, email: t.email });
+        const prev = lastConnectedRemoteEnvs.get(t.environmentId);
+        const nowMs = Date.now();
+        const heartbeatDue = nowMs - (lastRemoteHeartbeatAtMs.get(t.environmentId) ?? 0) >= 30_000;
+        if (!prev || prev.state !== t.state || prev.email !== t.email) {
+          shouldTriggerSync = true;
+        }
+        if (t.email && (!prev || prev.state !== t.state || prev.email !== t.email || heartbeatDue)) {
+          lastRemoteHeartbeatAtMs.set(t.environmentId, nowMs);
+          remoteSyncCoordinator.recordObservation({
+            hostLabel: t.hostLabel,
+            environmentId: t.environmentId,
+            email: t.email,
+            matchedLocalAccountId: t.matchedLocalAccountId ?? cachedAccountIdsByEmail.get(t.email.toLowerCase()) ?? null,
+            accountType: t.accountType,
+          });
+        }
+      }
+    }
+
+    for (const s of sessions) {
+      const envId = buildRemoteEnvironmentId(s.hostLabel);
+      if (envMap.has(envId)) continue;
+      const lastSynced = remoteLastSyncedAtSec.get(envId);
+      envMap.set(envId, {
+        id: envId,
+        kind: 'ssh',
+        host_label: s.hostLabel,
+        label: s.hostLabel,
+        online: s.state !== 'disconnected',
+        ...(lastSynced !== undefined ? { last_synced_at: lastSynced } : {}),
+      });
+    }
+
+    for (const prevEnvId of lastConnectedRemoteEnvs.keys()) {
+      if (!currentConnected.has(prevEnvId)) {
+        lastRemoteHeartbeatAtMs.delete(prevEnvId);
+        remoteSyncCoordinator.markEnvironmentDisconnected(prevEnvId);
+      }
+    }
+    lastConnectedRemoteEnvs = currentConnected;
+    usageManager.setOnlineRemoteEnvironments([...envMap.values()]);
+
+    if (shouldTriggerSync && !fixture) {
+      remoteSyncCoordinator.triggerSync();
+    }
+  };
+  const runBoundedRemoteSyncForDemand = async (maxWaitMs = 6_000): Promise<void> => {
+    syncRemoteTargetStateAndMaybeTriggerSync();
+    if (stopping || fixture) return;
+    if (controller.getConnectedRemoteRpcTargets().length === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const syncAc = new AbortController();
+    try {
+      await Promise.race([
+        remoteSyncCoordinator.syncNow({ force: true, signal: syncAc.signal }).catch(() => {}),
+        new Promise<void>(resolve => {
+          timer = setTimeout(() => {
+            syncAc.abort();
+            resolve();
+          }, maxWaitMs);
+          timer.unref();
+        }),
+      ]);
+    } catch {
+      // 远端同步超时或失败绝不阻塞本机用量查询返回
+    } finally {
+      if (timer) clearTimeout(timer);
+      syncRemoteTargetStateAndMaybeTriggerSync();
+    }
+  };
+  async function buildRemoteSessionsPayload(options?: {
+    force?: boolean;
+    remoteKey?: string;
+    nonBlocking?: boolean;
+  }): Promise<Record<string, unknown>[]> {
+    const index = await accountsManager.loadIndex().catch(() => null);
+    const matchAccountId = (email: string): string | null => {
+      if (!index || !email) return null;
+      const targetEmail = email.toLowerCase();
+      const found = index.accounts.find(a => a.email.toLowerCase() === targetEmail);
+      return found?.id ?? null;
+    };
+    const getQuotaOverview = (quota: QuotaData, nowMs: number) =>
+      accountsManager.getAccountQuotaOverview({ quota }, { nowMs });
+
+    const nowMs = Date.now();
+    let sessions: RemoteSessionState[];
+    if (options?.nonBlocking) {
+      sessions = controller.getRemoteSessionsSnapshot(nowMs);
+      const needsBgProbe = sessions.some(
+        s => s.state === 'connected' && (!s.observedAt || nowMs - s.observedAt >= 30_000)
+      );
+      if (needsBgProbe) {
+        void controller.probeRemoteSessions({
+          matchAccountId,
+          getQuotaOverview,
+        }).catch(() => {});
+      }
+    } else {
+      sessions = await controller.probeRemoteSessions({
+        force: options?.force,
+        remoteKey: options?.remoteKey,
+        matchAccountId,
+        getQuotaOverview,
+      });
+    }
+    syncRemoteTargetStateAndMaybeTriggerSync();
+    for (const s of sessions) {
+      if (s.quota?.models?.length) {
+        registerObservedModelsFromSource(s.quota.models);
+      }
+    }
+
+    return sessions.map(s => {
+      const matchedId = s.email ? matchAccountId(s.email) : null;
+      const overview = s.quota ? (s.quotaOverview ?? getQuotaOverview(s.quota, nowMs)) : null;
+      const contract = projectQuotaContract(overview ?? {
+        familyWindows: null,
+        argonStatus: null,
+        carbonStatus: null,
+        standaloneModels: [],
+        projectedQuotaGroups: [],
+        refreshState: s.quota?.refresh_state ?? { complete: false },
+        quotaWarnings: [],
+        quotaWarningCodes: [],
+      });
+      const resolvedTier = s.tier || (overview as any)?.subscriptionTier
+        ? normalizeSubscriptionTier(
+            resolveUnsavedLiveSubscriptionTier(
+              { tier: s.tier, accountType: s.accountType },
+              overview as any
+            )
+          )
+        : '';
+      return {
+        remoteKey: s.remoteKey,
+        environmentId: buildRemoteEnvironmentId(s.hostLabel),
+        hostLabel: s.hostLabel,
+        targetId: s.targetId,
+        state: s.state,
+        email: s.email,
+        name: s.name ?? '',
+        tier: resolvedTier || s.tier,
+        subscription_tier: resolvedTier,
+        activeTier: resolvedTier,
+        accountType: s.accountType,
+        matchedLocalAccountId: matchedId,
+        observedAt: s.observedAt,
+        quotaLastUpdated: s.quota?.last_updated ?? (s.observedAt ? Math.floor(s.observedAt / 1000) : null),
+        disconnectedAt: s.disconnectedAt,
+        lastError: s.lastError,
+        lastFocusedAt: s.lastFocusedAt,
+        fiveHourRemaining: (overview as any)?.fiveHourRemaining ?? null,
+        weeklyRemaining: (overview as any)?.weeklyRemaining ?? null,
+        resetTime: formatResetTime((overview as any)?.resetTime ?? null),
+        resetCountdown: (overview as any)?.resetCountdown ?? '',
+        staleGroups: (overview as any)?.staleGroups ?? [],
+        stale_groups: (overview as any)?.staleGroups ?? [],
+        models: (overview as any)?.models ?? [],
+        ...contract,
+      };
+    });
+  }
   const tasks = new Tasks(stateDir, () => onStatus(controller.snapshot()));statusTasks=tasks; await tasks.start();
   usageManager.setOnPricingUpdated(() => {
     onStatus(controller.snapshot());
@@ -643,11 +994,14 @@ async function run() {
   store.on('updated', dictionary => { cache(); applyChain = controller.update(dictionary); applyChain.catch(() => controller.dictionaryError(bt('main.dict_partial_update'))); });
   store.on('invalid', message => controller.dictionaryError(String(message)));
   store.on('valid', () => controller.dictionaryError());
-  let commandChain = Promise.resolve(); let stopping = false; const ipcMetrics = { statusRequests: 0, taskPayloadReplies: 0 };
+  let commandChain = Promise.resolve(); const ipcMetrics = { statusRequests: 0, taskPayloadReplies: 0 };
   const startQuotaRefreshTask = () => tasks.begin('quota-refresh', bt('main.task.quota_refresh_title'), async (signal, progress, _commit) => {
     const result = await accountsManager.refreshAllQuotas(globalThis.fetch, {
       signal,
-      onAccountUpdated: (_account, done, total) => {
+      onAccountUpdated: (account, done, total) => {
+        if (account?.quota?.models?.length) {
+          registerObservedModelsFromSource(account.quota.models);
+        }
         progress(done, total);
       },
     });
@@ -746,11 +1100,14 @@ async function run() {
                 if (matchedSaved) {
                   activeAccountEmail = matchedSaved.email;
                   const liveQuotaForMatched = liveLs?.email?.toLowerCase() === detectedEmail.toLowerCase() ? liveLs.quota : null;
-                  const q = accountsManager.getAccountQuotaOverview({ ...matchedSaved, quota: mergeLiveQuotaWithSaved(matchedSaved.quota, liveQuotaForMatched) });
+                  const statusNowMs = Date.now();
+                  scheduleExpiredQuotaCorrection(matchedSaved.id, liveQuotaForMatched, statusNowMs);
+                  const q = accountsManager.getAccountQuotaOverview({ ...matchedSaved, quota: mergeLiveQuotaWithSaved(matchedSaved.quota, liveQuotaForMatched, statusNowMs) }, { nowMs: statusNowMs });
                   activeFiveHourQuota = q.fiveHourRemaining;
                   activeSubscriptionTier = normalizeSubscriptionTier(q.subscriptionTier);
                 } else if (liveLs?.email) {
                   activeAccountEmail = liveLs.email;
+                  scheduleExpiredQuotaCorrection(null, liveLs.quota);
                   const q = accountsManager.getAccountQuotaOverview({ quota: liveLs.quota });
                   activeFiveHourQuota = q.fiveHourRemaining;
                   activeSubscriptionTier = resolveUnsavedLiveSubscriptionTier(liveLs, q);
@@ -766,15 +1123,19 @@ async function run() {
           }
           const all = tasks.list(), revision = tasks.revision;
           const installState = detectInstalledChannels(channel);
+          const remoteSessions = await buildRemoteSessionsPayload({ nonBlocking: true }).catch(() => []);
+          const snap = controller.snapshot();
           if (parsed.includeTasks !== false && parsed.tasksSince !== revision) ipcMetrics.taskPayloadReplies++;
           reply({
             ok: true,
             status: {
-              ...controller.snapshot(),
+              ...snap,
+              remoteSessions,
               oauthClientConfigured: Boolean(getGoogleClientId() && getGoogleClientSecret()),
               applicationChannel: channel, applicationLabel: target.label, accountSwitchSupported: target.supportsAccountSwitch,
               bothApplicationsInstalled: installState.bothInstalled, availableChannels: installState.channels,
               pricingRevision: usageManager.getPricingRevision(),
+              remoteSyncRevision: usageManager.getRemoteSyncRevision(),
               ...(parsed.includeAccounts === false ? {} : { activeAccountEmail, activeFiveHourQuota, activeSubscriptionTier, liveAccountEmail, accountsRevision }),
             },
             ipc: { ...ipcMetrics },
@@ -791,6 +1152,7 @@ async function run() {
       else if (['pause', 'restore'].includes(command)) { cancelRunningDeepScan(); }
       if (command === 'dashboard_summary') {
         (async () => {
+        const targetEnvironmentId = typeof parsed.environmentId === 'string' && parsed.environmentId.trim() ? parsed.environmentId.trim() : undefined;
         const counts = store.layerCounts;
         const dictTotal = (counts?.builtin ?? 0) + (counts?.incremental ?? 0) + (counts?.personal ?? 0);
         const livePromise = probeLiveCached().catch(() => null);
@@ -798,7 +1160,7 @@ async function run() {
           syncActiveOfficialModelsToUsageManager(),
           syncActiveAccountToUsageManager().catch(() => {}),
         ]);
-        const [report, aggregate] = await Promise.all([
+        const [report, aggregate, remoteSessions] = await Promise.all([
           controller.coverageReport(),
           buildDashboardAggregate({
             listAccounts: async () => {
@@ -809,13 +1171,18 @@ async function run() {
             probeLiveLanguageServer: () => livePromise,
             getAccount: (id: string) => accountsManager.getAccount(id),
             getAccountQuotaOverview: (account: any, options?: any) => accountsManager.getAccountQuotaOverview(account, options),
-            getUsageSummary: () => usageManager.getUsageSummary(),
+            getUsageSummary: () => {
+              syncRemoteTargetStateAndMaybeTriggerSync();
+              return usageManager.getUsageSummary(false, undefined, targetEnvironmentId);
+            },
             getPricingTable: async () => {
               await pricingSyncPromise;
               return usageManager.getActivePricingTable();
             },
           }),
+          buildRemoteSessionsPayload().catch(() => []),
         ]);
+        const snap = controller.snapshot();
         /* 总览“已覆盖”与覆盖页同源（translated / 已抽取），并带上应用版本与生成时间。 */
         const coverageMetrics = coverageMetricSnapshot(report);
 
@@ -840,6 +1207,11 @@ async function run() {
           coverage: report ? coverageMetrics : null,
           accounts: aggregate.accounts,
           usage: aggregate.usage,
+          remoteSessions,
+          focusedContextKey: snap.focusedContextKey ?? 'local',
+          remoteObservedVersion: snap.remoteObservedVersion ?? 0,
+          sshWindowsCount: snap.sshWindowsCount ?? 0,
+          activeSshHosts: snap.activeSshHosts ?? [],
           /* 局部失败时错误已脱敏，成功段仍返回可用数据，整体保持 ok:true。 */
           accountsError: aggregate.accountsError,
           usageError: aggregate.usageError,
@@ -871,15 +1243,19 @@ async function run() {
                 quota: null, quota_refresh_error: bt('main.account_missing'),
                 credentialReadiness: { state: 'needs_authorization', message: bt('main.account_check_files') } };
               const isLiveMatched = live?.email?.toLowerCase() === summary.email.toLowerCase() && live.quota;
+              if (isLiveMatched) {
+                scheduleExpiredQuotaCorrection(summary.id, live.quota, listNowMs);
+              }
               const acc: Account = {
                 ...saved,
-                quota: isLiveMatched ? mergeLiveQuotaWithSaved(saved.quota, live.quota) : saved.quota,
+                quota: isLiveMatched ? mergeLiveQuotaWithSaved(saved.quota, live.quota, listNowMs) : saved.quota,
               };
               const projected = projectAccountForIpcNormalized(acc, {
                 nowMs: listNowMs,
                 includeOverviewFields: true,
                 formatResetTime,
                 revisionWithReadiness: true,
+                persistedQuotaLastUpdated: saved.quota?.last_updated ?? 0,
               });
               return { id: acc.id, ...(projected ?? {}) };
             }));
@@ -975,6 +1351,7 @@ async function run() {
               }
             } catch {}
           }
+          const sshSummary = controller.getActiveSshWindowsSummary();
           reply({
             ok: true,
             appRunning,
@@ -984,14 +1361,30 @@ async function run() {
             state: hasRunningTask ? 'busy' : 'safe',
             hasRunningTask,
             taskReason,
+            activeSshWindowsCount: sshSummary.count,
+            activeSshHosts: sshSummary.hosts,
           });
         })().catch(error => reply({ ok: false, state: 'unknown', error: sanitizeErrorMessage(error) }));
         return;
       }
       // 只读及自管理锁的配额刷新命令直接并发响应，不阻塞在全局写锁 commandChain 队列后
       const isReadOnlyAutoSwitch = command === 'auto_switch_best' && parsed.execute !== true;
-      if (['maintenance_scan', 'maintenance_history', 'account_recovery_info', 'auto_switch_get', 'usage_snapshot_release', 'usage_events', 'usage_summary', 'usage_ledger_review', 'api_pricing_get', 'pricing_sync_status', 'quota_refresh', 'quota_refresh_start'].includes(command) || isReadOnlyAutoSwitch) {
+      if (['maintenance_scan', 'maintenance_history', 'account_recovery_info', 'auto_switch_get', 'usage_snapshot_release', 'usage_events', 'usage_summary', 'usage_ledger_review', 'api_pricing_get', 'pricing_sync_status', 'quota_refresh', 'quota_refresh_start', 'remote_quota_refresh'].includes(command) || isReadOnlyAutoSwitch) {
         (async () => {
+          if (command === 'remote_quota_refresh') {
+            const remoteKey = typeof parsed.remoteKey === 'string' && parsed.remoteKey.trim()
+              ? parsed.remoteKey.trim()
+              : undefined;
+            const remoteSessions = await buildRemoteSessionsPayload({ force: true, remoteKey });
+            const snap = controller.snapshot();
+            reply({
+              ok: true,
+              remoteSessions,
+              remoteObservedVersion: snap.remoteObservedVersion ?? 0,
+              focusedContextKey: snap.focusedContextKey ?? 'local',
+            });
+            return;
+          }
           if (command === 'quota_refresh_start') {
             const taskId = startQuotaRefreshTask();
             reply({ ok: true, taskId });
@@ -999,6 +1392,9 @@ async function run() {
           }
           if (command === 'quota_refresh') {
             const acc = await accountsManager.refreshQuota(parsed.id);
+            if (acc.quota?.models?.length) {
+              registerObservedModelsFromSource(acc.quota.models);
+            }
             const refreshNowMs = Date.now();
             const overview = accountsManager.getAccountQuotaOverview(acc, { nowMs: refreshNowMs });
             const projected = projectAccountForIpcNormalized(acc, {
@@ -1034,17 +1430,49 @@ async function run() {
           if (command === 'usage_snapshot_release') { usageManager.releaseSnapshot(String(parsed.snapshotId ?? '')); reply({ ok: true }); return; }
           if (command === 'usage_events') {
             const period = ['today', '7d', '30d', 'all'].includes(String(parsed.period)) ? String(parsed.period) : 'today';
+            const force = Boolean(parsed.force);
             const targetAccountId = typeof parsed.accountId === 'string' && parsed.accountId ? parsed.accountId : undefined;
+            const targetEnvironmentId = typeof parsed.environmentId === 'string' && parsed.environmentId ? parsed.environmentId : undefined;
             await syncActiveAccountToUsageManager().catch(() => {});
-            reply({ ok: true, ...await usageManager.getUsageEvents(period, String(parsed.query ?? ''), Number(parsed.offset), Number(parsed.limit), typeof parsed.snapshotId === 'string' ? parsed.snapshotId : undefined, parsed.pinSnapshot === true, Boolean(parsed.force), targetAccountId) });
+            if (force) {
+              await runBoundedRemoteSyncForDemand(6_000);
+            } else {
+              syncRemoteTargetStateAndMaybeTriggerSync();
+            }
+            reply({
+              ok: true,
+              ...await usageManager.getUsageEvents(
+                period,
+                String(parsed.query ?? ''),
+                Number(parsed.offset),
+                Number(parsed.limit),
+                typeof parsed.snapshotId === 'string' ? parsed.snapshotId : undefined,
+                parsed.pinSnapshot === true,
+                force,
+                targetAccountId,
+                targetEnvironmentId
+              ),
+            });
             return;
           }
           if (command === 'usage_summary') {
             const force = Boolean(parsed.force);
             const targetAccountId = typeof parsed.accountId === 'string' && parsed.accountId ? parsed.accountId : undefined;
+            const targetEnvironmentId = typeof parsed.environmentId === 'string' && parsed.environmentId ? parsed.environmentId : undefined;
             await syncActiveAccountToUsageManager().catch(() => {});
-            const usage = await usageManager.getUsageSummary(force, targetAccountId);
-            reply(projectUsagePeriodSummary(usage, parsed.period, { includeAllPeriods: !targetAccountId || targetAccountId === 'all' }));
+            if (force) {
+              await runBoundedRemoteSyncForDemand(6_000);
+            } else {
+              syncRemoteTargetStateAndMaybeTriggerSync();
+            }
+            const usage = await usageManager.getUsageSummary(force, targetAccountId, targetEnvironmentId);
+            reply(
+              projectUsagePeriodSummary(usage, parsed.period, {
+                includeAllPeriods:
+                  (!targetAccountId || targetAccountId === 'all') &&
+                  (!targetEnvironmentId || targetEnvironmentId === 'all'),
+              })
+            );
             return;
           }
           if (command === 'api_pricing_get') {
@@ -1199,6 +1627,11 @@ async function run() {
 
           if (command === 'quota_refresh_all') {
             const result = await accountsManager.refreshAllQuotas();
+            for (const refreshed of result.accounts) {
+              if (refreshed.quota?.models?.length) {
+                registerObservedModelsFromSource(refreshed.quota.models);
+              }
+            }
             const accounts = result.accounts.map(account => projectAccountForIpcNormalized(account));
             reply({ ok: result.failures.length === 0,
               accounts,
@@ -1226,7 +1659,7 @@ async function run() {
           }
           else if (command === 'toggle') {if(!fixture)throw new Error(bt('main.shortcut_removed'));await controller.toggleLanguage();}
           else if (command === 'reload') await store.reload();
-          else if (command === 'stop') { stopping = true; clearTimeout(startupPricingSyncTimer); clearInterval(periodicPricingSyncTimer); clearTimeout(startupQuotaRefreshTimer); clearInterval(periodicQuotaRefreshTimer); server.close(); await accountLogin.close(); await tasks.stop(); store.close(); await controller.stop(); }
+          else if (command === 'stop') { stopping = true; clearTimeout(startupPricingSyncTimer); clearInterval(periodicPricingSyncTimer); clearTimeout(startupQuotaRefreshTimer); clearInterval(periodicQuotaRefreshTimer); clearInterval(periodicRemoteSyncTimer); server.close(); await accountLogin.close(); await tasks.stop(); store.close(); await controller.stop(); }
           else throw new Error(bt('main.unknown_command'));
           await writeChain; await cacheChain.catch(() => {});
           reply({ ok: true, status: controller.snapshot() });
@@ -1305,6 +1738,12 @@ async function run() {
   startupQuotaRefreshTimer.unref();
   const periodicQuotaRefreshTimer = setInterval(() => maybeScheduleAutoQuotaRefresh(), 30_000);
   periodicQuotaRefreshTimer.unref();
+  const periodicRemoteSyncTimer = setInterval(() => {
+    if (stopping || fixture) return;
+    syncRemoteTargetStateAndMaybeTriggerSync();
+    remoteSyncCoordinator.triggerSync();
+  }, 45_000);
+  periodicRemoteSyncTimer.unref();
   server.maxConnections = 64;
   const previousUmask = process.umask(0o177);
   try {
@@ -1319,6 +1758,7 @@ async function run() {
     clearInterval(periodicPricingSyncTimer);
     clearTimeout(startupQuotaRefreshTimer);
     clearInterval(periodicQuotaRefreshTimer);
+    clearInterval(periodicRemoteSyncTimer);
     server.close();
     await commandChain.catch(() => {});
     await accountLogin.close(); await tasks.stop(); store.close(); await controller.stop(); await writeChain; await cacheChain.catch(() => {}); await unlink(socketPath).catch(() => {}); await backendLease?.release(); process.exit(code);

@@ -1,6 +1,65 @@
 import type { CDP } from '../cdp.js';
-import type { ConversationHudMetrics, HudActivityPhase, HudClientEvent, ICdpHudBridge } from './types.js';
-import { ConversationMetricsEngine } from './metrics-engine.js';
+import type {
+  ConversationHudMetrics,
+  HudActivityPhase,
+  HudClientEvent,
+  ICdpHudBridge,
+  ParsedExecutorMetadata,
+} from './types.js';
+import { ConversationMetricsEngine, buildConversationHudMetrics } from './metrics-engine.js';
+import {
+  computeRemoteConversationHudMetrics,
+  isStrictSubagentSummary,
+  type RemoteGenMetadataRecord,
+  type RemoteRpcClientLike,
+  type RemoteStepRecord,
+  type RemoteTrajectorySummary,
+} from '../ssh-remote-rpc.js';
+
+export interface HudTargetMeta {
+  sourceKind?: 'local' | 'remote';
+  remoteKey?: string;
+  hostLabel?: string;
+  origin?: string;
+  rpcClient?: RemoteRpcClientLike;
+}
+
+interface AttachedTargetEntry {
+  cdp: CDP;
+  getContextId: () => number | undefined;
+  sourceKind: 'local' | 'remote';
+  remoteKey?: string;
+  hostLabel?: string;
+  origin?: string;
+  rpcClient?: RemoteRpcClientLike;
+}
+
+interface RemoteChildTrajectoryCache {
+  cascadeId: string;
+  summary?: RemoteTrajectorySummary | null;
+  steps: RemoteStepRecord[];
+  generatorMetadata: RemoteGenMetadataRecord[];
+}
+
+interface RemoteRpcSessionCacheEntry {
+  cacheKey: string;
+  remoteKey: string;
+  origin: string;
+  conversationId: string;
+  summary?: RemoteTrajectorySummary | null;
+  steps: RemoteStepRecord[];
+  generatorMetadata: RemoteGenMetadataRecord[];
+  executorMetadata?: ParsedExecutorMetadata | null;
+  childTrajectories: RemoteChildTrajectoryCache[];
+  failedChildCount: number;
+  lastMetrics: ConversationHudMetrics;
+  lastSuccessAt: number;
+  isStale: boolean;
+}
+
+const MAX_REMOTE_SESSION_CACHE_ENTRIES = 64;
+const REMOTE_ACTIVE_POLL_INTERVAL_MS = 1000;
+const REMOTE_IDLE_POLL_INTERVAL_MS = 5000;
 
 export const HUD_BRIDGE_BINDING_NAME = '__gravityboxHudBridge';
 
@@ -12,6 +71,7 @@ export interface ActivePaneSession {
   sessionRevision: number;
   metricsSequence: number;
   modelId: string;
+  modelCapacity?: number;
   foregroundStreaming: boolean;
   isStreaming: boolean;
   activityPhase: HudActivityPhase;
@@ -32,15 +92,18 @@ const ACTIVITY_GRACE_WINDOW_MS = 15_000;
  */
 export class CdpHudBridge implements ICdpHudBridge {
   private readonly engine: ConversationMetricsEngine;
-  private readonly targets = new Map<
-    string,
-    { cdp: CDP; getContextId: () => number | undefined }
-  >();
+  private readonly targets = new Map<string, AttachedTargetEntry>();
   private readonly activePanes = new Map<string, ActivePaneSession>();
+  private readonly remoteSessionCache = new Map<string, RemoteRpcSessionCacheEntry>();
+  private readonly inFlightPaneRefreshes = new Set<string>();
+  private readonly inFlightPaneRefreshCounts = new Map<string, number>();
+  private readonly pendingPaneRefreshForce = new Map<string, boolean>();
   private readonly clientEventHandlers = new Set<(event: HudClientEvent) => void>();
   private pollTimer: NodeJS.Timeout | null = null;
-  private pollInFlight = false;
-  private lastPollStartedAt = 0;
+  private localPollInFlight = false;
+  private lastLocalPollStartedAt = 0;
+  private readonly remotePollInFlightByTarget = new Map<string, boolean>();
+  private readonly lastRemotePollStartedAtByTarget = new Map<string, number>();
   private sequenceCounter = Date.now();
   private readonly basePollIntervalMs: number;
   private disposed = false;
@@ -69,6 +132,40 @@ export class CdpHudBridge implements ICdpHudBridge {
     }
   }
 
+  private buildRemoteCacheKey(remoteKey: string, origin: string, conversationId: string): string {
+    return `${remoteKey}::${origin}::${conversationId}`;
+  }
+
+  private setRemoteCacheEntry(entry: RemoteRpcSessionCacheEntry): void {
+    if (this.remoteSessionCache.has(entry.cacheKey)) {
+      this.remoteSessionCache.delete(entry.cacheKey);
+    }
+    this.remoteSessionCache.set(entry.cacheKey, entry);
+    while (this.remoteSessionCache.size > MAX_REMOTE_SESSION_CACHE_ENTRIES) {
+      const oldestKey = this.remoteSessionCache.keys().next().value;
+      if (!oldestKey) break;
+      this.remoteSessionCache.delete(oldestKey);
+    }
+  }
+
+  private purgeRemoteCacheForDifferentOrigin(remoteKey: string, nextOrigin: string): void {
+    if (!remoteKey || !nextOrigin) return;
+    for (const [key, entry] of this.remoteSessionCache.entries()) {
+      if (entry.remoteKey === remoteKey && entry.origin !== nextOrigin) {
+        this.remoteSessionCache.delete(key);
+      }
+    }
+  }
+
+  public updateTargetOrigin(targetId: string, nextOrigin: string): void {
+    const target = this.targets.get(targetId);
+    if (!target || !nextOrigin) return;
+    target.origin = nextOrigin;
+    if (target.sourceKind === 'remote' && target.remoteKey) {
+      this.purgeRemoteCacheForDifferentOrigin(target.remoteKey, nextOrigin);
+    }
+  }
+
   /**
    * 绑定到已连接的 CDP PageSession
    */
@@ -76,10 +173,25 @@ export class CdpHudBridge implements ICdpHudBridge {
     targetId: string,
     cdp?: CDP,
     getContextId?: () => number | undefined,
-    worldName = 'GRAVITYBOX-localization-v1'
+    worldName = 'GRAVITYBOX-localization-v1',
+    meta?: HudTargetMeta
   ): Promise<void> {
     if (this.disposed || !cdp || !getContextId) return;
-    this.targets.set(targetId, { cdp, getContextId });
+    const sourceKind: 'local' | 'remote' = meta?.sourceKind === 'remote' ? 'remote' : 'local';
+    const remoteKey = meta?.remoteKey;
+    const origin = meta?.origin ?? '';
+    if (sourceKind === 'remote' && remoteKey && origin) {
+      this.purgeRemoteCacheForDifferentOrigin(remoteKey, origin);
+    }
+    this.targets.set(targetId, {
+      cdp,
+      getContextId,
+      sourceKind,
+      ...(remoteKey ? { remoteKey } : {}),
+      ...(meta?.hostLabel ? { hostLabel: meta.hostLabel } : {}),
+      ...(origin ? { origin } : {}),
+      ...(meta?.rpcClient ? { rpcClient: meta.rpcClient } : {}),
+    });
     for (const [paneKey, pane] of this.activePanes.entries()) {
       if (paneKey.startsWith(`${targetId}::`)) {
         pane.lastMetricsKey = '';
@@ -97,6 +209,8 @@ export class CdpHudBridge implements ICdpHudBridge {
 
   public detachTarget(targetId: string): void {
     this.targets.delete(targetId);
+    this.remotePollInFlightByTarget.delete(targetId);
+    this.lastRemotePollStartedAtByTarget.delete(targetId);
     this.detachTargetPanes(targetId);
   }
 
@@ -104,12 +218,14 @@ export class CdpHudBridge implements ICdpHudBridge {
     for (const key of this.activePanes.keys()) {
       if (key.startsWith(`${targetId}::`)) {
         this.activePanes.delete(key);
+        this.pendingPaneRefreshForce.delete(key);
       }
     }
   }
 
   public clearActivePanes(): void {
     this.activePanes.clear();
+    this.pendingPaneRefreshForce.clear();
   }
 
   /**
@@ -188,6 +304,19 @@ export class CdpHudBridge implements ICdpHudBridge {
       : 'generating';
 
     const nowMs = Date.now();
+    const parsedModelId =
+      (typeof parsed.modelId === 'string' && parsed.modelId.trim()) ||
+      sameConv?.modelId ||
+      '';
+    const modelChanged = Boolean(sameConv && parsedModelId && parsedModelId !== sameConv.modelId);
+    const parsedModelCapacity =
+      typeof parsed.modelCapacity === 'number' &&
+      Number.isSafeInteger(parsed.modelCapacity) &&
+      parsed.modelCapacity > 0
+        ? parsed.modelCapacity
+        : modelChanged
+        ? undefined
+        : sameConv?.modelCapacity;
     const session: ActivePaneSession = {
       targetId,
       paneSlotId,
@@ -195,10 +324,8 @@ export class CdpHudBridge implements ICdpHudBridge {
       conversationId,
       sessionRevision: nextRevision,
       metricsSequence: sameConv?.metricsSequence ?? 0,
-      modelId:
-        (typeof parsed.modelId === 'string' && parsed.modelId.trim()) ||
-        sameConv?.modelId ||
-        '',
+      modelId: parsedModelId,
+      ...(parsedModelCapacity !== undefined ? { modelCapacity: parsedModelCapacity } : {}),
       foregroundStreaming,
       isStreaming: resolvedStreaming,
       activityPhase: resolvedPhase,
@@ -224,40 +351,55 @@ export class CdpHudBridge implements ICdpHudBridge {
     void this.refreshPaneMetrics(paneKey, true).catch(() => {});
   }
 
-  /**
-   * 计算并向指定分栏所在窗口推送最新 ConversationHudMetrics
-   */
-  public async refreshPaneMetrics(paneKey: string, forcePush = false): Promise<void> {
-    if (this.disposed) return;
-    const session = this.activePanes.get(paneKey);
-    if (!session) return;
-
-    const nextSeq = ++this.sequenceCounter;
-    const metrics = await this.engine.getConversationMetrics({
+  private buildRemoteUnbridgedMetrics(
+    session: ActivePaneSession,
+    target: AttachedTargetEntry,
+    nextSeq: number
+  ): ConversationHudMetrics {
+    const metrics = buildConversationHudMetrics({
       conversationId: session.conversationId,
       paneSlotId: session.paneSlotId,
       sessionRevision: session.sessionRevision,
       metricsSequence: nextSeq,
-      modelId: session.modelId,
+      availability: 'remote_unbridged',
+      observedAt: null,
+      lastSuccessAt: null,
       isStreaming: session.foregroundStreaming,
       activityPhase: session.activityPhase,
       isSubagentRunning: session.isSubagentRunning,
       runningSubagentCount: session.runningSubagentCount,
-      childConversationIds: session.childConversationIds,
+      modelId: session.modelId,
+      modelCapacity: session.modelCapacity,
+      steps: [],
     });
+    metrics.sourceKind = 'remote';
+    if (target.hostLabel) metrics.remoteHostLabel = target.hostLabel;
+    return metrics;
+  }
 
-    // 若异步查询期间会话已被切换或移除，或已有更新序号的度量推入，丢弃陈旧结果
-    const latestSession = this.activePanes.get(paneKey);
-    if (
-      !latestSession ||
-      latestSession !== session ||
-      latestSession.conversationId !== metrics.conversationId ||
-      latestSession.sessionRevision > metrics.sessionRevision ||
-      latestSession.metricsSequence > nextSeq
-    ) {
-      return;
-    }
+  private async resolvePricingForRemote(): Promise<Record<string, any> | undefined> {
+    try {
+      const getter = (this.engine as unknown as { getEffectivePricingTable?: () => Promise<Record<string, any>> })
+        .getEffectivePricingTable;
+      if (typeof getter === 'function') {
+        return await getter.call(this.engine);
+      }
+    } catch {}
+    return undefined;
+  }
 
+  private isPaneStillCurrent(paneKey: string, session: ActivePaneSession, metrics: ConversationHudMetrics, seq: number): boolean {
+    const latest = this.activePanes.get(paneKey);
+    return Boolean(
+      latest &&
+      latest === session &&
+      latest.conversationId === metrics.conversationId &&
+      latest.sessionRevision <= metrics.sessionRevision &&
+      latest.metricsSequence <= seq
+    );
+  }
+
+  private computeMetricsFingerprint(metrics: ConversationHudMetrics): string {
     const sessionForFingerprint = metrics.isStreaming
       ? {
           ...metrics.session,
@@ -282,54 +424,370 @@ export class CdpHudBridge implements ICdpHudBridge {
           inFlightModelDurationSeconds: Math.round(metrics.session.inFlightModelDurationSeconds ?? 0),
           inFlightToolDurationSeconds: Math.round(metrics.session.inFlightToolDurationSeconds ?? 0),
         };
-    const fingerprint = JSON.stringify({
+    return JSON.stringify({
       session: sessionForFingerprint,
       tokens: metrics.tokens,
       context: metrics.context,
       availability: metrics.availability,
+      sourceKind: metrics.sourceKind ?? 'local',
+      remoteHostLabel: metrics.remoteHostLabel ?? '',
       observedAt: metrics.isStreaming && metrics.availability === 'ready' ? 0 : metrics.observedAt,
+      lastSuccessAt: metrics.availability === 'remote_stale' ? metrics.lastSuccessAt : undefined,
       failedChildCount: metrics.failedChildCount,
       isStreaming: metrics.isStreaming,
       activityPhase: metrics.activityPhase,
       isSubagentRunning: metrics.isSubagentRunning,
       runningSubagentCount: metrics.runningSubagentCount,
     });
+  }
 
-    if (!forcePush && latestSession.lastMetricsKey === fingerprint) {
-      latestSession.metricsSequence = Math.max(latestSession.metricsSequence, nextSeq);
+  private async commitMetricsIfChanged(
+    paneKey: string,
+    session: ActivePaneSession,
+    metrics: ConversationHudMetrics,
+    nextSeq: number,
+    forcePush: boolean
+  ): Promise<void> {
+    if (!this.isPaneStillCurrent(paneKey, session, metrics, nextSeq)) {
+      return;
+    }
+    const fingerprint = this.computeMetricsFingerprint(metrics);
+    if (!forcePush && session.lastMetricsKey === fingerprint) {
+      session.metricsSequence = Math.max(session.metricsSequence, nextSeq);
+      return;
+    }
+    const pushed = await this.pushMetricsToTarget(session.targetId, metrics);
+    if (pushed) {
+      session.metricsSequence = nextSeq;
+      session.lastMetricsKey = fingerprint;
+      session.lastUpdatedAt = Date.now();
+      session.isStreaming = Boolean(session.foregroundStreaming || metrics.isStreaming);
+      session.activityPhase =
+        metrics.activityPhase ?? (session.foregroundStreaming ? 'generating' : 'idle');
+      if (session.foregroundStreaming || metrics.isStreaming || metrics.isSubagentRunning) {
+        session.lastActivityAt = Date.now();
+      }
+      if (metrics.availability === 'partial' || metrics.availability === 'cached') {
+        const attempts = session.autoHealAttempts ?? 0;
+        if (attempts < 5) {
+          session.autoHealAttempts = attempts + 1;
+          session.lastActivityAt = Date.now();
+        }
+      } else {
+        session.autoHealAttempts = 0;
+      }
+    }
+  }
+
+  private async refreshRemotePaneMetrics(
+    paneKey: string,
+    session: ActivePaneSession,
+    target: AttachedTargetEntry,
+    forcePush: boolean,
+    recomputeFromCacheOnly = false
+  ): Promise<void> {
+    const nextSeq = ++this.sequenceCounter;
+    const remoteKey = target.remoteKey ?? session.targetId;
+    const origin = target.origin ?? '';
+    const cacheKey = this.buildRemoteCacheKey(remoteKey, origin, session.conversationId);
+    const cached = origin ? this.remoteSessionCache.get(cacheKey) : undefined;
+    const pricingTable = await this.resolvePricingForRemote();
+
+    if (recomputeFromCacheOnly) {
+      if (cached) {
+        const recomputed = computeRemoteConversationHudMetrics({
+          conversationId: session.conversationId,
+          paneSlotId: session.paneSlotId,
+          sessionRevision: session.sessionRevision,
+          metricsSequence: nextSeq,
+          availability: cached.isStale ? 'remote_stale' : (cached.failedChildCount > 0 ? 'partial' : 'ready'),
+          observedAt: cached.lastSuccessAt,
+          lastSuccessAt: cached.lastSuccessAt,
+          isStreaming: session.foregroundStreaming,
+          activityPhase: session.activityPhase,
+          isSubagentRunning: session.isSubagentRunning,
+          runningSubagentCount: session.runningSubagentCount,
+          modelId: session.modelId,
+          modelCapacity: session.modelCapacity,
+          pricingTable,
+          summary: cached.summary,
+          steps: cached.steps,
+          generatorMetadata: cached.generatorMetadata,
+          executorMetadata: cached.executorMetadata,
+          childTrajectories: cached.childTrajectories,
+          failedChildCount: cached.failedChildCount,
+          remoteHostLabel: target.hostLabel,
+        });
+        cached.lastMetrics = recomputed;
+        this.setRemoteCacheEntry(cached);
+        await this.commitMetricsIfChanged(paneKey, session, recomputed, nextSeq, forcePush);
+        return;
+      }
+      const unbridged = this.buildRemoteUnbridgedMetrics(session, target, nextSeq);
+      await this.commitMetricsIfChanged(paneKey, session, unbridged, nextSeq, forcePush);
       return;
     }
 
-    const pushed = await this.pushMetricsToTarget(latestSession.targetId, metrics);
-    if (pushed) {
-      latestSession.metricsSequence = nextSeq;
-      latestSession.lastMetricsKey = fingerprint;
-      latestSession.lastUpdatedAt = Date.now();
-      latestSession.isStreaming = Boolean(latestSession.foregroundStreaming || metrics.isStreaming);
-      latestSession.activityPhase =
-        metrics.activityPhase ?? (latestSession.foregroundStreaming ? 'generating' : 'idle');
-      if (latestSession.foregroundStreaming || metrics.isStreaming || metrics.isSubagentRunning) {
-        latestSession.lastActivityAt = Date.now();
+    const rpc = target.rpcClient;
+    if (!rpc) {
+      const unbridged = this.buildRemoteUnbridgedMetrics(session, target, nextSeq);
+      await this.commitMetricsIfChanged(paneKey, session, unbridged, nextSeq, forcePush);
+      return;
+    }
+
+    const fallbackToStaleOrUnbridged = async (authExpired: boolean): Promise<void> => {
+      if (!authExpired && cached && origin) {
+        cached.isStale = true;
+        this.setRemoteCacheEntry(cached);
+        const staleMetrics = computeRemoteConversationHudMetrics({
+          conversationId: session.conversationId,
+          paneSlotId: session.paneSlotId,
+          sessionRevision: session.sessionRevision,
+          metricsSequence: nextSeq,
+          availability: 'remote_stale',
+          observedAt: cached.lastSuccessAt,
+          lastSuccessAt: cached.lastSuccessAt,
+          isStreaming: session.foregroundStreaming,
+          activityPhase: session.activityPhase,
+          isSubagentRunning: session.isSubagentRunning,
+          runningSubagentCount: session.runningSubagentCount,
+          modelId: session.modelId,
+          modelCapacity: session.modelCapacity,
+          pricingTable,
+          summary: cached.summary,
+          steps: cached.steps,
+          generatorMetadata: cached.generatorMetadata,
+          executorMetadata: cached.executorMetadata,
+          childTrajectories: cached.childTrajectories,
+          failedChildCount: cached.failedChildCount,
+          remoteHostLabel: target.hostLabel,
+        });
+        cached.lastMetrics = staleMetrics;
+        await this.commitMetricsIfChanged(paneKey, session, staleMetrics, nextSeq, forcePush);
+        return;
       }
-      if (metrics.availability === 'partial' || metrics.availability === 'cached') {
-        const attempts = latestSession.autoHealAttempts ?? 0;
-        if (attempts < 5) {
-          latestSession.autoHealAttempts = attempts + 1;
-          latestSession.lastActivityAt = Date.now();
+      const unbridged = this.buildRemoteUnbridgedMetrics(session, target, nextSeq);
+      await this.commitMetricsIfChanged(paneKey, session, unbridged, nextSeq, forcePush);
+    };
+
+    const [trajectoriesRes, stepsRes, genRes, execMetaRes] = await Promise.all([
+      rpc.getAllCascadeTrajectories(),
+      rpc.getTrajectorySteps(session.conversationId, 0),
+      rpc.getGeneratorMetadata(session.conversationId, 0),
+      typeof rpc.getExecutorMetadata === 'function'
+        ? rpc.getExecutorMetadata(session.conversationId)
+        : Promise.resolve({ ok: true as const, data: null as ParsedExecutorMetadata | null, latencyMs: 0 }),
+    ]);
+
+    if (
+      (trajectoriesRes.ok === false && trajectoriesRes.authExpired) ||
+      (stepsRes.ok === false && stepsRes.authExpired) ||
+      (genRes.ok === false && genRes.authExpired) ||
+      (execMetaRes.ok === false && execMetaRes.authExpired)
+    ) {
+      await fallbackToStaleOrUnbridged(true);
+      return;
+    }
+
+    if (!stepsRes.ok && !genRes.ok) {
+      await fallbackToStaleOrUnbridged(false);
+      return;
+    }
+
+    const allSummaries = trajectoriesRes.ok ? trajectoriesRes.data : [];
+    const mainSummary = allSummaries.find(s => s.cascadeId === session.conversationId) ?? null;
+    const childIdSet = new Set<string>(session.childConversationIds);
+    for (const sum of allSummaries) {
+      if (
+        isStrictSubagentSummary(sum.cascadeId, sum) &&
+        (sum.parentConversationId === session.conversationId ||
+          sum.rootConversationId === session.conversationId)
+      ) {
+        childIdSet.add(sum.cascadeId);
+      }
+    }
+    childIdSet.delete(session.conversationId);
+
+    const childIdsToFetch = [...childIdSet].slice(0, 32);
+    const childTrajectories: RemoteChildTrajectoryCache[] = [];
+    let failedChildCount = (!stepsRes.ok || !genRes.ok) ? 1 : 0;
+
+    if (childIdsToFetch.length > 0) {
+      const REMOTE_CHILD_BATCH_SIZE = 4;
+      for (let i = 0; i < childIdsToFetch.length; i += REMOTE_CHILD_BATCH_SIZE) {
+        const batch = childIdsToFetch.slice(i, i + REMOTE_CHILD_BATCH_SIZE);
+        const childResults = await Promise.all(
+          batch.map(async cid => {
+            const cSum = allSummaries.find(s => s.cascadeId === cid) ?? null;
+            const [cSteps, cGen] = await Promise.all([
+              rpc.getTrajectorySteps(cid, 0, cSum?.stepCount ?? 0),
+              rpc.getGeneratorMetadata(cid, 0),
+            ]);
+            return { cid, cSum, cSteps, cGen };
+          })
+        );
+        for (const item of childResults) {
+          if ((item.cSteps.ok === false && item.cSteps.authExpired) || (item.cGen.ok === false && item.cGen.authExpired)) {
+            await fallbackToStaleOrUnbridged(true);
+            return;
+          }
+          if (!item.cSteps.ok && !item.cGen.ok) {
+            failedChildCount++;
+            continue;
+          }
+          childTrajectories.push({
+            cascadeId: item.cid,
+            summary: item.cSum,
+            steps: item.cSteps.ok ? item.cSteps.data : [],
+            generatorMetadata: item.cGen.ok ? item.cGen.data : [],
+          });
         }
+      }
+    }
+
+    const nowMs = Date.now();
+    const steps = stepsRes.ok ? stepsRes.data : [];
+    const generatorMetadata = genRes.ok ? genRes.data : [];
+    const executorMetadata = execMetaRes.ok ? execMetaRes.data : null;
+    const metrics = computeRemoteConversationHudMetrics({
+      conversationId: session.conversationId,
+      paneSlotId: session.paneSlotId,
+      sessionRevision: session.sessionRevision,
+      metricsSequence: nextSeq,
+      availability: failedChildCount > 0 ? 'partial' : 'ready',
+      observedAt: nowMs,
+      lastSuccessAt: nowMs,
+      isStreaming: session.foregroundStreaming,
+      activityPhase: session.activityPhase,
+      isSubagentRunning: session.isSubagentRunning,
+      runningSubagentCount: session.runningSubagentCount,
+      modelId: session.modelId,
+      modelCapacity: session.modelCapacity,
+      pricingTable,
+      summary: mainSummary,
+      steps,
+      generatorMetadata,
+      executorMetadata,
+      childTrajectories,
+      failedChildCount,
+      remoteHostLabel: target.hostLabel,
+    });
+
+    if (origin) {
+      this.setRemoteCacheEntry({
+        cacheKey,
+        remoteKey,
+        origin,
+        conversationId: session.conversationId,
+        summary: mainSummary,
+        steps,
+        generatorMetadata,
+        executorMetadata,
+        childTrajectories,
+        failedChildCount,
+        lastMetrics: metrics,
+        lastSuccessAt: nowMs,
+        isStale: false,
+      });
+    }
+
+    await this.commitMetricsIfChanged(paneKey, session, metrics, nextSeq, forcePush);
+  }
+
+  /**
+   * 计算并向指定分栏所在窗口推送最新 ConversationHudMetrics
+   */
+  public async refreshPaneMetrics(
+    paneKey: string,
+    forcePush = false,
+    options?: { recomputeFromCacheOnly?: boolean }
+  ): Promise<void> {
+    if (this.disposed) return;
+    const session = this.activePanes.get(paneKey);
+    if (!session) return;
+
+    const target = this.targets.get(session.targetId);
+    const isRemote = target?.sourceKind === 'remote';
+    if (isRemote && target) {
+      if (this.inFlightPaneRefreshes.has(paneKey) && !options?.recomputeFromCacheOnly) {
+        if (forcePush) {
+          this.pendingPaneRefreshForce.set(paneKey, true);
+        }
+        return;
+      }
+      this.inFlightPaneRefreshes.add(paneKey);
+      this.inFlightPaneRefreshCounts.set(paneKey, (this.inFlightPaneRefreshCounts.get(paneKey) ?? 0) + 1);
+      try {
+        await this.refreshRemotePaneMetrics(
+          paneKey,
+          session,
+          target,
+          forcePush,
+          options?.recomputeFromCacheOnly === true
+        );
+      } finally {
+        const nextCount = Math.max(0, (this.inFlightPaneRefreshCounts.get(paneKey) ?? 1) - 1);
+        if (nextCount === 0) {
+          this.inFlightPaneRefreshCounts.delete(paneKey);
+          this.inFlightPaneRefreshes.delete(paneKey);
+        } else {
+          this.inFlightPaneRefreshCounts.set(paneKey, nextCount);
+        }
+        if (!this.disposed && nextCount === 0 && this.pendingPaneRefreshForce.has(paneKey)) {
+          const nextForce = this.pendingPaneRefreshForce.get(paneKey) ?? false;
+          this.pendingPaneRefreshForce.delete(paneKey);
+          if (this.activePanes.has(paneKey)) {
+            void this.refreshPaneMetrics(paneKey, nextForce).catch(() => {});
+          }
+        }
+      }
+      return;
+    }
+
+    // 本机路径复用 inFlightPaneRefreshes 对周期轮询 (forcePush=false) 去重；
+    // 显式事件触发 (forcePush=true) 立即推进并在提交时通过 isPaneStillCurrent 过滤旧包。
+    if (!forcePush && this.inFlightPaneRefreshes.has(paneKey)) {
+      return;
+    }
+    this.inFlightPaneRefreshes.add(paneKey);
+    this.inFlightPaneRefreshCounts.set(paneKey, (this.inFlightPaneRefreshCounts.get(paneKey) ?? 0) + 1);
+    try {
+      const nextSeq = ++this.sequenceCounter;
+      const metrics = await this.engine.getConversationMetrics({
+        conversationId: session.conversationId,
+        paneSlotId: session.paneSlotId,
+        sessionRevision: session.sessionRevision,
+        metricsSequence: nextSeq,
+        modelId: session.modelId,
+        modelCapacity: session.modelCapacity,
+        isStreaming: session.foregroundStreaming,
+        activityPhase: session.activityPhase,
+        isSubagentRunning: session.isSubagentRunning,
+        runningSubagentCount: session.runningSubagentCount,
+        childConversationIds: session.childConversationIds,
+      });
+
+      await this.commitMetricsIfChanged(paneKey, session, metrics, nextSeq, forcePush);
+    } finally {
+      const nextCount = Math.max(0, (this.inFlightPaneRefreshCounts.get(paneKey) ?? 1) - 1);
+      if (nextCount === 0) {
+        this.inFlightPaneRefreshCounts.delete(paneKey);
+        this.inFlightPaneRefreshes.delete(paneKey);
       } else {
-        latestSession.autoHealAttempts = 0;
+        this.inFlightPaneRefreshCounts.set(paneKey, nextCount);
       }
     }
   }
 
   /**
-   * 广播度量数据到所有已绑定目标窗口
+   * 广播度量数据到所有已绑定本机目标窗口（绝不向远端窗口广播本机指标）
    */
   public async broadcastMetrics(metrics: ConversationHudMetrics): Promise<void> {
     if (this.disposed) return;
     await Promise.allSettled(
-      [...this.targets.keys()].map((targetId) => this.pushMetricsToTarget(targetId, metrics))
+      [...this.targets.entries()]
+        .filter(([, target]) => target.sourceKind !== 'remote')
+        .map(([targetId]) => this.pushMetricsToTarget(targetId, metrics))
     );
   }
 
@@ -355,33 +813,92 @@ export class CdpHudBridge implements ICdpHudBridge {
   }
 
   /**
-   * 定时增量轮询所有活跃会话（活跃或处于 15 秒宽限窗口时按 300ms 高频轮询，彻底沉寂后降频至 1000ms）
+   * 定时增量轮询所有活跃会话：
+   * - 本机窗口与各远端窗口完全独立调度（慢远端绝不阻塞本机轮询）
+   * - 本机：活跃/15s宽限期 300ms，空闲 1000ms
+   * - 远端：活跃/15s宽限期 1000ms，空闲 5000ms
    */
   public async pollActiveSessions(force = true): Promise<void> {
-    if (this.disposed || this.pollInFlight || this.activePanes.size === 0) return;
+    if (this.disposed || this.activePanes.size === 0) return;
     const now = Date.now();
-    if (!force && this.basePollIntervalMs > 0) {
-      const anyActive = [...this.activePanes.values()].some(
-        (p) =>
-          p.isStreaming ||
-          p.isSubagentRunning ||
-          (p.lastActivityAt && now - p.lastActivityAt < ACTIVITY_GRACE_WINDOW_MS)
-      );
-      const effectiveInterval = anyActive
-        ? Math.min(this.basePollIntervalMs, 300)
-        : Math.max(this.basePollIntervalMs, 1000);
-      if (now - this.lastPollStartedAt < effectiveInterval - 20) {
-        return;
+    const localPaneKeys: string[] = [];
+    const remotePaneKeysByTarget = new Map<string, string[]>();
+
+    for (const [paneKey, pane] of this.activePanes.entries()) {
+      const target = this.targets.get(pane.targetId);
+      if (target?.sourceKind === 'remote') {
+        const list = remotePaneKeysByTarget.get(pane.targetId) ?? [];
+        list.push(paneKey);
+        remotePaneKeysByTarget.set(pane.targetId, list);
+      } else {
+        localPaneKeys.push(paneKey);
       }
     }
-    this.pollInFlight = true;
-    this.lastPollStartedAt = now;
-    try {
-      await Promise.allSettled(
-        [...this.activePanes.keys()].map((paneKey) => this.refreshPaneMetrics(paneKey, false))
-      );
-    } finally {
-      this.pollInFlight = false;
+
+    const tasks: Promise<unknown>[] = [];
+
+    if (localPaneKeys.length > 0 && !this.localPollInFlight) {
+      let shouldPollLocal = force || this.basePollIntervalMs <= 0;
+      if (!shouldPollLocal) {
+        const anyLocalActive = localPaneKeys.some((k) => {
+          const p = this.activePanes.get(k);
+          return Boolean(
+            p &&
+            (p.isStreaming ||
+              p.isSubagentRunning ||
+              (p.lastActivityAt && now - p.lastActivityAt < ACTIVITY_GRACE_WINDOW_MS))
+          );
+        });
+        const localInterval = anyLocalActive
+          ? Math.min(this.basePollIntervalMs, 300)
+          : Math.max(this.basePollIntervalMs, 1000);
+        shouldPollLocal = now - this.lastLocalPollStartedAt >= localInterval - 20;
+      }
+      if (shouldPollLocal) {
+        this.localPollInFlight = true;
+        this.lastLocalPollStartedAt = now;
+        tasks.push(
+          Promise.allSettled(localPaneKeys.map((paneKey) => this.refreshPaneMetrics(paneKey, false)))
+            .finally(() => {
+              this.localPollInFlight = false;
+            })
+        );
+      }
+    }
+
+    for (const [targetId, paneKeys] of remotePaneKeysByTarget.entries()) {
+      if (this.remotePollInFlightByTarget.get(targetId)) continue;
+      let shouldPollRemote = force || this.basePollIntervalMs <= 0;
+      if (!shouldPollRemote) {
+        const anyRemoteActive = paneKeys.some((k) => {
+          const p = this.activePanes.get(k);
+          return Boolean(
+            p &&
+            (p.isStreaming ||
+              p.isSubagentRunning ||
+              (p.lastActivityAt && now - p.lastActivityAt < ACTIVITY_GRACE_WINDOW_MS))
+          );
+        });
+        const remoteInterval = anyRemoteActive
+          ? REMOTE_ACTIVE_POLL_INTERVAL_MS
+          : REMOTE_IDLE_POLL_INTERVAL_MS;
+        const lastStarted = this.lastRemotePollStartedAtByTarget.get(targetId) ?? 0;
+        shouldPollRemote = now - lastStarted >= remoteInterval - 20;
+      }
+      if (shouldPollRemote) {
+        this.remotePollInFlightByTarget.set(targetId, true);
+        this.lastRemotePollStartedAtByTarget.set(targetId, now);
+        tasks.push(
+          Promise.allSettled(paneKeys.map((paneKey) => this.refreshPaneMetrics(paneKey, false)))
+            .finally(() => {
+              this.remotePollInFlightByTarget.set(targetId, false);
+            })
+        );
+      }
+    }
+
+    if (tasks.length > 0) {
+      await Promise.allSettled(tasks);
     }
   }
 
@@ -394,7 +911,14 @@ export class CdpHudBridge implements ICdpHudBridge {
       session.lastMetricsKey = '';
     }
     await Promise.allSettled(
-      [...this.activePanes.keys()].map((paneKey) => this.refreshPaneMetrics(paneKey, true))
+      [...this.activePanes.entries()].map(([paneKey, session]) => {
+        const target = this.targets.get(session.targetId);
+        return this.refreshPaneMetrics(
+          paneKey,
+          true,
+          target?.sourceKind === 'remote' ? { recomputeFromCacheOnly: true } : undefined
+        );
+      })
     );
   }
 
@@ -426,6 +950,12 @@ export class CdpHudBridge implements ICdpHudBridge {
     }
     this.targets.clear();
     this.activePanes.clear();
+    this.remoteSessionCache.clear();
+    this.inFlightPaneRefreshes.clear();
+    this.inFlightPaneRefreshCounts.clear();
+    this.pendingPaneRefreshForce.clear();
+    this.remotePollInFlightByTarget.clear();
+    this.lastRemotePollStartedAtByTarget.clear();
     this.clientEventHandlers.clear();
     this.engine.clearCache();
   }

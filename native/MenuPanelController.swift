@@ -30,6 +30,21 @@ final class MenuPanelController: NSViewController {
 
     // Tab 0: Usage Controls
     let periodSelector: MenuSegmentedTabsView
+    let usageEnvironmentBar = NSStackView()
+    let usageEnvironmentSegment = DesignSegmentedControl(
+        labels: [L10n.t("menu_panel.env.all", fallback: "全部"), L10n.t("usage.env.local_label", fallback: "本机")],
+        trackingMode: .selectOne,
+        target: nil,
+        action: nil,
+        compact: true,
+        equalWidthSegments: false,
+        maxSegmentWidth: 128
+    )
+    let usageEnvironmentPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    let usageEnvShareLabel = text("", size: 10.5, color: Design.secondary)
+    private var usageEnvironmentSegmentIds: [String] = ["all", "local"]
+    private var lastKnownUsageEnvironments: [[String: Any]] = []
+    private var lastKnownUsageBreakdown: [String: Any]? = nil
     let usageScopeLabel = text(L10n.t("menu_panel.usage_scope_default", fallback: "本机历史用量 · 非按账号归属"), size: 11, color: Design.secondary, wrap: true)
     let tokensTile: MenuMetricTileView
     let requestsTile: MenuMetricTileView
@@ -48,6 +63,17 @@ final class MenuPanelController: NSViewController {
     let usageFooterLabel = text("", size: 11, color: Design.secondary, wrap: true)
 
     // Tab 1: Quota Controls
+    let quotaContextSwitcher = DesignSegmentedControl(
+        labels: [L10n.t("ssh.context.local", fallback: "本机")],
+        trackingMode: .selectOne,
+        target: nil,
+        action: nil,
+        compact: true,
+        equalWidthSegments: false,
+        maxSegmentWidth: 150
+    )
+    var quotaContextSwitcherRow: NSStackView!
+    private var quotaContextSegmentKeys: [String] = ["local"]
     let quotaAccountNameLabel = text(L10n.t("menu_panel.quota.loading", fallback: "正在读取账号…"), size: 15, weight: .semibold, color: .labelColor)
     let quotaTierBadge = tierBadge("", scale: .regular)
     let quotaStatusBadge = pillBadge("", color: Design.blue)
@@ -66,6 +92,7 @@ final class MenuPanelController: NSViewController {
     // Tab 2: Accounts Controls
     let accountsCountLabel = text(L10n.t("menu_panel.accounts.count", ["count": 0], fallback: "0 个账号"), size: 11, color: Design.secondary)
     let accountsCardsStack = NSStackView()
+    let accountsLocalOnlyNoteLabel = text("", size: 10.5, color: Design.secondary, wrap: true)
     private var accountCardsById: [String: MenuExpandableAccountCardView] = [:]
     private var renderedAccountIds: [String] = []
 
@@ -83,6 +110,7 @@ final class MenuPanelController: NSViewController {
     private(set) var measuredPanelSize = NSSize(width: MenuPanelController.panelWidth, height: MenuPanelController.defaultPanelHeight)
     private(set) var selectedTab: Int = 0
     private(set) var selectedPeriod: Int = 0
+    private(set) var selectedEnvironmentId: String = "all"
     private(set) var selectedChartDimension: MenuTrendChartView.Dimension = .tokens
     private(set) var showAllModels: Bool = false
     private(set) var expandedAccountIds: Set<String> = []
@@ -97,13 +125,25 @@ final class MenuPanelController: NSViewController {
     private static let timeFormatter: DateFormatter = InterfaceText.shortTimeFormatter
     private static let dateTimeFormatter: DateFormatter = InterfaceText.shortDateTimeFormatter
 
+    static func usageCacheKey(period: String, environmentId: String) -> String {
+        let trimmed = environmentId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let env = trimmed.isEmpty ? "all" : trimmed
+        return env == "all" ? period : "\(period)|env=\(env)|acc=all"
+    }
+
+    var currentUsageCacheKey: String {
+        Self.usageCacheKey(period: Self.periods[selectedPeriod], environmentId: selectedEnvironmentId)
+    }
+
     init(app: Assistant) {
         self.app = app
         let initialTab = max(0, min(2, app.configuration?.value.menuSelectedTab ?? 0))
         let initialPeriod = max(0, min(3, app.configuration?.value.menuUsagePeriod ?? 0))
+        let initialEnvRaw = (app.configuration?.value.menuUsageEnvironmentId ?? "all").trimmingCharacters(in: .whitespacesAndNewlines)
         let initialDim: MenuTrendChartView.Dimension = (app.configuration?.value.menuTrendMetric == "requests") ? .requests : .tokens
         self.selectedTab = initialTab
         self.selectedPeriod = initialPeriod
+        self.selectedEnvironmentId = initialEnvRaw.isEmpty ? "all" : initialEnvRaw
         self.selectedChartDimension = initialDim
 
         self.headerRefreshButton = InlineRefreshButton(L10n.t("common.refresh", fallback: "刷新"), width: 78, target: nil, action: #selector(refreshPressed))
@@ -418,11 +458,43 @@ final class MenuPanelController: NSViewController {
         modelsCard.fillColor = Design.popoverCardBackground
         modelsCard.borderColor = Design.popoverCardBorder
 
+        usageEnvironmentSegment.setAccessibilityLabel(L10n.t("menu_panel.env.a11y", fallback: "按环境切换用量"))
+        usageEnvironmentSegment.target = self
+        usageEnvironmentSegment.action = #selector(usageEnvironmentSegmentChanged(_:))
+        usageEnvironmentSegment.setContentHuggingPriority(.required, for: .horizontal)
+        usageEnvironmentSegment.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+
+        usageEnvironmentPopup.controlSize = .small
+        usageEnvironmentPopup.setAccessibilityLabel(L10n.t("menu_panel.env.a11y", fallback: "按环境切换用量"))
+        usageEnvironmentPopup.setContentHuggingPriority(.required, for: .horizontal)
+        usageEnvironmentPopup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        usageEnvironmentPopup.target = self
+        usageEnvironmentPopup.action = #selector(usageEnvironmentPopupChanged(_:))
+        Design.applyControls(usageEnvironmentPopup)
+        usageEnvironmentPopup.isHidden = true
+
+        usageEnvShareLabel.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+        usageEnvShareLabel.alignment = .right
+        usageEnvShareLabel.lineBreakMode = .byTruncatingTail
+        usageEnvShareLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        usageEnvShareLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        usageEnvShareLabel.isHidden = true
+
+        usageEnvironmentBar.orientation = .horizontal
+        usageEnvironmentBar.alignment = .centerY
+        usageEnvironmentBar.spacing = 8
+        usageEnvironmentBar.detachesHiddenViews = true
+        usageEnvironmentBar.addArrangedSubview(usageEnvironmentSegment)
+        usageEnvironmentBar.addArrangedSubview(usageEnvironmentPopup)
+        usageEnvironmentBar.addArrangedSubview(flexibleSpace())
+        usageEnvironmentBar.addArrangedSubview(usageEnvShareLabel)
+        usageEnvironmentBar.isHidden = true
+
         usageFooterLabel.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
         usageFooterLabel.alignment = .right
         usageFooterLabel.textColor = Design.secondary
 
-        for section in [periodSelector, usageScopeLabel, row1, row2, trendCard, modelsCard, usageFooterLabel] {
+        for section in [periodSelector, usageEnvironmentBar, usageScopeLabel, row1, row2, trendCard, modelsCard, usageFooterLabel] {
             usageRoot.addArrangedSubview(section)
             fillWidth(section, in: usageRoot)
         }
@@ -434,6 +506,15 @@ final class MenuPanelController: NSViewController {
         quotaRoot.alignment = .leading
         quotaRoot.spacing = 10
         quotaRoot.detachesHiddenViews = true
+
+        quotaContextSwitcher.target = self
+        quotaContextSwitcher.action = #selector(quotaContextSegmentChanged(_:))
+        quotaContextSwitcher.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        quotaContextSwitcher.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let qCtxRow = horizontal([quotaContextSwitcher, flexibleSpace()], spacing: 6)
+        qCtxRow.alignment = .centerY
+        qCtxRow.isHidden = true
+        quotaContextSwitcherRow = qCtxRow
 
         quotaAccountNameLabel.lineBreakMode = .byTruncatingTail
         quotaAccountNameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -481,7 +562,7 @@ final class MenuPanelController: NSViewController {
         quotaFooterLabel.alignment = .right
         quotaFooterLabel.textColor = Design.secondary
 
-        for section in [identityCard, quotaGroupsContainer, quotaEmptyButton, quotaWarningLabel, quotaFooterLabel] {
+        for section in [quotaContextSwitcherRow!, identityCard, quotaGroupsContainer, quotaEmptyButton, quotaWarningLabel, quotaFooterLabel] {
             quotaRoot.addArrangedSubview(section)
             fillWidth(section, in: quotaRoot)
         }
@@ -502,7 +583,8 @@ final class MenuPanelController: NSViewController {
         accountsCardsStack.spacing = 8
         accountsCardsStack.detachesHiddenViews = true
 
-        for section in [topRow, accountsCardsStack] {
+        accountsLocalOnlyNoteLabel.isHidden = true
+        for section in [topRow, accountsCardsStack, accountsLocalOnlyNoteLabel] {
             accountsRoot.addArrangedSubview(section)
             fillWidth(section, in: accountsRoot)
         }
@@ -533,9 +615,11 @@ final class MenuPanelController: NSViewController {
         trendChart.resetHoverState()
         let cfgTab = max(0, min(2, app.configuration?.value.menuSelectedTab ?? selectedTab))
         let cfgPeriod = max(0, min(3, app.configuration?.value.menuUsagePeriod ?? selectedPeriod))
+        let cfgEnvRaw = (app.configuration?.value.menuUsageEnvironmentId ?? selectedEnvironmentId).trimmingCharacters(in: .whitespacesAndNewlines)
         let cfgDim: MenuTrendChartView.Dimension = (app.configuration?.value.menuTrendMetric == "requests") ? .requests : .tokens
         selectedTab = cfgTab
         selectedPeriod = cfgPeriod
+        selectedEnvironmentId = cfgEnvRaw.isEmpty ? "all" : cfgEnvRaw
         selectedChartDimension = cfgDim
         tabSelector.setSelected(selectedTab)
         periodSelector.setSelected(selectedPeriod)
@@ -604,7 +688,37 @@ final class MenuPanelController: NSViewController {
             syncUsageTabFromCache()
         }
         let periodKey = Self.periods[clamped]
-        app.fetchUsageSummary(period: periodKey, force: false)
+        app.fetchUsageSummary(period: periodKey, environmentId: selectedEnvironmentId, force: false)
+    }
+
+    func selectUsageEnvironment(_ environmentId: String, persist: Bool = true) {
+        let trimmed = environmentId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = trimmed.isEmpty ? "all" : trimmed
+        guard normalized != selectedEnvironmentId else { return }
+        selectedEnvironmentId = normalized
+        if persist, app.configuration?.value.menuUsageEnvironmentId != normalized {
+            app.configuration?.value.menuUsageEnvironmentId = normalized
+            app.scheduleConfigurationSave()
+        }
+        renderedUsageSnapshotKey = ""
+        renderedUsageModelKey = ""
+        performWithoutAnimation(updateSize: true, animateSize: app.isMenuPanelShown) {
+            syncUsageTabFromCache()
+            syncHeaderRefreshState()
+        }
+        let periodKey = Self.periods[selectedPeriod]
+        app.fetchUsageSummary(period: periodKey, environmentId: normalized, force: false)
+    }
+
+    @objc func usageEnvironmentSegmentChanged(_ sender: DesignSegmentedControl) {
+        let idx = sender.selectedSegment
+        guard usageEnvironmentSegmentIds.indices.contains(idx) else { return }
+        selectUsageEnvironment(usageEnvironmentSegmentIds[idx], persist: true)
+    }
+
+    @objc func usageEnvironmentPopupChanged(_ sender: NSPopUpButton) {
+        let next = ((sender.selectedItem?.representedObject as? String) ?? "all").trimmingCharacters(in: .whitespacesAndNewlines)
+        selectUsageEnvironment(next.isEmpty ? "all" : next, persist: true)
     }
 
     func selectChartDimension(_ dimension: MenuTrendChartView.Dimension, persist: Bool = true) {
@@ -664,9 +778,13 @@ final class MenuPanelController: NSViewController {
         switch selectedTab {
         case 0:
             let periodKey = Self.periods[selectedPeriod]
-            app.fetchUsageSummary(period: periodKey, force: force)
+            app.fetchUsageSummary(period: periodKey, environmentId: selectedEnvironmentId, force: force)
         case 1:
-            if app.cachedAccounts.isEmpty || app.bootstrappedAccounts {
+            if let remote = app.selectedRemoteSession() {
+                if force {
+                    app.refreshRemoteQuota(remoteKey: remote["remoteKey"] as? String)
+                }
+            } else if app.cachedAccounts.isEmpty || app.bootstrappedAccounts {
                 app.fetchAccountList(notifyPage: true)
             } else if force {
                 if let active = app.resolvedMenuAccount(), let id = active["id"] as? String, !id.isEmpty {
@@ -674,8 +792,13 @@ final class MenuPanelController: NSViewController {
                 } else {
                     app.refreshAccountQuotas()
                 }
-            } else if needsAccountSync {
-                app.fetchAccountList(notifyPage: true)
+            } else {
+                if needsAccountSync {
+                    app.fetchAccountList(notifyPage: true)
+                }
+                if let active = app.resolvedMenuAccount(), QuotaPresentation.contract(active).hasOverdueKnownWindow() {
+                    app.triggerResetOverdueRefreshIfNeeded(for: active)
+                }
             }
         default:
             if app.cachedAccounts.isEmpty || app.bootstrappedAccounts {
@@ -725,7 +848,13 @@ final class MenuPanelController: NSViewController {
     }
 
     @objc private func openMainFromFooter() {
-        app.openMainWindowFromMenuPanel(tab: selectedTab, usagePeriod: selectedPeriod)
+        app.openMainWindowFromMenuPanel(tab: selectedTab, usagePeriod: selectedPeriod, usageEnvironmentId: selectedEnvironmentId)
+    }
+
+    @objc private func quotaContextSegmentChanged(_ sender: DesignSegmentedControl) {
+        let idx = sender.selectedSegment
+        guard quotaContextSegmentKeys.indices.contains(idx) else { return }
+        app.selectQuotaContext(quotaContextSegmentKeys[idx], userInitiated: true)
     }
 
     @objc private func openAccountsFromQuotaEmpty() {
@@ -740,11 +869,13 @@ final class MenuPanelController: NSViewController {
 
     // MARK: - Synchronization with Assistant Data Domains
 
-    func onUsageReportUpdated(period: String, result: Result<[String: Any], Error>) {
+    func onUsageReportUpdated(period: String, environmentId: String = "all", result: Result<[String: Any], Error>) {
         guard isViewLoaded else { return }
         let currentPeriodKey = Self.periods[selectedPeriod]
+        let trimmedEnv = environmentId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveEnv = trimmedEnv.isEmpty ? "all" : trimmedEnv
         performWithoutAnimation(updateSize: true, animateSize: app.isMenuPanelShown) {
-            if period == currentPeriodKey, selectedTab == 0 {
+            if period == currentPeriodKey && effectiveEnv == selectedEnvironmentId && selectedTab == 0 {
                 syncUsageTabFromCache()
             }
             syncHeaderRefreshState()
@@ -771,29 +902,34 @@ final class MenuPanelController: NSViewController {
         }
         if app.reachable && (app.menuTracking || app.isMenuPanelShown) && selectedTab == 0 {
             let periodKey = Self.periods[selectedPeriod]
-            let lastFetch = app.usageLastFetchTimeByPeriod[periodKey] ?? .distantPast
+            let cacheKey = currentUsageCacheKey
+            let lastFetch = app.usageLastFetchTimeByPeriod[cacheKey] ?? .distantPast
             let isStale = Date().timeIntervalSince(lastFetch) >= 15.0
-            let needsUsageRefresh = app.cachedUsageReportsByPeriod[periodKey] == nil
-                || app.bootstrappedUsagePeriods.contains(periodKey)
+            let needsUsageRefresh = app.cachedUsageReportsByPeriod[cacheKey] == nil
+                || app.bootstrappedUsagePeriods.contains(cacheKey)
                 || isStale
-            if needsUsageRefresh && app.usageInFlightByPeriod[periodKey] != true && app.usageFetchErrorsByPeriod[periodKey] == nil {
-                app.fetchUsageSummary(period: periodKey, force: false)
+            if needsUsageRefresh && app.usageInFlightByPeriod[cacheKey] != true && app.usageFetchErrorsByPeriod[cacheKey] == nil {
+                app.fetchUsageSummary(period: periodKey, environmentId: selectedEnvironmentId, force: false)
             }
         }
     }
 
     func syncHeaderRefreshState() {
         guard isViewLoaded else { return }
-        let periodKey = Self.periods[selectedPeriod]
         switch selectedTab {
         case 0:
-            let busy = app.usageManualRefreshPeriods.contains(periodKey)
+            let cacheKey = currentUsageCacheKey
+            let busy = app.usageManualRefreshPeriods.contains(cacheKey)
             headerRefreshButton.setBusy(busy, available: app.reachable)
         case 1:
-            let active = app.resolvedMenuAccount()
-            let activeId = active?["id"] as? String ?? app.activeAccountId
-            let busy = app.quotaRefreshing || (!activeId.isEmpty && app.refreshingAccountIds.contains(activeId))
-            headerRefreshButton.setBusy(busy, available: app.reachable && (!activeId.isEmpty || !app.cachedAccounts.isEmpty))
+            if app.selectedRemoteSession() != nil {
+                headerRefreshButton.setBusy(app.remoteQuotaRefreshing, available: app.reachable)
+            } else {
+                let active = app.resolvedMenuAccount()
+                let activeId = active?["id"] as? String ?? app.activeAccountId
+                let busy = app.quotaRefreshing || (!activeId.isEmpty && app.refreshingAccountIds.contains(activeId))
+                headerRefreshButton.setBusy(busy, available: app.reachable && (!activeId.isEmpty || !app.cachedAccounts.isEmpty))
+            }
         default:
             let busy = app.quotaRefreshing
             headerRefreshButton.setBusy(busy, available: app.reachable && !app.cachedAccounts.isEmpty)
@@ -802,8 +938,76 @@ final class MenuPanelController: NSViewController {
 
     // MARK: - Tab 0 Rendering (Usage)
 
+    private func syncUsageEnvironmentBar(from report: [String: Any]?) {
+        if let report {
+            let envs = UsageFilterSupport.extractAvailableEnvironments(from: report)
+            if !envs.isEmpty { lastKnownUsageEnvironments = envs }
+            if let breakdown = UsageFilterSupport.extractEnvironmentBreakdown(from: report) {
+                lastKnownUsageBreakdown = breakdown
+            }
+        }
+        let reportEnvs = report.map { UsageFilterSupport.extractAvailableEnvironments(from: $0) } ?? []
+        let envs = reportEnvs.isEmpty ? lastKnownUsageEnvironments : reportEnvs
+        let breakdown = report.flatMap { UsageFilterSupport.extractEnvironmentBreakdown(from: $0) } ?? lastKnownUsageBreakdown
+        let hasSsh = UsageFilterSupport.hasSshEnvironment(environments: envs, breakdown: breakdown)
+        let allTitle = L10n.t("menu_panel.env.all", fallback: "全部")
+        let localTitle = L10n.t("usage.env.local_label", fallback: "本机")
+
+        UsageFilterSupport.syncEnvironmentPopup(
+            usageEnvironmentPopup,
+            environments: envs,
+            selectedId: selectedEnvironmentId,
+            allTitle: allTitle,
+            localTitle: localTitle,
+            sshFormatKey: "usage.env.ssh_label",
+            maxWidth: 228
+        )
+        let envItems = UsageFilterSupport.buildEnvironmentItems(
+            environments: envs,
+            selectedId: selectedEnvironmentId,
+            allTitle: allTitle,
+            localTitle: localTitle,
+            sshFormatKey: "usage.env.ssh_label"
+        )
+        let useSegmentEnv = envItems.count <= 3
+        if useSegmentEnv {
+            usageEnvironmentSegmentIds = envItems.map(\.id)
+            let segIdx = usageEnvironmentSegmentIds.firstIndex(of: selectedEnvironmentId) ?? 0
+            let segLabels = envItems.map(\.title)
+            if usageEnvironmentSegment.labels != segLabels || usageEnvironmentSegment.selectedSegment != segIdx {
+                usageEnvironmentSegment.updateSegments(
+                    labels: segLabels,
+                    selectedIndex: segIdx,
+                    animated: app.isMenuPanelShown && Design.shouldAnimate(in: usageEnvironmentSegment)
+                )
+            }
+            usageEnvironmentSegment.isHidden = false
+            usageEnvironmentPopup.isHidden = true
+        } else {
+            usageEnvironmentSegment.isHidden = true
+            usageEnvironmentPopup.isHidden = false
+        }
+
+        let selectedEnvObj = envs.first { ($0["id"] as? String) == selectedEnvironmentId }
+        if let shareNote = UsageFilterSupport.environmentShareNote(breakdown: breakdown, selectedEnvironmentId: selectedEnvironmentId) {
+            usageEnvShareLabel.stringValue = shareNote
+            usageEnvShareLabel.textColor = Design.secondary
+            usageEnvShareLabel.isHidden = false
+        } else if selectedEnvironmentId != "all", (selectedEnvObj?["online"] as? Bool) == false {
+            usageEnvShareLabel.stringValue = L10n.t("menu_panel.env.offline_hint", fallback: "离线快照")
+            usageEnvShareLabel.textColor = accessibleWarningColor()
+            usageEnvShareLabel.isHidden = false
+        } else {
+            usageEnvShareLabel.stringValue = ""
+            usageEnvShareLabel.isHidden = true
+        }
+
+        usageEnvironmentBar.isHidden = !(hasSsh || selectedEnvironmentId != "all")
+    }
+
     private func syncUsageTabFromCache() {
         let periodKey = Self.periods[selectedPeriod]
+        let cacheKey = currentUsageCacheKey
         let periodLabel = Self.periodLabels[selectedPeriod]
         if selectedPeriod == 0 {
             trendTitleLabel.stringValue = L10n.t("menu_panel.trend.today", fallback: "今日趋势")
@@ -813,9 +1017,10 @@ final class MenuPanelController: NSViewController {
             trendTitleLabel.stringValue = L10n.t("menu_panel.trend.period", ["period": periodLabel], fallback: "\(periodLabel)趋势")
         }
 
-        guard let report = app.cachedUsageReportsByPeriod[periodKey] else {
+        guard let report = app.cachedUsageReportsByPeriod[cacheKey] else {
+            syncUsageEnvironmentBar(from: app.cachedUsageReportsByPeriod[periodKey])
             clearMenuUsageChartsAndModels()
-            if let err = app.usageFetchErrorsByPeriod[periodKey], !err.isEmpty {
+            if let err = app.usageFetchErrorsByPeriod[cacheKey], !err.isEmpty {
                 usageScopeLabel.stringValue = L10n.t("menu_panel.usage.read_failed", ["error": err], fallback: "读取失败：\(err)")
                 usageScopeLabel.textColor = accessibleWarningColor()
                 usageScopeLabel.isHidden = false
@@ -837,6 +1042,37 @@ final class MenuPanelController: NSViewController {
 
         let summary = report["summary"] as? [String: Any] ?? [:]
         let availability = summary["availability"] as? String ?? "complete"
+        let envs = UsageFilterSupport.extractAvailableEnvironments(from: report)
+        let breakdown = UsageFilterSupport.extractEnvironmentBreakdown(from: report)
+        let hasSsh = UsageFilterSupport.hasSshEnvironment(environments: envs, breakdown: breakdown)
+        if availability != "unavailable",
+           !envs.isEmpty,
+           !hasSsh,
+           selectedEnvironmentId != "all",
+           !envs.contains(where: { ($0["id"] as? String) == selectedEnvironmentId }) {
+            selectedEnvironmentId = "all"
+            if app.configuration?.value.menuUsageEnvironmentId != "all" {
+                app.configuration?.value.menuUsageEnvironmentId = "all"
+                app.scheduleConfigurationSave()
+            }
+            lastKnownUsageEnvironments = envs
+            lastKnownUsageBreakdown = breakdown
+            renderedUsageSnapshotKey = ""
+            renderedUsageModelKey = ""
+            if let oldAll = app.cachedUsageReportsByPeriod[periodKey],
+               UsageFilterSupport.hasSshEnvironment(
+                   environments: UsageFilterSupport.extractAvailableEnvironments(from: oldAll),
+                   breakdown: UsageFilterSupport.extractEnvironmentBreakdown(from: oldAll)
+               ) {
+                app.cachedUsageReportsByPeriod.removeValue(forKey: periodKey)
+            }
+            syncUsageTabFromCache()
+            if app.reachable {
+                app.fetchUsageSummary(period: periodKey, environmentId: "all", force: false, allowCached: false)
+            }
+            return
+        }
+        syncUsageEnvironmentBar(from: report)
         if availability == "unavailable" {
             usageScopeLabel.stringValue = L10n.t("menu_panel.usage.db_unavailable", fallback: "所选会话数据库均读取失败")
             usageScopeLabel.textColor = accessibleWarningColor()
@@ -885,14 +1121,14 @@ final class MenuPanelController: NSViewController {
         )
         cacheTile.setValueText(denom > 0 ? String(format: "%.1f%%", locale: Locale(identifier: "en_US_POSIX"), cacheHit) : "—")
 
-        let snapKey = "\(report["snapshotId"] ?? ""):\(periodKey):\(selectedChartDimension.rawValue):\(total):\(requests):\(failed):\(unknown)"
+        let snapKey = "\(selectedEnvironmentId):\(report["snapshotId"] ?? ""):\(periodKey):\(selectedChartDimension.rawValue):\(total):\(requests):\(failed):\(unknown)"
         if snapKey != renderedUsageSnapshotKey {
             renderedUsageSnapshotKey = snapKey
             updateMenuTrendBuckets(report: report, summary: summary)
         }
 
         let models = ModelUsageFold.foldThinkingVariants((report["byModel"] as? [[String: Any]]) ?? (report["models"] as? [[String: Any]]) ?? [])
-        let modelKey = "\(L10n.shared.currentLocale):\(report["snapshotId"] ?? ""):\(periodKey):\(models.count):\(pricedCount):\(unpricedCount):\(showAllModels):\(total)"
+        let modelKey = "\(L10n.shared.currentLocale):\(selectedEnvironmentId):\(report["snapshotId"] ?? ""):\(periodKey):\(models.count):\(pricedCount):\(unpricedCount):\(showAllModels):\(total)"
         if modelKey != renderedUsageModelKey {
             renderedUsageModelKey = modelKey
             rebuildMenuModelList(models: models, totalTokens: total)
@@ -901,7 +1137,7 @@ final class MenuPanelController: NSViewController {
         let lastScan = doubleVal(summary, "lastScannedAt", fallback: doubleVal(summary, "generated_at"))
         let timeStr = lastScan > 0 ? Self.timeFormatter.string(from: Date(timeIntervalSince1970: lastScan)) : L10n.t("common.just_now", fallback: "刚刚")
         var footerParts: [String] = [L10n.t("common.updated_at", ["time": timeStr], fallback: "更新于 \(timeStr)")]
-        if let fetchErr = app.usageFetchErrorsByPeriod[periodKey], !fetchErr.isEmpty {
+        if let fetchErr = app.usageFetchErrorsByPeriod[cacheKey], !fetchErr.isEmpty {
             footerParts.append(L10n.t("menu_panel.usage.refresh_failed_cached", fallback: "刷新失败 · 沿用上次记录"))
         } else if availability == "cached" {
             footerParts.append(L10n.t("menu_panel.usage.cached_snapshot", fallback: "沿用缓存快照"))
@@ -916,7 +1152,7 @@ final class MenuPanelController: NSViewController {
             footerParts.append(L10n.t("usage.cost.outdated_models", ["count": expiredCount], fallback: "\(expiredCount) 款模型定价已过期"))
         }
         usageFooterLabel.stringValue = footerParts.joined(separator: " · ")
-        usageFooterLabel.textColor = (app.usageFetchErrorsByPeriod[periodKey] != nil || failed > 0 || availability == "cached")
+        usageFooterLabel.textColor = (app.usageFetchErrorsByPeriod[cacheKey] != nil || failed > 0 || availability == "cached")
             ? accessibleWarningColor()
             : Design.secondary
     }
@@ -1143,7 +1379,197 @@ final class MenuPanelController: NSViewController {
 
     // MARK: - Tab 1 Rendering (Quota)
 
+    private func syncQuotaContextSwitcher() {
+        let remotes = app.remoteSessions
+        let localLabel = L10n.t("ssh.context.local", fallback: "本机")
+        var labels = [localLabel]
+        var tooltips: [String?] = [nil]
+        var keys = ["local"]
+        for row in remotes {
+            guard let rk = row["remoteKey"] as? String, !rk.isEmpty else { continue }
+            let rawHost = (row["hostLabel"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let host = rawHost.isEmpty ? "SSH" : rawHost
+            let label = L10n.t("ssh.context.remote", ["host": host], fallback: "SSH: \(host)")
+            labels.append(label)
+            tooltips.append(label)
+            keys.append("remote:\(rk)")
+        }
+        quotaContextSegmentKeys = keys
+        let hidden = remotes.isEmpty
+        if !hidden {
+            let selectedIdx = keys.firstIndex(of: app.selectedContextKey) ?? 0
+            quotaContextSwitcher.updateSegments(
+                labels: labels,
+                tooltips: tooltips,
+                selectedIndex: selectedIdx,
+                animated: app.isMenuPanelShown && Design.shouldAnimate(in: quotaContextSwitcher)
+            )
+        }
+        quotaContextSwitcherRow.isHidden = hidden
+    }
+
+    private func renderUnifiedQuotaRows(contract: QuotaPresentation.Contract, keyPrefix: String) {
+        let now = Date()
+        let unknownText = L10n.t("common.unknown", fallback: "未知")
+        let unavailableText = L10n.t("common.unavailable", fallback: "不可用")
+        let modelQuotaText = L10n.t("quota.model_quota", fallback: "模型配额")
+        let quotaRowsFingerprint = [
+            L10n.shared.currentLocale,
+            keyPrefix,
+            contract.displayGroups.map { g in
+                let ws = g.windows.map { "\($0.localizedLabel):\($0.percentage.map(String.init) ?? "-"):\($0.placeholder(availability: g.availability)):\($0.effectiveResetText(at: now)):\($0.effectiveStale(at: now))" }.joined(separator: ",")
+                return "\(g.key)|\(g.displayName)|\(g.availability)|\(ws)"
+            }.joined(separator: ";")
+        ].joined(separator: "#")
+
+        guard quotaRowsFingerprint != renderedQuotaTabKey else { return }
+        renderedQuotaTabKey = quotaRowsFingerprint
+        quotaUnifiedContentStack.arrangedSubviews.forEach {
+            quotaUnifiedContentStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        var assignedG5 = false
+        var assignedGW = false
+        var assignedC5 = false
+        var assignedCW = false
+
+        for (groupIdx, quotaGroup) in contract.displayGroups.enumerated() {
+            if groupIdx > 0 {
+                let div = divider()
+                quotaUnifiedContentStack.addArrangedSubview(div)
+                fillWidth(div, in: quotaUnifiedContentStack)
+            }
+            let brands = quotaGroup.brands.isEmpty ? ModelIcons.brands(for: quotaGroup.displayName) : quotaGroup.brands
+            let header = MenuQuotaHelpers.groupHeader(quotaGroup.displayName, brands: brands, fontSize: 11.5, iconSize: 13)
+            var groupViews: [NSView] = [header]
+            var rowsForGroup: [MenuMeterRow] = []
+
+            if quotaGroup.windows.isEmpty {
+                let row = MenuMeterRow(title: modelQuotaText)
+                row.accessibilityGroupName = quotaGroup.displayName
+                let ph = quotaGroup.availability == "disabled" ? unavailableText : unknownText
+                row.apply(percentage: nil, placeholder: ph, reset: "", stale: false)
+                groupViews.append(row)
+                rowsForGroup.append(row)
+            } else {
+                for win in quotaGroup.windows {
+                    let row = MenuMeterRow(title: win.localizedLabel)
+                    row.accessibilityGroupName = quotaGroup.displayName
+                    let effStale = win.effectiveStale(at: now)
+                    row.apply(
+                        percentage: win.percentage,
+                        placeholder: win.placeholder(availability: quotaGroup.availability),
+                        reset: win.percentage == nil ? "" : win.effectiveResetText(at: now),
+                        stale: effStale
+                    )
+                    groupViews.append(row)
+                    rowsForGroup.append(row)
+                }
+            }
+
+            let groupStack = vertical(groupViews, spacing: 6)
+            groupStack.alignment = .leading
+            for v in groupViews { fillWidth(v, in: groupStack) }
+            quotaUnifiedContentStack.addArrangedSubview(groupStack)
+            fillWidth(groupStack, in: quotaUnifiedContentStack)
+
+            let normalizedKey = quotaGroup.key.lowercased()
+            if normalizedKey == "gemini" {
+                if let first = rowsForGroup.first { quotaGemini5h = first; assignedG5 = true }
+                if rowsForGroup.count > 1 { quotaGeminiWeekly = rowsForGroup[1]; assignedGW = true }
+            } else if normalizedKey == "claude" || normalizedKey == "claude_gpt" {
+                if let first = rowsForGroup.first { quotaClaude5h = first; assignedC5 = true }
+                if rowsForGroup.count > 1 { quotaClaudeWeekly = rowsForGroup[1]; assignedCW = true }
+            }
+        }
+        if !assignedG5 { quotaGemini5h = MenuMeterRow(title: L10n.t("common.period.5h", fallback: "5 小时")) }
+        if !assignedGW { quotaGeminiWeekly = MenuMeterRow(title: L10n.t("common.period.weekly", fallback: "每周")) }
+        if !assignedC5 { quotaClaude5h = MenuMeterRow(title: L10n.t("common.period.5h", fallback: "5 小时")) }
+        if !assignedCW { quotaClaudeWeekly = MenuMeterRow(title: L10n.t("common.period.weekly", fallback: "每周")) }
+    }
+
     private func syncQuotaTab() {
+        syncQuotaContextSwitcher()
+
+        if let remote = app.selectedRemoteSession() {
+            let remoteKey = remote["remoteKey"] as? String ?? ""
+            let hostRaw = (remote["hostLabel"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let host = hostRaw.isEmpty ? "SSH" : hostRaw
+            let state = remote["state"] as? String ?? "connected"
+            let email = (remote["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let tierRaw = (remote["subscription_tier"] as? String) ?? (remote["tier"] as? String)
+            let tier = AccountIdentity.normalizeTier(tierRaw)
+            let lastErr = (remote["lastError"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+            quotaAccountNameLabel.stringValue = email.isEmpty
+                ? "SSH: \(host)"
+                : AccountIdentity.displayName(name: remote["name"] as? String, email: email)
+            quotaEmailLabel.stringValue = email.isEmpty
+                ? L10n.t("ssh.context.remote_switch_hint", fallback: "远程主机账号由远端独立管理，此处仅供只读查看与刷新。")
+                : email
+            quotaEmailLabel.toolTip = nil
+            quotaHeaderEmail = email
+            quotaTierBadge.title = tier
+            quotaTierBadge.isHidden = email.isEmpty || tier.isEmpty
+            quotaStatusBadge.title = L10n.t("ssh.context.remote_readonly_badge", fallback: "远程只读")
+            quotaStatusBadge.tint = Design.blue
+            quotaStatusBadge.isHidden = false
+            quotaEmptyButton.isHidden = true
+
+            let contract = QuotaPresentation.contract(remote)
+            if contract.displayGroups.isEmpty {
+                quotaGroupsContainer.isHidden = true
+                renderedQuotaTabKey = "remote_empty:\(remoteKey):\(app.statusValue.remoteObservedVersion):\(L10n.shared.currentLocale)"
+            } else {
+                quotaGroupsContainer.isHidden = false
+                renderUnifiedQuotaRows(contract: contract, keyPrefix: "remote:\(remoteKey):\(app.statusValue.remoteObservedVersion)")
+            }
+
+            var warnings: [String] = []
+            if state == "disconnected" {
+                warnings.append(L10n.t("ssh.context.remote_disconnected", fallback: "SSH 连接已断开（暂示上次快照）"))
+            } else if state == "auth_expired" {
+                warnings.append(L10n.t("ssh.context.remote_auth_expired", fallback: "远端登录态已过期，请在 SSH 窗口重新登录"))
+            } else if !lastErr.isEmpty {
+                warnings.append(L10n.t("ssh.context.remote_probe_error", fallback: "远端配额刷新失败，暂示上次快照"))
+            }
+            if contract.displayGroups.isEmpty {
+                warnings.append(L10n.t("ssh.context.remote_no_quota", fallback: "暂未获取到远端配额"))
+            }
+            let contractWarn = QuotaPresentation.warningSummary(contract, excluding: warnings)
+            if !contractWarn.isEmpty {
+                warnings.append(contractWarn)
+            }
+            quotaWarningLabel.stringValue = warnings.joined(separator: L10n.shared.isEnglish ? "; " : "；")
+            quotaWarningLabel.isHidden = warnings.isEmpty
+
+            var footerParts: [String] = []
+            let localEmail = (app.resolvedMenuAccount()?["email"] as? String ?? app.statusValue.liveAccountEmail).trimmingCharacters(in: .whitespacesAndNewlines)
+            let matchedLocalId = (remote["matchedLocalAccountId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !email.isEmpty {
+                if !localEmail.isEmpty && localEmail.caseInsensitiveCompare(email) == .orderedSame {
+                    footerParts.append(L10n.t("ssh.context.same_as_local", fallback: "与本机同一账号"))
+                } else if !localEmail.isEmpty || matchedLocalId.isEmpty {
+                    footerParts.append(L10n.t("ssh.context.diff_from_local", fallback: "与本机不同账号"))
+                }
+            }
+            let stamp = QuotaPresentation.number(remote["quotaLastUpdated"])
+                ?? (QuotaPresentation.number(remote["observedAt"]).map { $0 / 1000.0 })
+                ?? 0
+            if app.remoteQuotaRefreshing {
+                footerParts.append(L10n.t("menu_panel.quota.refreshing", fallback: "正在刷新配额…"))
+            } else if stamp > 0 {
+                let date = Date(timeIntervalSince1970: stamp)
+                let fmt = Calendar.current.isDateInToday(date) ? Self.timeFormatter : Self.dateTimeFormatter
+                footerParts.append(L10n.t("common.updated_at", ["time": fmt.string(from: date)], fallback: "更新于 \(fmt.string(from: date))"))
+            } else {
+                footerParts.append(L10n.t("ssh.context.remote_readonly_badge", fallback: "远程只读"))
+            }
+            quotaFooterLabel.stringValue = footerParts.joined(separator: " · ")
+            quotaFooterLabel.textColor = .secondaryLabelColor
+            return
+        }
+
         let active = app.resolvedMenuAccount()
         guard let account = active else {
             let liveUnsaved = !app.statusValue.liveAccountEmail.isEmpty
@@ -1185,85 +1611,8 @@ final class MenuPanelController: NSViewController {
             quotaStatusBadge.isHidden = true
         }
 
-        let unknownText = L10n.t("common.unknown", fallback: "未知")
-        let unavailableText = L10n.t("common.unavailable", fallback: "不可用")
-        let modelQuotaText = L10n.t("quota.model_quota", fallback: "模型配额")
         let contract = QuotaPresentation.contract(account)
-
-        let quotaRowsFingerprint = [
-            L10n.shared.currentLocale,
-            id,
-            email,
-            contract.displayGroups.map { g in
-                let ws = g.windows.map { "\($0.localizedLabel):\($0.percentage.map(String.init) ?? "-"):\($0.placeholder(availability: g.availability)):\($0.resetText):\($0.stale)" }.joined(separator: ",")
-                return "\(g.key)|\(g.displayName)|\(g.availability)|\(ws)"
-            }.joined(separator: ";")
-        ].joined(separator: "#")
-
-        if quotaRowsFingerprint != renderedQuotaTabKey {
-            renderedQuotaTabKey = quotaRowsFingerprint
-            quotaUnifiedContentStack.arrangedSubviews.forEach {
-                quotaUnifiedContentStack.removeArrangedSubview($0)
-                $0.removeFromSuperview()
-            }
-            var assignedG5 = false
-            var assignedGW = false
-            var assignedC5 = false
-            var assignedCW = false
-
-            for (groupIdx, quotaGroup) in contract.displayGroups.enumerated() {
-                if groupIdx > 0 {
-                    let div = divider()
-                    quotaUnifiedContentStack.addArrangedSubview(div)
-                    fillWidth(div, in: quotaUnifiedContentStack)
-                }
-                let brands = quotaGroup.brands.isEmpty ? ModelIcons.brands(for: quotaGroup.displayName) : quotaGroup.brands
-                let header = MenuQuotaHelpers.groupHeader(quotaGroup.displayName, brands: brands, fontSize: 11.5, iconSize: 13)
-                var groupViews: [NSView] = [header]
-                var rowsForGroup: [MenuMeterRow] = []
-
-                if quotaGroup.windows.isEmpty {
-                    let row = MenuMeterRow(title: modelQuotaText)
-                    row.accessibilityGroupName = quotaGroup.displayName
-                    let ph = quotaGroup.availability == "disabled" ? unavailableText : unknownText
-                    row.apply(percentage: nil, placeholder: ph, reset: "", stale: false)
-                    groupViews.append(row)
-                    rowsForGroup.append(row)
-                } else {
-                    for win in quotaGroup.windows {
-                        let row = MenuMeterRow(title: win.localizedLabel)
-                        row.accessibilityGroupName = quotaGroup.displayName
-                        row.apply(
-                            percentage: win.percentage,
-                            placeholder: win.placeholder(availability: quotaGroup.availability),
-                            reset: win.percentage == nil ? "" : win.resetText,
-                            stale: win.stale
-                        )
-                        groupViews.append(row)
-                        rowsForGroup.append(row)
-                    }
-                }
-
-                let groupStack = vertical(groupViews, spacing: 6)
-                groupStack.alignment = .leading
-                for v in groupViews { fillWidth(v, in: groupStack) }
-                quotaUnifiedContentStack.addArrangedSubview(groupStack)
-                fillWidth(groupStack, in: quotaUnifiedContentStack)
-
-                let normalizedKey = quotaGroup.key.lowercased()
-                if normalizedKey == "gemini" {
-                    if let first = rowsForGroup.first { quotaGemini5h = first; assignedG5 = true }
-                    if rowsForGroup.count > 1 { quotaGeminiWeekly = rowsForGroup[1]; assignedGW = true }
-                } else if normalizedKey == "claude" || normalizedKey == "claude_gpt" {
-                    if let first = rowsForGroup.first { quotaClaude5h = first; assignedC5 = true }
-                    if rowsForGroup.count > 1 { quotaClaudeWeekly = rowsForGroup[1]; assignedCW = true }
-                }
-            }
-            if !assignedG5 { quotaGemini5h = MenuMeterRow(title: L10n.t("common.period.5h", fallback: "5 小时")) }
-            if !assignedGW { quotaGeminiWeekly = MenuMeterRow(title: L10n.t("common.period.weekly", fallback: "每周")) }
-            if !assignedC5 { quotaClaude5h = MenuMeterRow(title: L10n.t("common.period.5h", fallback: "5 小时")) }
-            if !assignedCW { quotaClaudeWeekly = MenuMeterRow(title: L10n.t("common.period.weekly", fallback: "每周")) }
-        }
+        renderUnifiedQuotaRows(contract: contract, keyPrefix: "\(id)|\(email)")
 
         var warnings: [String] = []
         if let readiness = account["credentialReadiness"] as? [String: Any], readiness["state"] as? String == "needs_authorization" {
@@ -1330,6 +1679,13 @@ final class MenuPanelController: NSViewController {
     private func syncAccountsTab() {
         let accounts = app.cachedAccounts
         accountsCountLabel.stringValue = L10n.t("menu_panel.accounts.count", ["count": accounts.count], fallback: "\(accounts.count) 个账号")
+        if app.remoteSessions.isEmpty {
+            accountsLocalOnlyNoteLabel.isHidden = true
+            accountsLocalOnlyNoteLabel.stringValue = ""
+        } else {
+            accountsLocalOnlyNoteLabel.stringValue = L10n.t("ssh.context.accounts_local_only_note", fallback: "账号切换与智能推荐仅作用于本机 Antigravity，不影响已连接的 SSH 远程主机。")
+            accountsLocalOnlyNoteLabel.isHidden = false
+        }
 
         guard !accounts.isEmpty else {
             accountCardsById.removeAll()
@@ -1417,9 +1773,9 @@ final class MenuPanelController: NSViewController {
         case 0:
             let visibleCount = showAllModels ? renderedModelNames.count : min(3, renderedModelNames.count)
             let visibleLabels = renderedModelNames.prefix(visibleCount).compactMap { modelRowViewsByName[$0]?.nameLabel.stringValue }.joined(separator: "|")
-            tabFingerprint = "u:\(usageScopeLabel.isHidden):\(usageScopeLabel.stringValue):\(modelsListStack.arrangedSubviews.count):\(renderedModelNames.count):\(showAllModels):\(visibleLabels):\(toggleModelsButton.isHidden):\(toggleModelsButton.title):\(usageFooterLabel.stringValue)"
+            tabFingerprint = "u:\(selectedEnvironmentId):\(usageEnvironmentBar.isHidden):\(usageEnvironmentSegment.isHidden):\(usageEnvironmentPopup.isHidden):\(usageEnvShareLabel.stringValue):\(usageScopeLabel.isHidden):\(usageScopeLabel.stringValue):\(modelsListStack.arrangedSubviews.count):\(renderedModelNames.count):\(showAllModels):\(visibleLabels):\(toggleModelsButton.isHidden):\(toggleModelsButton.title):\(usageFooterLabel.stringValue)"
         case 1:
-            tabFingerprint = "q:\(quotaAccountNameLabel.stringValue):\(quotaTierBadge.isHidden):\(quotaStatusBadge.isHidden):\(quotaEmailLabel.stringValue):\(quotaGroupsContainer.isHidden):\(renderedQuotaTabKey):\(quotaEmptyButton.isHidden):\(quotaWarningLabel.isHidden):\(quotaWarningLabel.stringValue):\(quotaFooterLabel.stringValue)"
+            tabFingerprint = "q:\(quotaContextSwitcherRow.isHidden):\(app.selectedContextKey):\(app.statusValue.remoteObservedVersion):\(quotaAccountNameLabel.stringValue):\(quotaTierBadge.isHidden):\(quotaStatusBadge.isHidden):\(quotaEmailLabel.stringValue):\(quotaGroupsContainer.isHidden):\(renderedQuotaTabKey):\(quotaEmptyButton.isHidden):\(quotaWarningLabel.isHidden):\(quotaWarningLabel.stringValue):\(quotaFooterLabel.stringValue)"
         default:
             let cardsSummary = renderedAccountIds.map { id -> String in
                 guard let card = accountCardsById[id] else { return id }
@@ -1427,7 +1783,7 @@ final class MenuPanelController: NSViewController {
                 let rowsKey = card.quotaRowViews.map(\.lastAppliedKey).joined(separator: ",")
                 return "\(id):1:\(card.quotaRowsStack.arrangedSubviews.count):\(rowsKey):\(card.warningLabel.isHidden ? "" : card.warningLabel.stringValue):\(card.timestampLabel.isHidden ? "" : card.timestampLabel.stringValue)"
             }.joined(separator: "|")
-            tabFingerprint = "a:\(accountsCardsStack.arrangedSubviews.count):\(app.reachable):\(cardsSummary)"
+            tabFingerprint = "a:\(accountsCardsStack.arrangedSubviews.count):\(app.reachable):\(accountsLocalOnlyNoteLabel.isHidden):\(accountsLocalOnlyNoteLabel.stringValue):\(cardsSummary)"
         }
         let measureFingerprint = "\(selectedTab):\(L10n.shared.currentLocale):\(Int(screenMax)):\(debugPortBannerBox.isHidden):\(tabFingerprint)"
         if !force && measureFingerprint == lastMeasuredContentFingerprint {

@@ -392,21 +392,16 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
 
         let seriesRank: Int
         if brandRank == 0 {
-            if lower.contains("neon") { seriesRank = 0 }
-            else if lower.contains("argon") { seriesRank = 1 }
-            else if lower.contains("hydrogen") { seriesRank = 2 }
-            else if lower.contains("carbon") { seriesRank = 3 }
-            else if lower.contains("pro") { seriesRank = 4 }
-            else if lower.contains("flash-lite") { seriesRank = 6 }
-            else if lower.contains("flash") { seriesRank = 5 }
-            else { seriesRank = 7 }
+            if lower.contains("flash-lite") { seriesRank = 3 }
+            else if lower.contains("flash") { seriesRank = 2 }
+            else if lower.contains("pro") { seriesRank = 1 }
+            else { seriesRank = 0 }
         } else if brandRank == 1 {
-            if lower.contains("mythos") || lower.contains("fable") || lower.contains("opus") { seriesRank = 0 }
-            else if lower.contains("sonnet") { seriesRank = 1 }
+            if lower.contains("sonnet") { seriesRank = 1 }
             else if lower.contains("haiku") { seriesRank = 2 }
-            else { seriesRank = 3 }
+            else { seriesRank = 0 }
         } else if brandRank == 2 {
-            if lower.contains("mini") || lower.contains("nano") || lower.contains("oss") || lower.contains("luna") { seriesRank = 2 }
+            if lower.contains("mini") || lower.contains("nano") || lower.contains("oss") { seriesRank = 1 }
             else { seriesRank = 0 }
         } else {
             seriesRank = 0
@@ -425,7 +420,7 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         return lhs.localizedStandardCompare(rhs) == .orderedAscending
     }
 
-    private static func sortCurrentPlanKeys(_ keys: [String], catalogState: [String: [String: Any]]) -> [String] {
+    static func sortCurrentPlanKeys(_ keys: [String], catalogState: [String: [String: Any]]) -> [String] {
         keys.sorted { lhs, rhs in
             let hoL = hostOrder(for: lhs, catalogState: catalogState)
             let hoR = hostOrder(for: rhs, catalogState: catalogState)
@@ -676,17 +671,18 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         "Medium": 1,
         "High": 2,
         "XHigh": 3,
-        "Extra High": 4,
-        "Extra Low": 5,
-        "Max": 6,
-        "Thinking": 7,
-        "Orchestrator": 8,
+        "Extra": 4,
+        "Extra High": 5,
+        "Extra Low": 6,
+        "Max": 7,
+        "Thinking": 8,
+        "Orchestrator": 9,
     ]
 
     private static func stripDisplayTierSuffix(_ name: String) -> String {
         let patterns = [
-            "\\s*[（(]\\s*(?:extra[\\s-]*high|extra[\\s-]*low|xhigh|high|medium|low|minimal|max|thinking)\\s*[）)]\\s*$",
-            "\\s+(?:extra[\\s-]*high|extra[\\s-]*low|xhigh|high|medium|low|minimal|max|thinking)\\s*$"
+            "\\s*[（(]\\s*(?:extra[\\s-]*high|extra[\\s-]*low|xhigh|extra|high|medium|low|minimal|max|thinking)\\s*[）)]\\s*$",
+            "\\s+(?:extra[\\s-]*high|extra[\\s-]*low|xhigh|extra|high|medium|low|minimal|max|thinking)\\s*$"
         ]
         var current = name.trimmingCharacters(in: .whitespacesAndNewlines)
         for pattern in patterns {
@@ -699,7 +695,7 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
     }
 
     static func groupUnpricedLiveModels(_ rawUnpriced: [[String: Any]]) -> [UnpricedModelGroup] {
-        let parsed: [(key: String, displayName: String, disabled: Bool, variants: [String])] = rawUnpriced.compactMap { item in
+        let parsed: [(key: String, displayName: String, disabled: Bool, variants: [String], hostOrder: Int?)] = rawUnpriced.compactMap { item in
             guard let rawKey = item["key"] as? String else { return nil }
             let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !key.isEmpty else { return nil }
@@ -708,12 +704,13 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
             let variants = (item["variants"] as? [String] ?? [])
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
-            return (key: key, displayName: displayName, disabled: disabled, variants: variants)
+            let hostOrder = (item["hostOrder"] as? NSNumber)?.intValue
+            return (key: key, displayName: displayName, disabled: disabled, variants: variants, hostOrder: hostOrder)
         }
         guard !parsed.isEmpty else { return [] }
 
         let thinkingRegex = try? NSRegularExpression(
-            pattern: "^((?:gemini|claude|gpt|o[1-9]).+?)-(extra-high|extra-low|xhigh|high|medium|low|minimal|max|thinking)$",
+            pattern: "^((?:gemini|claude|gpt|o[1-9]).+?)-(extra-high|extra-low|xhigh|extra|high|medium|low|minimal|max|thinking)$",
             options: [.caseInsensitive]
         )
         let orchIdRegex = try? NSRegularExpression(
@@ -721,21 +718,40 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
             options: [.caseInsensitive]
         )
         let orchLabelRegex = try? NSRegularExpression(
-            pattern: "^Orchestrator\\s*\\(\\s*([a-z][a-z0-9]*)\\s*\\)$",
+            pattern: "^Orchestrator\\s*\\(\\s*([^)]+?)\\s*\\)$",
+            options: [.caseInsensitive]
+        )
+        let trailingOrchLabelRegex = try? NSRegularExpression(
+            pattern: "^(.+?)\\s*[（(]\\s*Orchestrator\\s*[）)]$",
             options: [.caseInsensitive]
         )
 
-        var siblingBases: [String] = []
+        func normalizedAliasToken(_ raw: String) -> String {
+            raw.lowercased()
+                .replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        }
+
+        // Collect non-orchestrator sibling bases so orchestrator rows only fold into an actually present sibling
+        // (never fabricating a hardcoded "gemini-4-<codename>" key).
+        var siblingBases: [(key: String, displayNorm: String)] = []
         for item in parsed {
             let lower = item.key.lowercased()
-            if let regex = thinkingRegex {
-                let range = NSRange(lower.startIndex..<lower.endIndex, in: lower)
-                if let match = regex.firstMatch(in: lower, range: range), let baseRange = Range(match.range(at: 1), in: lower) {
-                    siblingBases.append(String(lower[baseRange]))
-                    continue
-                }
+            let keyRange = NSRange(lower.startIndex..<lower.endIndex, in: lower)
+            if orchIdRegex?.firstMatch(in: lower, range: keyRange) != nil { continue }
+            let dispRange = NSRange(item.displayName.startIndex..<item.displayName.endIndex, in: item.displayName)
+            if orchLabelRegex?.firstMatch(in: item.displayName, range: dispRange) != nil { continue }
+            if trailingOrchLabelRegex?.firstMatch(in: item.displayName, range: dispRange) != nil { continue }
+
+            var baseKey = lower
+            var baseDisp = item.displayName
+            if let regex = thinkingRegex,
+               let match = regex.firstMatch(in: lower, range: keyRange),
+               let baseRange = Range(match.range(at: 1), in: lower) {
+                baseKey = String(lower[baseRange])
+                baseDisp = stripDisplayTierSuffix(item.displayName)
             }
-            siblingBases.append(lower)
+            siblingBases.append((key: baseKey, displayNorm: normalizedAliasToken(baseDisp)))
         }
 
         let suffixLabels: [String: String] = [
@@ -744,6 +760,7 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
             "medium": "Medium",
             "high": "High",
             "xhigh": "XHigh",
+            "extra": "Extra",
             "extra-high": "Extra High",
             "extra-low": "Extra Low",
             "max": "Max",
@@ -752,6 +769,8 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
 
         struct Bucket {
             let key: String
+            let firstIndex: Int
+            var hostOrder: Int?
             var displayName: String
             var hasNonOrchName: Bool
             var disabled: Bool
@@ -767,39 +786,59 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
             var isOrch = false
             var collectedVariants = Set(item.variants)
 
-            var codename: String? = nil
+            var orchCandidate: String? = nil
+            var isOrchLabel = false
             if let regex = orchIdRegex {
                 let range = NSRange(lower.startIndex..<lower.endIndex, in: lower)
                 if let m = regex.firstMatch(in: lower, range: range), let r = Range(m.range(at: 1), in: lower) {
-                    codename = String(lower[r])
+                    orchCandidate = String(lower[r])
                 }
             }
-            if codename == nil, let regex = orchLabelRegex {
+            if let regex = orchLabelRegex {
                 let range = NSRange(item.displayName.startIndex..<item.displayName.endIndex, in: item.displayName)
                 if let m = regex.firstMatch(in: item.displayName, range: range), let r = Range(m.range(at: 1), in: item.displayName) {
-                    let candidate = String(item.displayName[r]).lowercased()
-                    if !["pro", "flash", "default", "unknown", "g1"].contains(candidate) {
-                        codename = candidate
+                    isOrchLabel = true
+                    if orchCandidate == nil {
+                        let candidate = String(item.displayName[r]).trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !["pro", "flash", "default", "unknown", "g1"].contains(candidate.lowercased()) {
+                            orchCandidate = candidate
+                        }
+                    }
+                }
+            }
+            if orchCandidate == nil, let regex = trailingOrchLabelRegex {
+                let range = NSRange(item.displayName.startIndex..<item.displayName.endIndex, in: item.displayName)
+                if let m = regex.firstMatch(in: item.displayName, range: range), let r = Range(m.range(at: 1), in: item.displayName) {
+                    isOrchLabel = true
+                    let candidate = stripDisplayTierSuffix(String(item.displayName[r]))
+                    if !candidate.isEmpty {
+                        orchCandidate = candidate
                     }
                 }
             }
 
-            if let codename {
-                isOrch = true
-                collectedVariants.insert("Orchestrator")
-                let basePattern = "^gemini-(\\d+(?:\\.\\d+)?)-" + NSRegularExpression.escapedPattern(for: codename) + "$"
-                if let baseRegex = try? NSRegularExpression(pattern: basePattern, options: [.caseInsensitive]),
-                   let matchedSibling = siblingBases.first(where: { sib in
-                       let r = NSRange(sib.startIndex..<sib.endIndex, in: sib)
-                       return baseRegex.firstMatch(in: sib, range: r) != nil
-                   }) {
-                    targetKey = matchedSibling
-                } else {
-                    targetKey = "gemini-4-\(codename)"
+            if let candidate = orchCandidate {
+                let candLower = candidate.lowercased()
+                let candNorm = normalizedAliasToken(candidate)
+                let geminiCodenamePattern = "^gemini-(\\d+(?:\\.\\d+)?)-" + NSRegularExpression.escapedPattern(for: candLower) + "$"
+                let geminiRegex = try? NSRegularExpression(pattern: geminiCodenamePattern, options: [.caseInsensitive])
+                let matchedSibling = siblingBases.first { sib in
+                    if sib.key == candNorm || (!sib.displayNorm.isEmpty && sib.displayNorm == candNorm) {
+                        return true
+                    }
+                    if let geminiRegex {
+                        let r = NSRange(sib.key.startIndex..<sib.key.endIndex, in: sib.key)
+                        if geminiRegex.firstMatch(in: sib.key, range: r) != nil {
+                            return true
+                        }
+                    }
+                    return false
                 }
-                if let regex = orchLabelRegex {
-                    let r = NSRange(resolvedDisplay.startIndex..<resolvedDisplay.endIndex, in: resolvedDisplay)
-                    if regex.firstMatch(in: resolvedDisplay, range: r) != nil {
+                if let matchedSibling {
+                    isOrch = true
+                    collectedVariants.insert("Orchestrator")
+                    targetKey = matchedSibling.key
+                    if isOrchLabel {
                         resolvedDisplay = ""
                     }
                 }
@@ -815,27 +854,24 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
                 }
             }
 
-            if resolvedDisplay.isEmpty && isOrch {
-                let parts = targetKey.split(separator: "-")
-                if parts.count >= 3, parts[0] == "gemini" {
-                    let ver = parts[1]
-                    let code = parts[2].prefix(1).uppercased() + parts[2].dropFirst()
-                    resolvedDisplay = "Gemini \(ver) \(code)"
-                }
-            }
-
             if var existing = buckets[targetKey] {
                 existing.disabled = existing.disabled && item.disabled
                 existing.variants.formUnion(collectedVariants)
+                if let ho = item.hostOrder {
+                    existing.hostOrder = existing.hostOrder.map { min($0, ho) } ?? ho
+                }
                 if !isOrch && !resolvedDisplay.isEmpty && (!existing.hasNonOrchName || existing.displayName.isEmpty) {
                     existing.displayName = resolvedDisplay
                     existing.hasNonOrchName = true
                 }
                 buckets[targetKey] = existing
             } else {
+                let idx = order.count
                 order.append(targetKey)
                 buckets[targetKey] = Bucket(
                     key: targetKey,
+                    firstIndex: idx,
+                    hostOrder: item.hostOrder,
                     displayName: resolvedDisplay,
                     hasNonOrchName: !isOrch && !resolvedDisplay.isEmpty,
                     disabled: item.disabled,
@@ -844,16 +880,31 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
             }
         }
 
-        return order.compactMap { k in
+        let orderedKeys = order.sorted { lhs, rhs in
+            guard let bl = buckets[lhs], let br = buckets[rhs] else { return false }
+            switch (bl.hostOrder, br.hostOrder) {
+            case let (l?, r?):
+                return l != r ? l < r : bl.firstIndex < br.firstIndex
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                return bl.firstIndex < br.firstIndex
+            }
+        }
+
+        return orderedKeys.compactMap { k in
             guard let b = buckets[k] else { return nil }
             let sortedVariants = b.variants.sorted { lhs, rhs in
                 let lo = unpricedVariantOrder[lhs] ?? 99
                 let ro = unpricedVariantOrder[rhs] ?? 99
                 return lo != ro ? lo < ro : lhs.localizedStandardCompare(rhs) == .orderedAscending
             }
+            let finalDisplay = b.displayName.isEmpty ? ModelDisplayName.name(b.key) : b.displayName
             return UnpricedModelGroup(
                 key: b.key,
-                displayName: b.displayName.isEmpty ? b.key : b.displayName,
+                displayName: finalDisplay.isEmpty ? b.key : finalDisplay,
                 disabled: b.disabled,
                 variants: sortedVariants
             )
@@ -1000,9 +1051,10 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
             prices.keys.filter { (modelCatalogState[$0]?["availability"] as? String ?? "available") != "other_tier_only" },
             catalogState: modelCatalogState
         )
-        let otherPlanKeys = prices.keys
-            .filter { (modelCatalogState[$0]?["availability"] as? String) == "other_tier_only" }
-            .sorted { Self.compareFamilyAndVersion($0, $1) }
+        let otherPlanKeys = Self.sortCurrentPlanKeys(
+            prices.keys.filter { (modelCatalogState[$0]?["availability"] as? String) == "other_tier_only" },
+            catalogState: modelCatalogState
+        )
 
         let appendPriceSection: ([String], String?) -> Void = { keys, sectionTitle in
             guard !keys.isEmpty else { return }

@@ -63,6 +63,7 @@ export interface ProjectAccountIpcOptions {
   includeOverviewFields?: boolean;
   formatResetTime?: (resetTime: number | null | undefined) => string;
   revisionWithReadiness?: boolean;
+  persistedQuotaLastUpdated?: number;
 }
 
 export function projectAccountForIpcNormalized(
@@ -101,11 +102,16 @@ export function projectAccountForIpcNormalized(
   }
   if (options?.includeOverviewFields) {
     const lastUp = Number(projected.quota_last_updated ?? (projected.quota as { last_updated?: unknown } | null)?.last_updated ?? 0);
+    const persistedLastUp =
+      typeof options.persistedQuotaLastUpdated === 'number' && Number.isFinite(options.persistedQuotaLastUpdated)
+        ? options.persistedQuotaLastUpdated
+        : lastUp;
     const resetTimeStr = options.formatResetTime
       ? options.formatResetTime(overview.resetTime)
       : (overview.resetTime !== null && overview.resetTime !== undefined ? String(overview.resetTime) : '');
     Object.assign(normalized, {
       quota_last_updated: lastUp,
+      persisted_quota_last_updated: persistedLastUp,
       quotaLastUpdated: lastUp,
       fiveHourRemaining: overview.fiveHourRemaining,
       weeklyRemaining: overview.weeklyRemaining,
@@ -150,7 +156,7 @@ export function projectAccountForIpcNormalized(
   return normalized;
 }
 
-function projectSingleUsagePeriod(usage: TokenUsageSummary, periodInput: unknown) {
+export function projectSingleUsagePeriod(usage: TokenUsageSummary, periodInput: unknown) {
   const periodKey: 'today' | 'last_7_days' | 'last_30_days' | 'all_time' =
     periodInput === 'today' ? 'today' : periodInput === '7d' ? 'last_7_days' : periodInput === '30d' ? 'last_30_days' : 'all_time';
   const p: TokenUsagePeriod = usage[periodKey] ?? usage.all_time;
@@ -182,6 +188,13 @@ function projectSingleUsagePeriod(usage: TokenUsageSummary, periodInput: unknown
   const lastScannedAt = (usage.availability === 'cached'
     ? usage.generated_at
     : (usage.last_attempt_at ?? usage.generated_at)) ?? 0;
+  const selectedAccountId = usage.selected_account_id ?? 'all';
+  const availableAccounts = usage.available_accounts ?? [];
+  const selectedEnvironmentId = usage.selected_environment_id ?? 'all';
+  const availableEnvironments = usage.available_environments ?? [];
+  const environmentBreakdown = p.environment_breakdown ?? usage.environment_breakdown;
+  const offlineSshHosts = environmentBreakdown?.offline_ssh_hosts ?? usage.environment_breakdown?.offline_ssh_hosts ?? [];
+  const remoteSyncRevision = usage.remote_sync_revision ?? 0;
   const periodSummary = {
     ...usage,
     totalTokens: p.totals.total_tokens,
@@ -212,10 +225,23 @@ function projectSingleUsagePeriod(usage: TokenUsageSummary, periodInput: unknown
     unknownTimeRecords: usage.unknown_time_records ?? 0,
     unknownTimeTokens: usage.unknown_time_tokens ?? 0,
     databaseDiagnostics: usage.database_diagnostics ?? [],
-    selectedAccountId: usage.selected_account_id ?? 'all',
-    selected_account_id: usage.selected_account_id ?? 'all',
-    availableAccounts: usage.available_accounts ?? [],
-    available_accounts: usage.available_accounts ?? [],
+    selectedAccountId,
+    selected_account_id: selectedAccountId,
+    availableAccounts,
+    available_accounts: availableAccounts,
+    selectedEnvironmentId,
+    selected_environment_id: selectedEnvironmentId,
+    availableEnvironments,
+    available_environments: availableEnvironments,
+    ...(environmentBreakdown ? { environmentBreakdown, environment_breakdown: environmentBreakdown } : {}),
+    remoteSyncRevision,
+    remote_sync_revision: remoteSyncRevision,
+    offlineSshHosts,
+    offline_ssh_hosts: offlineSshHosts,
+    unattributedRequests: usage.unattributed_requests ?? 0,
+    unattributed_requests: usage.unattributed_requests ?? 0,
+    unattributedTokens: usage.unattributed_tokens ?? 0,
+    unattributed_tokens: usage.unattributed_tokens ?? 0,
   };
   const { today: _t, last_7_days: _w, last_30_days: _m, all_time: _a, daily_trends, today_hourly, ...selectedSummary } = periodSummary;
   const safeDailyTrends = Array.isArray(daily_trends) ? daily_trends : [];
@@ -226,8 +252,23 @@ function projectSingleUsagePeriod(usage: TokenUsageSummary, periodInput: unknown
     ok: true,
     period: typeof periodInput === 'string' ? periodInput : 'all',
     snapshotId: usage.snapshot_id,
-    selectedAccountId: usage.selected_account_id ?? 'all',
-    availableAccounts: usage.available_accounts ?? [],
+    selectedAccountId,
+    selected_account_id: selectedAccountId,
+    availableAccounts,
+    available_accounts: availableAccounts,
+    selectedEnvironmentId,
+    selected_environment_id: selectedEnvironmentId,
+    availableEnvironments,
+    available_environments: availableEnvironments,
+    ...(environmentBreakdown ? { environmentBreakdown, environment_breakdown: environmentBreakdown } : {}),
+    remoteSyncRevision,
+    remote_sync_revision: remoteSyncRevision,
+    offlineSshHosts,
+    offline_ssh_hosts: offlineSshHosts,
+    unattributedRequests: usage.unattributed_requests ?? 0,
+    unattributed_requests: usage.unattributed_requests ?? 0,
+    unattributedTokens: usage.unattributed_tokens ?? 0,
+    unattributed_tokens: usage.unattributed_tokens ?? 0,
     summary: selectedSummary,
     byModel,
     models: byModel,
@@ -247,7 +288,10 @@ export function projectAllUsagePeriodSummaries(usage: TokenUsageSummary) {
 
 export function projectUsagePeriodSummary(usage: TokenUsageSummary, periodInput: unknown, options?: { includeAllPeriods?: boolean }) {
   const projected = projectSingleUsagePeriod(usage, periodInput);
-  if (options?.includeAllPeriods) {
+  const isUnfiltered =
+    (usage.selected_account_id ?? 'all') === 'all' &&
+    (usage.selected_environment_id ?? 'all') === 'all';
+  if (options?.includeAllPeriods && isUnfiltered) {
     return {
       ...projected,
       periods: projectAllUsagePeriodSummaries(usage),

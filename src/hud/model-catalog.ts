@@ -1,5 +1,12 @@
 import { normalizeModelId, THINKING_EFFORT_OR_LATEST_SUFFIX_RE } from '../model-identity.js';
-import { getEffectiveModelPriceAlias, getRemoteModelSpec, MODEL_CAPACITIES, MODEL_NAMES } from '../model-catalog.js';
+import {
+  getEffectiveModelPriceAlias,
+  getRemoteModelSpec,
+  MODEL_CAPACITIES,
+  MODEL_NAMES,
+  resolveObservedModelByEnum,
+  resolveObservedModelByIdOrAlias,
+} from '../model-catalog.js';
 import { resolveDatabaseModelFullName } from '../usage-types.js';
 import { bt } from '../i18n.js';
 /**
@@ -140,6 +147,110 @@ function autoFormatDynamicModelName(normalizedId: string): string | null {
   return null;
 }
 
+const EFFORT_PAREN_RE = /[（(]\s*(?:Extra\s+High|Extra\s+Low|XHigh|Extra|High|Medium|Low|Minimal|Max|Thinking|高|中|低|思考)\s*[）)]/gi;
+const EFFORT_TRAIL_RE = /\s+(?:Extra\s+High|Extra\s+Low|XHigh|Extra|High|Medium|Low|Minimal|Max|Thinking)\b.*$/i;
+const UNKNOWN_MODEL_LABELS = new Set(['未知模型', 'Unknown Model']);
+
+function isUnknownResolvedLabel(value: string | null | undefined): boolean {
+  if (!value) return true;
+  const trimmed = value.trim();
+  return !trimmed || UNKNOWN_MODEL_LABELS.has(trimmed) || trimmed === bt('usage.unknown_model');
+}
+
+function stripButtonDecorations(raw: string): string {
+  return raw
+    .replace(/^models\//i, '')
+    .trim()
+    .replace(/^[+\s·•]+|[⌃⌄^\s]+$/g, '')
+    .trim();
+}
+
+export function stripOrchestratorWrapper(raw: string): {
+  isOrchestrator: boolean;
+  inner: string;
+  isParenForm: boolean;
+  isTrailingSuffix: boolean;
+} {
+  const cleaned = stripButtonDecorations(raw);
+  if (!cleaned) {
+    return { isOrchestrator: false, inner: '', isParenForm: false, isTrailingSuffix: false };
+  }
+  const parenMatch = cleaned.match(/^Orchestrator\s*[（(]\s*([^）)]+?)\s*[）)]\s*$/i);
+  if (parenMatch) {
+    return {
+      isOrchestrator: true,
+      inner: parenMatch[1]!.trim(),
+      isParenForm: true,
+      isTrailingSuffix: false,
+    };
+  }
+  const trailingMatch = cleaned.match(/^(.+?)\s*[（(]\s*Orchestrator\s*[）)]\s*$/i);
+  if (trailingMatch) {
+    return {
+      isOrchestrator: true,
+      inner: trailingMatch[1]!.trim(),
+      isParenForm: true,
+      isTrailingSuffix: true,
+    };
+  }
+  const spacePrefixMatch = cleaned.match(/^Orchestrator(?:\s*[:·•/-]\s*|\s+)(.+)$/i);
+  if (spacePrefixMatch) {
+    return {
+      isOrchestrator: true,
+      inner: spacePrefixMatch[1]!.trim(),
+      isParenForm: false,
+      isTrailingSuffix: false,
+    };
+  }
+  if (/^Orchestrator$/i.test(cleaned)) {
+    return { isOrchestrator: true, inner: '', isParenForm: false, isTrailingSuffix: false };
+  }
+  return { isOrchestrator: false, inner: cleaned, isParenForm: false, isTrailingSuffix: false };
+}
+
+/**
+ * 依据运行时动态观察注册表与目录别名，将数字 modelEnum (如 1532 -> Gemini 4 Neon (High))
+ * 映射为标准 ModelCapacitySpec；未命中时返回 null，绝不硬编码伪造。
+ */
+export function resolveObservedModelSpecByEnum(modelEnum?: number | null): ModelCapacitySpec | null {
+  if (typeof modelEnum !== 'number' || !Number.isSafeInteger(modelEnum) || modelEnum <= 0) {
+    return null;
+  }
+  const observed = resolveObservedModelByEnum(modelEnum);
+  if (observed) {
+    const primaryRef = observed.modelId || observed.displayName || observed.modelOrAlias || '';
+    if (primaryRef) {
+      const spec = resolveModelCapacity(primaryRef);
+      const preferredDisplay =
+        observed.displayName &&
+        !/^MODEL_PLACEHOLDER_M\d+$/i.test(observed.displayName)
+          ? observed.displayName
+          : spec.displayName;
+      return {
+        ...spec,
+        displayName: preferredDisplay || spec.displayName,
+      };
+    }
+  }
+  if (modelEnum > 1000) {
+    const placeholder = `MODEL_PLACEHOLDER_M${modelEnum - 1000}`;
+    const observedByAlias = resolveObservedModelByIdOrAlias(placeholder);
+    if (observedByAlias) {
+      const primaryRef = observedByAlias.modelId || observedByAlias.displayName || placeholder;
+      const spec = resolveModelCapacity(primaryRef);
+      return {
+        ...spec,
+        displayName: observedByAlias.displayName || spec.displayName,
+      };
+    }
+    const directAlias = getEffectiveModelPriceAlias(placeholder);
+    if (directAlias && directAlias.toLowerCase() !== placeholder.toLowerCase()) {
+      return resolveModelCapacity(directAlias);
+    }
+  }
+  return null;
+}
+
 /**
  * 归一化前端 DOM 探针或 SQLite gen_metadata 传入的模型字符串，解析对应的 Antigravity 有效上下文阈值与展示名称
  */
@@ -147,36 +258,104 @@ export function resolveModelCapacity(rawModelInput?: string | null, depth = 0): 
   const raw = typeof rawModelInput === 'string' ? rawModelInput.trim() : '';
   if (!raw) {
     return {
-      modelId: 'gemini-3.8-flash',
-      displayName: 'Gemini 3.8 Flash',
+      modelId: 'unknown-model',
+      displayName: bt('usage.unknown_model'),
       capacityTokens: DEFAULT_CONTEXT_CAPACITY_TOKENS,
-      capacityCompact: '200K',
-      isFallback: false,
+      capacityCompact: '~200K',
+      isFallback: true,
     };
   }
 
-  // 清理 API 前缀、前端按钮可能附带的加号、下拉箭头及思考档位后缀（如 "models/gemini-3.8-flash", "+ Gemini 3.8 Flash High ^"）
-  const withoutApiPrefix = raw.replace(/^models\//i, '').trim();
-  const cleanedRaw = (withoutApiPrefix || raw)
-    .replace(/^[+\s·•]+|[⌃⌄^\s]+$/g, '')
-    .replace(/[（(]\s*(?:Extra\s+High|Extra\s+Low|XHigh|High|Medium|Low|Minimal|Max|Thinking|高|中|低|思考)\s*[）)]/gi, '')
-    .replace(/\s+(?:Extra\s+High|Extra\s+Low|XHigh|High|Medium|Low|Minimal|Max|Thinking)\b.*$/i, '')
+  // 清理 API 前缀、前端按钮可能附带的加号及下拉箭头（保留括号以便先剥离 Orchestrator 包装）
+  const decoratedStripped = stripButtonDecorations(raw);
+
+  if (depth < 3) {
+    const observedDirect = resolveObservedModelByIdOrAlias(decoratedStripped);
+    if (observedDirect) {
+      const targetRef = observedDirect.modelId || observedDirect.displayName || '';
+      if (targetRef && targetRef.toLowerCase() !== decoratedStripped.toLowerCase()) {
+        const resolved = resolveModelCapacity(targetRef, depth + 1);
+        if (
+          observedDirect.displayName &&
+          resolved.isFallback &&
+          !/^MODEL_PLACEHOLDER_M\d+$/i.test(observedDirect.displayName)
+        ) {
+          return { ...resolved, displayName: observedDirect.displayName };
+        }
+        return resolved;
+      }
+    }
+
+    const orch = stripOrchestratorWrapper(decoratedStripped);
+    if (orch.isOrchestrator) {
+      if (!orch.inner) {
+        return {
+          modelId: 'unknown-model',
+          displayName: bt('usage.unknown_model'),
+          capacityTokens: DEFAULT_CONTEXT_CAPACITY_TOKENS,
+          capacityCompact: '~200K',
+          isFallback: true,
+        };
+      }
+      const orchAlias = getEffectiveModelPriceAlias(decoratedStripped);
+      if (orchAlias && orchAlias.toLowerCase() !== decoratedStripped.toLowerCase()) {
+        return resolveModelCapacity(orchAlias, depth + 1);
+      }
+      const innerObserved = resolveObservedModelByIdOrAlias(orch.inner);
+      if (innerObserved?.modelId) {
+        return resolveModelCapacity(innerObserved.modelId, depth + 1);
+      }
+      const innerAlias = getEffectiveModelPriceAlias(orch.inner);
+      if (innerAlias && innerAlias.toLowerCase() !== orch.inner.toLowerCase()) {
+        return resolveModelCapacity(innerAlias, depth + 1);
+      }
+      const isSingleTokenParen =
+        orch.isParenForm &&
+        !orch.isTrailingSuffix &&
+        !/\s/.test(orch.inner) &&
+        !/^(?:gemini|claude|gpt|o[1-9]|llama|deepseek|qwen|mistral|grok)/i.test(orch.inner);
+      if (isSingleTokenParen) {
+        const resolvedLegacy = resolveDatabaseModelFullName(decoratedStripped, decoratedStripped);
+        if (!isUnknownResolvedLabel(resolvedLegacy) && resolvedLegacy.toLowerCase() !== decoratedStripped.toLowerCase()) {
+          return resolveModelCapacity(resolvedLegacy, depth + 1);
+        }
+      }
+      return resolveModelCapacity(orch.inner, depth + 1);
+    }
+  }
+
+  // 清理思考档位后缀（如 "+ Gemini 3.8 Flash High ^"、"Gemini 4 Neon (High)"）
+  const cleanedRaw = (decoratedStripped || raw)
+    .replace(EFFORT_PAREN_RE, '')
+    .replace(EFFORT_TRAIL_RE, '')
     .trim();
 
-  if (depth < 2) {
+  if (depth < 3) {
     const directDynamicAlias = getEffectiveModelPriceAlias(cleanedRaw);
     if (directDynamicAlias && directDynamicAlias.toLowerCase() !== cleanedRaw.toLowerCase()) {
       return resolveModelCapacity(directDynamicAlias, depth + 1);
     }
+    const observedCleaned = resolveObservedModelByIdOrAlias(cleanedRaw);
+    if (observedCleaned?.modelId && observedCleaned.modelId.toLowerCase() !== cleanedRaw.toLowerCase()) {
+      const resolved = resolveModelCapacity(observedCleaned.modelId, depth + 1);
+      if (
+        observedCleaned.displayName &&
+        resolved.isFallback &&
+        !/^MODEL_PLACEHOLDER_M\d+$/i.test(observedCleaned.displayName)
+      ) {
+        return { ...resolved, displayName: observedCleaned.displayName };
+      }
+      return resolved;
+    }
     if (/\borchestrator\b|^gemini-flash-worker(?:-agy)?$|^MODEL_PLACEHOLDER_M\d+$/i.test(cleanedRaw)) {
       const resolvedAlias = resolveDatabaseModelFullName(cleanedRaw, cleanedRaw);
-      if (resolvedAlias && resolvedAlias !== '未知模型' && resolvedAlias !== 'Unknown Model' && resolvedAlias !== bt('usage.unknown_model') && resolvedAlias !== cleanedRaw) {
+      if (!isUnknownResolvedLabel(resolvedAlias) && resolvedAlias !== cleanedRaw) {
         return resolveModelCapacity(resolvedAlias, depth + 1);
       }
     }
   }
 
-  let normalizedId = (cleanedRaw || withoutApiPrefix || raw)
+  let normalizedId = (cleanedRaw || decoratedStripped || raw)
     .toLowerCase()
     .replace(/^models-/, '')
     .replace(/（[^）]*）/g, '')
@@ -187,14 +366,26 @@ export function resolveModelCapacity(rawModelInput?: string | null, depth = 0): 
   normalizedId = normalizeModelId(normalizedId)
     .replace(THINKING_EFFORT_OR_LATEST_SUFFIX_RE, '');
 
-  if (depth < 2) {
+  if (depth < 3) {
     const normalizedAlias = getEffectiveModelPriceAlias(normalizedId);
     if (normalizedAlias && normalizedAlias.toLowerCase() !== normalizedId) {
       return resolveModelCapacity(normalizedAlias, depth + 1);
     }
+    const observedNorm = resolveObservedModelByIdOrAlias(normalizedId);
+    if (observedNorm?.modelId && observedNorm.modelId.toLowerCase() !== normalizedId) {
+      const normTarget = normalizeModelId(observedNorm.modelId).replace(THINKING_EFFORT_OR_LATEST_SUFFIX_RE, '');
+      if (normTarget && normTarget !== normalizedId) {
+        return resolveModelCapacity(normTarget, depth + 1);
+      }
+    }
   }
 
   const remoteSpec = getRemoteModelSpec(normalizedId);
+  const observedSpec = resolveObservedModelByIdOrAlias(normalizedId) ?? resolveObservedModelByIdOrAlias(cleanedRaw);
+  const observedDisplayName =
+    observedSpec?.displayName && !/^MODEL_PLACEHOLDER_M\d+$/i.test(observedSpec.displayName)
+      ? observedSpec.displayName.replace(EFFORT_PAREN_RE, '').replace(EFFORT_TRAIL_RE, '').trim() || observedSpec.displayName
+      : undefined;
   const bundledCapacity =
     Object.hasOwn(MODEL_CAPACITIES, normalizedId) &&
     typeof MODEL_CAPACITIES[normalizedId] === 'number' &&
@@ -205,6 +396,7 @@ export function resolveModelCapacity(rawModelInput?: string | null, depth = 0): 
     remoteSpec?.displayName ||
     INTERNAL_DISPLAY_NAME_OVERRIDES[normalizedId] ||
     (Object.hasOwn(MODEL_NAMES, normalizedId) ? MODEL_NAMES[normalizedId] : undefined) ||
+    observedDisplayName ||
     autoFormatDynamicModelName(normalizedId) ||
     cleanedRaw ||
     raw;
@@ -244,7 +436,7 @@ export function resolveModelCapacity(rawModelInput?: string | null, depth = 0): 
 
   return {
     modelId: normalizedId || 'unknown-model',
-    displayName: cleanedRaw || raw || bt('usage.unknown_model'),
+    displayName: displayName || cleanedRaw || raw || bt('usage.unknown_model'),
     capacityTokens: DEFAULT_CONTEXT_CAPACITY_TOKENS,
     capacityCompact: '~200K',
     isFallback: true,

@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { AccountsManager, formatResetCountdown, refreshResetDescription, accountCredentialReadiness, generateDeviceProfile, MockKeychainAdapter, syncAccountToKeychain, resolveQuotaStaleSeconds } from "../dist/accounts.js";
-import { buildDashboardAggregate } from "../dist/main.js";
+import { AccountsManager, formatResetCountdown, refreshResetDescription, accountCredentialReadiness, generateDeviceProfile, MockKeychainAdapter, syncAccountToKeychain, resolveQuotaStaleSeconds, hasExpiredQuotaWindow } from "../dist/accounts.js";
+import { buildDashboardAggregate, mergeLiveQuotaWithSaved } from "../dist/main.js";
 import { normalizeIndependentArgonQuota } from "../dist/quota.js";
 
 // Fixture state and hooks are scoped to this group; child cases run serially.
@@ -1152,6 +1152,133 @@ test('动态配额过期阈值：30/60 分钟自动刷新下在周期窗口内�
     const overviewAfter35m = mgr.getAccountQuotaOverview(account, { nowMs: after35mMs });
     assert.equal(overviewAfter35m.isStale, true);
     assert.equal(overviewAfter35m.familyWindows.gemini.fiveHour?.stale, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('重置窗口纠偏：live 缺分组不伪改 last_updated；过期 live 桶保留未过期 saved 桶且强刷可回退云端', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gb-reset-overdue-'));
+  const origin = 'https://daily-cloudcode-pa.googleapis.com';
+  const mgr = new AccountsManager(dir, {
+    providerContext: { origin, userAgent: 'antigravity/2.33.0', appVersion: '2.33.0' },
+  });
+  try {
+    const nowMs = Date.now();
+    const nowSec = Math.floor(nowMs / 1000);
+    const savedSec = nowSec - 1200; // 20 分钟前
+    const expiredIso = new Date(nowMs - 60_000).toISOString();
+    const future5hIso = new Date(nowMs + 4 * 3600 * 1000).toISOString();
+    const futureWeekIso = new Date(nowMs + 5 * 86400 * 1000).toISOString();
+
+    const savedQuota = {
+      models: [{ name: 'gemini-3.8-flash', percentage: 90, percentage_known: true, reset_time: future5hIso }],
+      quota_groups: [
+        {
+          display_name: 'Gemini Models',
+          family: 'gemini',
+          buckets: [
+            { bucket_id: 'gemini-5h', window: '5h', remaining_fraction: 0.9, remaining_fraction_known: true, reset_time: future5hIso, observed_at: savedSec },
+            { bucket_id: 'gemini-weekly', window: 'weekly', remaining_fraction: 0.7, remaining_fraction_known: true, reset_time: futureWeekIso, observed_at: savedSec },
+          ],
+        },
+      ],
+      last_updated: savedSec,
+      is_forbidden: false,
+      model_forwarding_rules: {},
+      subscription_tier: 'ULTRA',
+      source: 'cloud',
+    };
+
+    // 1. live 缺分组（如 RetrieveUserQuotaSummary 超时）时，不得用 live.last_updated 覆盖 saved.last_updated
+    const emptyLive = {
+      models: [{ name: 'gemini-3.8-flash', percentage: 0, percentage_known: false }],
+      quota_groups: [],
+      last_updated: nowSec,
+      is_forbidden: false,
+      model_forwarding_rules: {},
+      subscription_tier: 'ULTRA',
+      source: 'live',
+      refresh_state: { complete: false },
+    };
+    const mergedEmpty = mergeLiveQuotaWithSaved(savedQuota, emptyLive, nowMs);
+    assert.equal(mergedEmpty.last_updated, savedSec, 'live 缺分组时必须保留 saved 的真实 last_updated');
+    assert.equal(mergedEmpty.quota_groups.length, 1);
+
+    // 2. live 缓存返回已过期的 5h reset_time，而 saved 已有未过期 5h 窗口时，保留未过期窗口
+    const staleCachedLive = {
+      models: [{ name: 'gemini-3.8-flash', percentage: 60, percentage_known: true, reset_time: expiredIso }],
+      quota_groups: [
+        {
+          display_name: 'Gemini Models',
+          family: 'gemini',
+          buckets: [
+            { bucket_id: 'gemini-5h', window: '5h', remaining_fraction: 0.6, remaining_fraction_known: true, reset_time: expiredIso, observed_at: nowSec },
+            { bucket_id: 'gemini-weekly', window: 'weekly', remaining_fraction: 0.68, remaining_fraction_known: true, reset_time: futureWeekIso, observed_at: nowSec },
+          ],
+        },
+      ],
+      last_updated: nowSec,
+      is_forbidden: false,
+      model_forwarding_rules: {},
+      subscription_tier: 'ULTRA',
+      source: 'live',
+      refresh_state: { complete: true },
+    };
+    assert.equal(hasExpiredQuotaWindow(staleCachedLive, nowMs), true);
+    assert.equal(hasExpiredQuotaWindow(savedQuota, nowMs), false);
+    const mergedPreferFresh = mergeLiveQuotaWithSaved(savedQuota, staleCachedLive, nowMs);
+    const g5Bucket = mergedPreferFresh.quota_groups[0].buckets.find(b => b.window === '5h');
+    assert.equal(g5Bucket.reset_time, future5hIso, '已过期 live 缓存桶不得覆盖未过期的 saved 新窗口');
+    assert.equal(g5Bucket.remaining_fraction, 0.9);
+
+    // 3. 强刷时若 live 仍返回已过期窗口，则自动回退云端核实最新周期
+    const account = await mgr.upsertAccount({
+      email: 'overdue-fallback@example.test',
+      refreshToken: 'synthetic-refresh-overdue',
+      accessToken: 'synthetic-access-overdue',
+      expiresIn: 3600,
+    });
+    account.token.project_id = 'proj-overdue';
+    await mgr.saveAccount(account);
+
+    mgr.probeLiveLanguageServer = async () => ({
+      email: account.email,
+      tier: 'ULTRA',
+      quota: {
+        ...staleCachedLive,
+        refresh_state: {
+          complete: true,
+          endpointsAttempted: ['live:GetUserStatus', 'live:RetrieveUserQuotaSummary'],
+          endpointsSucceeded: ['live:GetUserStatus', 'live:RetrieveUserQuotaSummary'],
+        },
+      },
+    });
+    const refreshed = await mgr.refreshQuota(account.id, async (url) => {
+      if (String(url).endsWith(':loadCodeAssist')) {
+        return Response.json({ cloudaicompanionProject: 'proj-overdue', currentTier: { id: 'g1-ultra-tier' } });
+      }
+      if (String(url).endsWith(':fetchAvailableModels')) {
+        return Response.json({ models: { 'gemini-3.8-flash': { quotaInfo: { remainingFraction: 1.0, resetTime: future5hIso } } } });
+      }
+      if (String(url).endsWith(':retrieveUserQuotaSummary')) {
+        return Response.json({
+          groups: [
+            {
+              displayName: 'Gemini Models',
+              buckets: [
+                { bucketId: 'gemini-5h', window: '5h', remainingFraction: 1.0, resetTime: future5hIso },
+                { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.72, resetTime: futureWeekIso },
+              ],
+            },
+          ],
+        });
+      }
+      return Response.json({});
+    });
+    const ov = mgr.getAccountQuotaOverview(refreshed, { nowMs });
+    assert.equal(ov.geminiFiveHourRemaining, 100);
+    assert.equal(ov.familyWindows.gemini.fiveHour?.stale, false);
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }

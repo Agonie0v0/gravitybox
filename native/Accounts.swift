@@ -275,11 +275,12 @@ final class AccountsPage: NSObject {
     }
 
     private static func formatCollapsedQuotaSummary(_ contract: QuotaPresentation.Contract) -> String {
+        let now = Date()
         var parts: [String] = []
         for group in contract.displayGroups {
             if let pct = group.primaryPercentage {
                 let label = group.summaryLabel.isEmpty ? group.displayName : group.summaryLabel
-                let hasStaleWindow = group.primaryWindow?.stale == true || group.windows.contains(where: { $0.stale })
+                let hasStaleWindow = group.primaryWindow?.effectiveStale(at: now) == true || group.windows.contains(where: { $0.effectiveStale(at: now) })
                 let staleSuffix = hasStaleWindow
                     ? " (\(L10n.t("quota.stale", fallback: "已过期")))"
                     : ""

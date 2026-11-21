@@ -473,7 +473,7 @@ test('live-ide-models.json 脱敏持久化、appVersion 失效判定与 main.js 
   const serialized = JSON.stringify(sanitized);
   assert.equal(serialized.includes('secret-user@example.invalid'), false);
   assert.equal(serialized.includes('Secret Name'), false);
-  assert.equal(sanitized.schema, 1);
+  assert.equal(sanitized.schema, 2);
   assert.equal(sanitized.appVersion, '2.32.1');
   assert.equal(sanitized.tier, 'PRO');
 
@@ -482,6 +482,12 @@ test('live-ide-models.json 脱敏持久化、appVersion 失效判定与 main.js 
   assert.ok(await readValidLiveIdeModelsSnapshot(snapshotPath, '2.32.1'));
   assert.equal(await readValidLiveIdeModelsSnapshot(snapshotPath, '2.33.0'), null);
   assert.equal(await readValidLiveIdeModelsSnapshot(snapshotPath, ''), null);
+  // 兼容读取旧版 schema 1 快照
+  const v1Path = join(dir, 'live-ide-models-v1.json');
+  await writeFile(v1Path, JSON.stringify({ ...sanitized, schema: 1 }));
+  const v1Read = await readValidLiveIdeModelsSnapshot(v1Path, '2.32.1');
+  assert.equal(v1Read?.schema, 1);
+  assert.equal(v1Read?.models.length, sanitized.models.length);
 
   // 2) 配置本地多账号池（ULTRA 主账号 + FREE 备用账号）与本地 mock 价格源
   const accMgr = new AccountsManager(dir);

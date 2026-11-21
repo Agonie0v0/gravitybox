@@ -998,11 +998,15 @@ final class CachePage: NSObject, NSPopoverDelegate {
                 switch preflightRes {
                 case .failure(let error):
                     self.showPreflightBlockedAlert(error.localizedDescription)
-                case .success:
+                case .success(let preflightPayload):
                     let confirm = NSAlert()
                     confirm.alertStyle = .informational
                     confirm.messageText = L10n.t("maintenance.simple.confirm_running_title", ["size": self.formatBytes(targetBytes)])
-                    confirm.informativeText = self.buildRunningClearConfirmationBody()
+                    let sshCount = preflightPayload["activeSshWindowsCount"] as? Int ?? 0
+                    let sshNote = sshCount > 0
+                        ? "\n\n" + L10n.t("ssh.maintenance.active_windows_note", ["count": sshCount])
+                        : ""
+                    confirm.informativeText = self.buildRunningClearConfirmationBody() + sshNote
                     confirm.addButton(withTitle: L10n.t("maintenance.simple.confirm_restart_and_clean"))
                     confirm.addButton(withTitle: L10n.t("common.cancel"))
 

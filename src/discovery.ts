@@ -241,20 +241,38 @@ export function allowedTarget(target: { type: string; url: string }, fixtureOrig
 
 const verifiedPortCache = new Map<string, { valid: boolean; expiresAt: number }>();
 
-export async function verifyPageService(url: string, appPath: string): Promise<boolean> {
-  if (!allowedTarget({ type: 'page', url })) return false;
+export type PageServiceKind = 'local' | 'unlisted' | 'foreign';
+
+export async function inspectPageService(url: string, appPath: string): Promise<PageServiceKind> {
+  if (!allowedTarget({ type: 'page', url })) return 'foreign';
   const port = Number(new URL(url).port);
   const cacheKey = `${appPath}:${port}`;
   const now = Date.now();
   const cached = verifiedPortCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) return cached.valid;
+  if (cached && cached.expiresAt > now) return cached.valid ? 'local' : 'foreign';
+
+  let listeners = '';
+  try {
+    listeners = (await execute('/usr/sbin/lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpfn'])).stdout;
+  } catch (err: any) {
+    // lsof exits with code 1 and empty stdout when no local process listens on that TCP port.
+    if (err && typeof err === 'object' && err.code === 1 && !String(err.stdout ?? '').trim()) {
+      verifiedPortCache.delete(cacheKey);
+      return 'unlisted';
+    }
+    verifiedPortCache.delete(cacheKey);
+    return 'foreign';
+  }
 
   try {
-    const listeners = (await execute('/usr/sbin/lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpfn'])).stdout;
     const owners = parseListeners(listeners, port);
+    if (owners.length === 0) {
+      verifiedPortCache.delete(cacheKey);
+      return 'unlisted';
+    }
     if (owners.length !== 1) {
       verifiedPortCache.delete(cacheKey);
-      return false;
+      return 'foreign';
     }
     const executable = (await execute('/usr/sbin/lsof', ['-nP', '-a', '-p', String(owners[0]!.pid), '-d', 'txt', '-Fn'])).stdout;
     const lines = executable.split('\n');
@@ -264,13 +282,20 @@ export async function verifyPageService(url: string, appPath: string): Promise<b
       return binPath === join(appPath, 'Contents', 'Resources', 'bin', 'language_server') ||
         binPath.startsWith(appPath + '/Contents/');
     });
-    if (valid) verifiedPortCache.set(cacheKey, { valid: true, expiresAt: now + 60_000 });
-    else verifiedPortCache.delete(cacheKey);
-    return valid;
+    if (valid) {
+      verifiedPortCache.set(cacheKey, { valid: true, expiresAt: now + 60_000 });
+      return 'local';
+    }
+    verifiedPortCache.delete(cacheKey);
+    return 'foreign';
   } catch {
     verifiedPortCache.delete(cacheKey);
-    return false;
+    return 'foreign';
   }
+}
+
+export async function verifyPageService(url: string, appPath: string): Promise<boolean> {
+  return (await inspectPageService(url, appPath)) === 'local';
 }
 
 const verifiedLsPidPortsCache = new Map<string, { ports: number[]; expiresAt: number }>();

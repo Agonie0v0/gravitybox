@@ -395,7 +395,10 @@ test('请求明细：本地自然日边界、搜索、倒序分页、未知时�
   assert.equal(unknown.rows[0].timestamp_seconds,0);
   assert.equal(unknown.rows[0].estimated_usd,null);
   assert.equal(unknown.rows[0].priced,false);
-  assert.deepEqual(Object.keys(unknown.rows[0]).sort(),['model','input_tokens','output_tokens','cached_tokens','total_tokens','timestamp_seconds','estimated_usd','priced'].sort());
+  assert.deepEqual(Object.keys(unknown.rows[0]).sort(),['model','input_tokens','output_tokens','cached_tokens','total_tokens','timestamp_seconds','estimated_usd','priced','environment_kind','environment_id','environment_label','account_email','account_confidence'].sort());
+  assert.equal(unknown.rows[0].environment_kind,'local');
+  assert.equal(unknown.rows[0].environment_id,'local');
+  assert.equal(unknown.rows[0].environment_label,'');
   assert.equal((await manager.getUsageEvents('today','custom')).total,0);
 });
 });

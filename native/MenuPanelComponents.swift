@@ -81,6 +81,15 @@ enum MenuQuotaHelpers {
             icon.setAccessibilityElement(false)
             return icon
         }
+        if views.isEmpty, let fallback = ModelIcons.fallbackIcon(size: iconSize) {
+            let icon = NSImageView(image: fallback)
+            icon.imageScaling = .scaleProportionallyUpOrDown
+            icon.contentTintColor = .secondaryLabelColor
+            icon.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: iconSize), icon.heightAnchor.constraint(equalToConstant: iconSize)])
+            icon.setAccessibilityElement(false)
+            views.append(icon)
+        }
         let lbl = text(title, size: fontSize, weight: .semibold, color: .secondaryLabelColor)
         lbl.alignment = .left
         views.append(lbl)
@@ -1252,6 +1261,7 @@ final class MenuExpandableAccountCardView: NSBox {
         let roleText = isCurrent ? roleCurrentTitle : L10n.t("menu_panel.account_card.backup_account", fallback: "备用账号")
         headerButton.setAccessibilityLabel(L10n.t("menu_panel.account_card.a11y", ["name": display, "email": email, "role": roleText, "summary": summary], fallback: "\(display)，\(email)，\(roleText)，\(summary)"))
 
+        let now = Date()
         let contract = QuotaPresentation.contract(account)
         struct DynamicMeterSpec {
             let title: String
@@ -1281,8 +1291,8 @@ final class MenuExpandableAccountCardView: NSBox {
                         groupName: group.displayName,
                         percentage: win.percentage,
                         placeholder: win.placeholder(availability: group.availability),
-                        reset: win.percentage == nil ? "" : win.resetText,
-                        stale: win.stale
+                        reset: win.percentage == nil ? "" : win.effectiveResetText(at: now),
+                        stale: win.effectiveStale(at: now)
                     ))
                 }
             }

@@ -268,8 +268,29 @@ extension Assistant {
             safeRelaunchInFlightIds.remove(key)
             return
         }
-        #endif
         performSafeRelaunchAfterConfirm(key: key)
+        #else
+        if statusValue.sshWindowsCount > 0 {
+            let hostsSummary = statusValue.activeSshHosts.isEmpty
+                ? "SSH"
+                : statusValue.activeSshHosts.joined(separator: L10n.shared.isEnglish ? ", " : "、")
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = L10n.t("ssh.relaunch.confirm_title", fallback: "确认安全重启 Antigravity？")
+            alert.informativeText = L10n.t("ssh.relaunch.active_windows_warning", ["count": statusValue.sshWindowsCount, "hosts": hostsSummary])
+            alert.addButton(withTitle: L10n.t("ssh.relaunch.confirm_btn", fallback: "继续安全重启"))
+            alert.addButton(withTitle: L10n.t("common.cancel"))
+            presentSheetAlert(alert) { [weak self] resp in
+                guard resp == .alertFirstButtonReturn else {
+                    safeRelaunchInFlightIds.remove(key)
+                    return
+                }
+                self?.performSafeRelaunchAfterConfirm(key: key)
+            }
+            return
+        }
+        performSafeRelaunchAfterConfirm(key: key)
+        #endif
     }
 
     private func performSafeRelaunchAfterConfirm(key: ObjectIdentifier) {
@@ -796,6 +817,7 @@ extension Assistant {
         quotaRefreshTimer?.invalidate(); quotaRefreshTimer = nil
         quotaRefreshPollTimer?.invalidate(); quotaRefreshPollTimer = nil
         autoUpdateTimer?.invalidate(); autoUpdateTimer = nil
+        removeQuotaScheduleObservers()
         if configSaveWorkItem != nil {
             configSaveWorkItem?.cancel()
             configSaveWorkItem = nil
@@ -824,6 +846,7 @@ extension Assistant {
     private func stopBackendAndQuit() {
         guard !quitting else { return }; quitting = true
         timer?.invalidate(); quotaRefreshTimer?.invalidate(); quotaRefreshPollTimer?.invalidate(); autoUpdateTimer?.invalidate()
+        removeQuotaScheduleObservers()
         if configSaveWorkItem != nil {
             configSaveWorkItem?.cancel()
             configSaveWorkItem = nil

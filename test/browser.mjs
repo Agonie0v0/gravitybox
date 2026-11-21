@@ -1693,6 +1693,73 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
     assert.notEqual(compactTagCheck.shortDisplay, 'none');
     assert.equal(compactTagCheck.shortText, 'H');
 
+    // 8. Orchestrator 切回未压缩 Planner (Neon=0次, Hydrogen=2次) 时：常驻胶囊隐藏压缩徽标，对话统计弹窗显示会话总计「共 2 次」
+    await main.evaluate(`document.querySelector('#hud-e2e-fixture').style.width = '560px'`);
+    await main.evaluate(`(() => {
+      const mgr = globalThis.__GRAVITYBOX_HUD_V1__?.manager;
+      const inst = mgr ? [...mgr.instances.values()][0] : null;
+      if (!inst) return;
+      mgr.dispatchMetrics({
+        conversationId: inst.getCurrentConvId(),
+        sessionRevision: inst.getSessionRevision(),
+        metricsSequence: Math.max(Date.now() + 20_000_000, (inst.lastMetricsSequence || 0) + 1),
+        updatedAt: Date.now(),
+        availability: 'ready',
+        isStreaming: false,
+        session: { turns: 6, steps: 28, compactionCount: 2, modelDurationSeconds: 150, toolDurationSeconds: 30, averageTtftSeconds: 1.1, outputTps: 105, outputTpsFormatted: '105 tok/s', currentTurnDurationSeconds: 180, currentTurnDurationCompactZh: '本轮 3m' },
+        tokens: { totalTokens: 85300000, totalTokensCompact: '85.3M tok', cacheHitRate: 0.92, cacheHitRateFormatted: '92%' },
+        context: {
+          hasUsageData: true,
+          modelId: 'gemini-4-neon',
+          modelDisplayName: 'Orchestrator (Neon)',
+          modelShortLabel: 'Neon',
+          modelCompactLabel: 'N',
+          isMultiModel: true,
+          isOrchestrator: true,
+          activeModelCompactionCount: 0,
+          usedTokens: 344000,
+          usedTokensCompact: '344K',
+          peakContextTokens: 486000,
+          capacityTokens: 512000,
+          capacityTokensCompact: '512K',
+          isFallbackCapacity: false,
+          usedRatio: 344000 / 512000,
+          usedRatioFormatted: '67.1%',
+          breakdown: { cachedContextTokens: 339000, cachedContextRatio: 66.2, uncachedContextTokens: 5010, uncachedContextRatio: 0.98, latestOutputTokens: 366 },
+          modelStages: [
+            { slotKey: 'orchestrator:neon', role: 'planner', section: 'primary', modelId: 'gemini-4-neon', modelDisplayName: 'Orchestrator (Neon)', shortLabel: 'Neon', compactLabel: 'N', hasUsageData: true, isActive: true, usedTokens: 344000, peakContextTokens: 486000, capacityTokens: 512000, isFallbackCapacity: false, usedRatio: 344000 / 512000, usedRatioFormatted: '67.1%' },
+            { slotKey: 'orchestrator:hydrogen', role: 'executor', section: 'primary', modelId: 'gemini-4-hydrogen', modelDisplayName: 'Gemini 4 Hydrogen (Orchestrator)', shortLabel: 'Hydrogen', compactLabel: 'H', hasUsageData: true, isActive: false, compactionCount: 2, usedTokens: 183000, peakContextTokens: 183000, capacityTokens: 512000, isFallbackCapacity: false, usedRatio: 183000 / 512000, usedRatioFormatted: '35.7%' }
+          ]
+        }
+      });
+    })()`, ctx.executionContextId);
+    await until(async () => await main.evaluate(`(() => {
+      const sr = document.querySelector('#__gravitybox_hud_host__')?.shadowRoot;
+      return sr?.querySelector('#hud-ctx-model-full')?.textContent.trim() === 'Neon';
+    })()`));
+    const orchIsolationCheck = await main.evaluate(`(() => {
+      const sr = document.querySelector('#__gravitybox_hud_host__').shadowRoot;
+      sr.querySelector('.capsule-session').click();
+      const popSession = sr.querySelector('#hud-popover-session');
+      const popSessionRect = popSession.getBoundingClientRect();
+      const out = {
+        modelLabel: sr.querySelector('#hud-ctx-model-full')?.textContent.trim(),
+        badgeHidden: sr.querySelector('#hud-compaction-badge')?.hasAttribute('hidden'),
+        hasCompClass: sr.querySelector('.capsule-context')?.classList.contains('has-compaction'),
+        sessionCompRowExists: Boolean(sr.querySelector('#row-session-compactions')),
+        popSessionWidth: Math.round(popSessionRect.width),
+        peakText: sr.querySelector('#val-ctx-peak')?.textContent.trim(),
+      };
+      if (!popSession.hasAttribute('hidden')) sr.querySelector('.capsule-session').click();
+      return out;
+    })()`);
+    assert.equal(orchIsolationCheck.modelLabel, 'Neon');
+    assert.equal(orchIsolationCheck.badgeHidden, true, 'Neon 未压缩时常驻胶囊不得显示 Hydrogen 的压缩徽标');
+    assert.equal(orchIsolationCheck.hasCompClass, false);
+    assert.equal(orchIsolationCheck.sessionCompRowExists, false, '对话统计弹窗不应包含上下文压缩行');
+    assert.equal(orchIsolationCheck.popSessionWidth, 296);
+    assert.equal(orchIsolationCheck.peakText.includes('已压缩'), false);
+
     await main.evaluate('document.querySelector("#hud-e2e-fixture").remove()');
     await main.evaluate('globalThis.__GRAVITYBOX_HUD_V1__?.reconcileMounts()', ctx.executionContextId);
     } finally {
@@ -1763,6 +1830,36 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
     })()`));
     await main.evaluate(`document.querySelector('#binding-pane-0').remove();document.querySelector('#binding-pane-1').remove()`);await command('resume');
     await until(async()=>await text(main,'#settings')==='设置');
+  });
+  await check('SSH 弹窗词条、路径白名单、动态进度与多行错误容器拆译', async () => {
+    const tree = await main.send('Page.getFrameTree');
+    const ctx = await main.send('Page.createIsolatedWorld', { frameId: tree.frameTree.frame.id, worldName: 'GRAVITYBOX-localization-v1' });
+    await main.evaluate(`(() => {
+      const tpl = document.querySelector('#ssh-modal-fixture');
+      const frag = tpl.content.cloneNode(true);
+      const p = frag.querySelector('#ssh-dlg-prompt-two-nodes');
+      p.append(document.createTextNode('Enter [user@]host[:port], or pick a host from your SSH config.'), document.createTextNode(' Then create the project in its window.'));
+      document.body.appendChild(frag);
+    })()`);
+    await until(async () => await text(main, '#ssh-dlg-title') === '连接到 SSH 主机');
+    await until(async () => await text(main, '#ssh-cfg-val') === '~/.ssh/config（默认）');
+    assert.equal(await text(main, '#ssh-dlg-prompt-two-nodes'), '输入 [user@]host[:port]，或从您的 SSH 配置中选择主机，然后在该主机窗口中创建项目。');
+    assert.equal((await text(main, '#ssh-cfg-lbl')).trim(), 'SSH 配置：');
+    assert.equal(await text(main, '#ssh-progress'), '正在连接到 demo-host 上运行中的服务…');
+    assert.equal(await text(main, '#ssh-hidden-count'), '2 个已隐藏主机');
+    assert.equal(await text(main, '#ssh-toast-title'), '已连接到 demo-host');
+    assert.equal(await text(main, '#ssh-user-alias'), 'demo-ssh-host', '用户真实 SSH 主机别名必须保留原文');
+    await until(async () => /demo-host 返回：/.test(await text(main, '#ssh-err-text')));
+    const errText = await text(main, '#ssh-err-text');
+    assert.match(errText, /^CONNECTION_FAILED: 无法连接到 SSH 主机。/);
+    assert.match(errText, /demo-host 返回：ssh: connect to host demo-host port 22: Operation timed out/);
+    assert.match(errText, /Logs: \/Users\/demo\/Library\/Logs\/Antigravity\/main\.log/);
+    const toastMsg = await text(main, '#ssh-toast-msg');
+    assert.match(toastMsg, /^SSH_CONFIG_INVALID: SSH 无法使用您的配置文件。/);
+    assert.match(toastMsg, /demo-host 返回：bad configuration option/);
+    assert.match(toastMsg, /Logs: \/Users\/demo\/Library\/Logs\/Antigravity\/main\.log/);
+    assert.equal(typeof await main.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.state().scanCount', ctx.executionContextId), 'number');
+    await main.evaluate('document.querySelector("#ssh-fixture-root").remove()');
   });
   const resources = (await execute('/bin/ps', ['-p', String(backend.pid), '-o', 'rss=,%cpu=,time='])).stdout.trim();
   const finalStatus = await status();

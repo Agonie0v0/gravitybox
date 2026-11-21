@@ -12,9 +12,14 @@ import type {
   HudDataAvailability,
   HudModelContextStage,
   ParsedConversationStep,
+  ParsedExecutorMetadata,
   ParsedGenMetadata,
 } from './types.js';
-import { resolveModelCapacity } from './model-catalog.js';
+import {
+  resolveModelCapacity,
+  resolveObservedModelSpecByEnum,
+  stripOrchestratorWrapper,
+} from './model-catalog.js';
 import { resetAndRegisterRemoteModelMetadata } from '../model-catalog.js';
 import {
   DEFAULT_API_PRICES,
@@ -465,13 +470,20 @@ export function parseStepMetadataBlob(
           if (ts > 0) field8CompletedTs = ts;
         } else if (fieldNum === 9 && stepType === 15) {
           const usage = parseModelUsageStatsField9(subBuf);
-          result.hasUsage = true;
-          result.rawInputTokens = usage.rawInputTokens;
-          result.outputTokens = usage.outputTokens;
-          result.cacheWriteTokens = usage.cacheWriteTokens;
-          result.cachedReadTokens = usage.cachedReadTokens;
-          result.reasoningTokens = usage.reasoningTokens;
-          result.candidateTokens = usage.candidateTokens;
+          const totalUsageTokens =
+            usage.rawInputTokens +
+            usage.outputTokens +
+            usage.cacheWriteTokens +
+            usage.cachedReadTokens;
+          if (totalUsageTokens > 0) {
+            result.hasUsage = true;
+            result.rawInputTokens = usage.rawInputTokens;
+            result.outputTokens = usage.outputTokens;
+            result.cacheWriteTokens = usage.cacheWriteTokens;
+            result.cachedReadTokens = usage.cachedReadTokens;
+            result.reasoningTokens = usage.reasoningTokens;
+            result.candidateTokens = usage.candidateTokens;
+          }
         } else if (fieldNum === 12) {
           result.executionId = Buffer.from(subBuf).toString('hex');
         } else if (fieldNum === 22 && stepType === 15) {
@@ -708,32 +720,12 @@ export function parseLatestGenMetadataBlob(
         }
       } else if (fieldNum === 3) {
         // CascadePlannerConfig
-        const c3 = { pos: 0 };
-        while (c3.pos < subBuf.length) {
-          const t3 = Number(decodeVarint64(subBuf, c3));
-          if (!t3) break;
-          const fn3 = t3 >>> 3;
-          const wt3 = t3 & 0x07;
-          if (wt3 === 0) {
-            const val = Number(decodeVarint64(subBuf, c3));
-            if (fn3 === 14 && val > 0 && !out.maxContextTokens) {
-              out.maxContextTokens = val;
-            }
-          } else if (wt3 === 2) {
-            const l3 = Number(decodeVarint64(subBuf, c3));
-            if (!Number.isSafeInteger(l3) || l3 < 0 || c3.pos + l3 > subBuf.length) break;
-            if (fn3 === 28 && l3 > 0 && l3 < 256) {
-              const str = decoder.decode(subBuf.subarray(c3.pos, c3.pos + l3)).trim();
-              if (str) out.plannerModelName = str;
-            } else if (fn3 === 27) {
-              const info = parseModelInfoBlob(subBuf.subarray(c3.pos, c3.pos + l3));
-              if (info.maxTokens && !out.maxContextTokens) out.maxContextTokens = info.maxTokens;
-              if (info.modelName && !out.plannerModelName) out.plannerModelName = info.modelName;
-            }
-            c3.pos += l3;
-          } else {
-            if (!skipProtobufField(subBuf, c3, wt3)) break;
-          }
+        const parsedPlanner = parseCascadePlannerConfigBlob(subBuf);
+        if (parsedPlanner.planModelEnum) out.planModelEnum = parsedPlanner.planModelEnum;
+        if (parsedPlanner.executionModelEnum) out.executionModelEnum = parsedPlanner.executionModelEnum;
+        if (parsedPlanner.plannerModelName) out.plannerModelName = parsedPlanner.plannerModelName;
+        if (parsedPlanner.maxContextTokens && !out.maxContextTokens) {
+          out.maxContextTokens = parsedPlanner.maxContextTokens;
         }
       }
     } else if (fieldNum === 2 && wireType === 0) {
@@ -746,6 +738,138 @@ export function parseLatestGenMetadataBlob(
     }
   }
 
+  return out;
+}
+
+function parseCascadePlannerConfigBlob(subBuf: Uint8Array): {
+  planModelEnum?: number;
+  executionModelEnum?: number;
+  plannerModelName?: string;
+  maxContextTokens?: number;
+} {
+  const out: {
+    planModelEnum?: number;
+    executionModelEnum?: number;
+    plannerModelName?: string;
+    maxContextTokens?: number;
+  } = {};
+  const decoder = UTF8_DECODER;
+  const c3 = { pos: 0 };
+  while (c3.pos < subBuf.length) {
+    const t3 = Number(decodeVarint64(subBuf, c3));
+    if (!t3) break;
+    const fn3 = t3 >>> 3;
+    const wt3 = t3 & 0x07;
+    if (wt3 === 0) {
+      const val = Number(decodeVarint64(subBuf, c3));
+      if (fn3 === 1 && Number.isSafeInteger(val) && val > 0) {
+        out.planModelEnum = val;
+      } else if (fn3 === 14 && val > 0 && !out.maxContextTokens) {
+        out.maxContextTokens = val;
+      }
+    } else if (wt3 === 2) {
+      const l3 = Number(decodeVarint64(subBuf, c3));
+      if (!Number.isSafeInteger(l3) || l3 < 0 || c3.pos + l3 > subBuf.length) break;
+      const fieldSlice = subBuf.subarray(c3.pos, c3.pos + l3);
+      if (fn3 === 28 && l3 > 0 && l3 < 256) {
+        const str = decoder.decode(fieldSlice).trim();
+        if (str) out.plannerModelName = str;
+      } else if (fn3 === 27) {
+        const info = parseModelInfoBlob(fieldSlice);
+        if (info.maxTokens && !out.maxContextTokens) out.maxContextTokens = info.maxTokens;
+        if (info.modelName && !out.plannerModelName) out.plannerModelName = info.modelName;
+      } else if (fn3 === 60) {
+        // plan_execute_config -> field 1: execution_model
+        const c60 = { pos: 0 };
+        while (c60.pos < fieldSlice.length) {
+          const t60 = Number(decodeVarint64(fieldSlice, c60));
+          if (!t60) break;
+          const fn60 = t60 >>> 3;
+          const wt60 = t60 & 0x07;
+          if (wt60 === 0) {
+            const v60 = Number(decodeVarint64(fieldSlice, c60));
+            if (fn60 === 1 && Number.isSafeInteger(v60) && v60 > 0) {
+              out.executionModelEnum = v60;
+            }
+          } else if (!skipProtobufField(fieldSlice, c60, wt60)) {
+            break;
+          }
+        }
+      }
+      c3.pos += l3;
+    } else {
+      if (!skipProtobufField(subBuf, c3, wt3)) break;
+    }
+  }
+  return out;
+}
+
+/**
+ * 解析 executor_metadata.data 的会话级 Plan&Execute 配置与压缩阈值上限：
+ * - field 10: cascade_config
+ *   - field 1: planner_config (f1: plan_model, f14/f27/f28, f60.1: execution_model)
+ *   - field 2: checkpoint_config (f5: max_token_limit)
+ */
+export function parseExecutorMetadataBlob(
+  dataBlob: Uint8Array | Buffer | null | undefined
+): ParsedExecutorMetadata {
+  const out: ParsedExecutorMetadata = {};
+  if (!dataBlob || dataBlob.length === 0) return out;
+  const buf: Uint8Array = dataBlob;
+  const cursor = { pos: 0 };
+  while (cursor.pos < buf.length) {
+    const tag = Number(decodeVarint64(buf, cursor));
+    if (!tag) break;
+    const fieldNum = tag >>> 3;
+    const wireType = tag & 0x07;
+    if (wireType === 2 && fieldNum === 10) {
+      const len = Number(decodeVarint64(buf, cursor));
+      if (!Number.isSafeInteger(len) || len < 0 || cursor.pos + len > buf.length) break;
+      const ccBuf = buf.subarray(cursor.pos, cursor.pos + len);
+      cursor.pos += len;
+      const cCc = { pos: 0 };
+      while (cCc.pos < ccBuf.length) {
+        const tCc = Number(decodeVarint64(ccBuf, cCc));
+        if (!tCc) break;
+        const fnCc = tCc >>> 3;
+        const wtCc = tCc & 0x07;
+        if (wtCc === 2) {
+          const lCc = Number(decodeVarint64(ccBuf, cCc));
+          if (!Number.isSafeInteger(lCc) || lCc < 0 || cCc.pos + lCc > ccBuf.length) break;
+          const sub = ccBuf.subarray(cCc.pos, cCc.pos + lCc);
+          cCc.pos += lCc;
+          if (fnCc === 1) {
+            const planner = parseCascadePlannerConfigBlob(sub);
+            if (planner.planModelEnum) out.planModelEnum = planner.planModelEnum;
+            if (planner.executionModelEnum) out.executionModelEnum = planner.executionModelEnum;
+            if (planner.plannerModelName) out.plannerModelName = planner.plannerModelName;
+            if (planner.maxContextTokens) out.maxContextTokens = planner.maxContextTokens;
+          } else if (fnCc === 2) {
+            // checkpoint_config -> field 5: max_token_limit
+            const cCp = { pos: 0 };
+            while (cCp.pos < sub.length) {
+              const tCp = Number(decodeVarint64(sub, cCp));
+              if (!tCp) break;
+              const fnCp = tCp >>> 3;
+              const wtCp = tCp & 0x07;
+              if (wtCp === 0) {
+                const vCp = Number(decodeVarint64(sub, cCp));
+                if (fnCp === 5 && Number.isSafeInteger(vCp) && vCp > 0) {
+                  out.checkpointMaxTokenLimit = vCp;
+                }
+              } else if (!skipProtobufField(sub, cCp, wtCp)) {
+                break;
+              }
+            }
+          }
+        } else if (!skipProtobufField(ccBuf, cCc, wtCc)) {
+          break;
+        }
+      }
+    } else if (!skipProtobufField(buf, cursor, wireType)) {
+      break;
+    }
+  }
   return out;
 }
 
@@ -838,6 +962,7 @@ export interface ComputeHudMetricsInput {
   modelCapacity?: number;
   pricingTable?: Record<string, ApiPricingEntry>;
   genMetadata?: ParsedGenMetadata;
+  executorMetadata?: ParsedExecutorMetadata;
   extraUsageGenerations?: Array<{
     generation: ParsedGenMetadata;
     isChildStep?: boolean;
@@ -985,10 +1110,128 @@ function buildCompactModelLabel(modelId: string, displayName: string): { shortLa
     const code = dynamicGemini[1].charAt(0).toUpperCase() + dynamicGemini[1].slice(1);
     return { shortLabel: code, compactLabel: code.charAt(0).toUpperCase() };
   }
+  const dynamicClaude = lower.match(/^claude-([a-z]{3,16})(?:-\d|$)/);
+  if (dynamicClaude?.[1]) {
+    const tier = dynamicClaude[1].charAt(0).toUpperCase() + dynamicClaude[1].slice(1);
+    return { shortLabel: tier, compactLabel: tier.charAt(0).toUpperCase() };
+  }
+  const dynamicGpt = lower.match(/^gpt-([4-9](?:\.\d+)?)/);
+  if (dynamicGpt?.[1]) {
+    return { shortLabel: `GPT-${dynamicGpt[1]}`, compactLabel: 'G' };
+  }
   const cleaned = displayName.trim() || modelId.trim() || 'Model';
   const shortLabel = cleaned.length <= 10 ? cleaned : (cleaned.split(/\s+/).slice(0, 2).join(' ').slice(0, 10) || cleaned.slice(0, 10));
   const compactLabel = shortLabel.match(/[A-Za-z0-9]/)?.[0]?.toUpperCase() || 'M';
   return { shortLabel, compactLabel };
+}
+
+function buildOrchestratorSlotKey(role: 'planner' | 'executor', modelId: string): string {
+  const lower = (modelId || '').toLowerCase();
+  const g4Match = lower.match(/^gemini-(?:[4-9](?:\.\d+)?)-([a-z][a-z0-9]*)/);
+  if (g4Match?.[1]) return `orchestrator:${g4Match[1]}`;
+  if (lower === 'gemini-3.8-flash' || /^gemini-(?:[\d.]+-)?flash$/.test(lower)) {
+    return 'orchestrator:flash';
+  }
+  const slug = lower.replace(/[^a-z0-9.-]+/g, '-').replace(/^-+|-+$/g, '');
+  return slug ? `orchestrator:${slug}` : `orchestrator:${role}`;
+}
+
+function isPositiveSafeInt(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function createPendingPlannerSlot(params: {
+  planModelEnum?: number;
+  plannerModelName?: string;
+  inputPlannerSlot?: ClassifiedContextSlot | null;
+  capacityTokens: number;
+  isFallbackModel: boolean;
+}): ClassifiedContextSlot {
+  const fromEnum = resolveObservedModelSpecByEnum(params.planModelEnum);
+  if (fromEnum && fromEnum.modelId !== 'unknown-model') {
+    const { shortLabel, compactLabel } = buildCompactModelLabel(fromEnum.modelId, fromEnum.displayName);
+    return {
+      slotKey: buildOrchestratorSlotKey('planner', fromEnum.modelId),
+      role: 'planner',
+      modelId: fromEnum.modelId,
+      displayName: fromEnum.displayName,
+      shortLabel,
+      compactLabel,
+      capacityTokens: fromEnum.capacityTokens,
+      isFallbackModel: fromEnum.isFallback,
+      hasExplicitEvidence: true,
+    };
+  }
+  if (
+    params.inputPlannerSlot &&
+    params.inputPlannerSlot.role === 'planner' &&
+    params.inputPlannerSlot.hasExplicitEvidence &&
+    params.inputPlannerSlot.modelId !== 'pending' &&
+    params.inputPlannerSlot.modelId !== 'unknown'
+  ) {
+    return params.inputPlannerSlot;
+  }
+  if (params.plannerModelName && params.plannerModelName.trim()) {
+    const fromName = resolveModelCapacity(params.plannerModelName);
+    if (fromName.modelId !== 'unknown-model') {
+      const { shortLabel, compactLabel } = buildCompactModelLabel(fromName.modelId, fromName.displayName);
+      return {
+        slotKey: buildOrchestratorSlotKey('planner', fromName.modelId),
+        role: 'planner',
+        modelId: fromName.modelId,
+        displayName: fromName.displayName,
+        shortLabel,
+        compactLabel,
+        capacityTokens: fromName.capacityTokens,
+        isFallbackModel: fromName.isFallback,
+        hasExplicitEvidence: true,
+      };
+    }
+  }
+  return {
+    slotKey: 'orchestrator:planner_pending',
+    role: 'planner',
+    modelId: 'pending',
+    displayName: '',
+    shortLabel: '',
+    compactLabel: '',
+    capacityTokens: params.capacityTokens,
+    isFallbackModel: true,
+    hasExplicitEvidence: false,
+  };
+}
+
+function createPendingExecutorSlot(params: {
+  executionModelEnum?: number;
+  capacityTokens: number;
+  isFallbackModel: boolean;
+}): ClassifiedContextSlot {
+  const fromEnum = resolveObservedModelSpecByEnum(params.executionModelEnum);
+  if (fromEnum && fromEnum.modelId !== 'unknown-model') {
+    const { shortLabel, compactLabel } = buildCompactModelLabel(fromEnum.modelId, fromEnum.displayName);
+    return {
+      slotKey: buildOrchestratorSlotKey('executor', fromEnum.modelId),
+      role: 'executor',
+      modelId: fromEnum.modelId,
+      displayName: fromEnum.displayName,
+      shortLabel,
+      compactLabel,
+      capacityTokens: fromEnum.capacityTokens,
+      isFallbackModel: fromEnum.isFallback,
+      hasExplicitEvidence: true,
+    };
+  }
+  return {
+    slotKey: 'orchestrator:executor_pending',
+    role: 'executor',
+    modelId: 'pending',
+    displayName: '',
+    shortLabel: '',
+    compactLabel: '',
+    capacityTokens: params.capacityTokens,
+    isFallbackModel: params.isFallbackModel,
+    hasExplicitEvidence: false,
+  };
 }
 
 function classifyContextModelSlot(params: {
@@ -997,6 +1240,8 @@ function classifyContextModelSlot(params: {
   plannerModelName?: string;
   stepModelName?: string;
   modelEnum?: number;
+  planModelEnum?: number;
+  executionModelEnum?: number;
   fallbackInputModelId?: string;
   hasPriorOrchestrator?: boolean;
 }): ClassifiedContextSlot {
@@ -1004,85 +1249,134 @@ function classifyContextModelSlot(params: {
   const modelDisplayName = (params.modelDisplayName || '').trim();
   const plannerModelName = (params.plannerModelName || '').trim();
   const stepModelName = (params.stepModelName || '').trim();
-  const modelEnum = params.modelEnum;
+  const modelEnum = isPositiveSafeInt(params.modelEnum) ? params.modelEnum : undefined;
+  const planModelEnum = isPositiveSafeInt(params.planModelEnum) ? params.planModelEnum : undefined;
+  const executionModelEnum = isPositiveSafeInt(params.executionModelEnum) ? params.executionModelEnum : undefined;
   const fallbackInputModelId = (params.fallbackInputModelId || '').trim();
   const combinedRaw = [responseModel, modelDisplayName, plannerModelName, stepModelName].filter(Boolean).join(' ');
+  const hasStepRaw = Boolean(combinedRaw || modelEnum !== undefined);
 
-  const isExecutorHint =
-    modelEnum === 1669 ||
-    /^gemini-flash-worker(?:-agy)?$|^MODEL_PLACEHOLDER_M669$/i.test(responseModel) ||
-    /^gemini-flash-worker(?:-agy)?$|^MODEL_PLACEHOLDER_M669$/i.test(plannerModelName) ||
-    /^gemini-flash-worker(?:-agy)?$|^MODEL_PLACEHOLDER_M669$/i.test(stepModelName) ||
-    /Gemini\s+4\s+Hydrogen\s*\(\s*Orchestrator\s*\)/i.test(modelDisplayName);
+  const hasPlanExecuteProtocol = Boolean(executionModelEnum && executionModelEnum > 0);
+  const matchesProtocolExecutor = Boolean(
+    hasPlanExecuteProtocol &&
+      modelEnum !== undefined &&
+      modelEnum === executionModelEnum &&
+      (planModelEnum === undefined || executionModelEnum !== planModelEnum)
+  );
+  const matchesProtocolPlanner = Boolean(
+    hasPlanExecuteProtocol &&
+      modelEnum !== undefined &&
+      planModelEnum !== undefined &&
+      modelEnum === planModelEnum
+  );
 
-  if (isExecutorHint) {
-    const isHydrogen = /\bhydrogen\b/i.test(combinedRaw);
-    const modelKey = isHydrogen ? 'gemini-4-hydrogen' : 'gemini-3.8-flash';
-    const spec = resolveModelCapacity(modelKey);
-    return {
-      slotKey: isHydrogen ? 'orchestrator:hydrogen' : 'orchestrator:flash',
-      role: 'executor',
-      modelId: spec.modelId,
-      displayName: modelDisplayName || stepModelName || (isHydrogen ? 'Gemini 4 Hydrogen (Orchestrator)' : 'Gemini 3.8 Flash'),
-      shortLabel: isHydrogen ? 'Hydrogen' : 'Flash',
-      compactLabel: isHydrogen ? 'H' : 'F',
-      capacityTokens: spec.capacityTokens,
-      isFallbackModel: spec.isFallback,
-      hasExplicitEvidence: true,
-    };
-  }
+  const displayOrch = stripOrchestratorWrapper(modelDisplayName);
+  const stepOrch = stripOrchestratorWrapper(stepModelName);
+  const plannerOrch = stripOrchestratorWrapper(plannerModelName);
+  const fallbackOrch = stripOrchestratorWrapper(fallbackInputModelId);
 
-  const isPlannerHint =
-    modelEnum === 1667 ||
-    modelEnum === 1668 ||
-    /\borchestrator\b|^MODEL_PLACEHOLDER_M66[78]$/i.test(responseModel) ||
-    /\borchestrator\b/i.test(modelDisplayName) ||
-    /\borchestrator\b/i.test(plannerModelName) ||
-    /\borchestrator\b/i.test(stepModelName);
+  const isLegacyWorker =
+    /^gemini-flash-worker(?:-agy)?$/i.test(responseModel) ||
+    /^gemini-flash-worker(?:-agy)?$/i.test(plannerModelName) ||
+    /^gemini-flash-worker(?:-agy)?$/i.test(stepModelName) ||
+    (!hasStepRaw && /^gemini-flash-worker(?:-agy)?$/i.test(fallbackInputModelId));
 
-  if (isPlannerHint || (!combinedRaw && /\borchestrator\b|^MODEL_PLACEHOLDER_M66[78]$/i.test(fallbackInputModelId))) {
-    const hasCodenameInStep = /\b(?:carbon|argon|hydrogen|neon)\b|\bgemini-pro-orchestrator-(?!g1(?:-|$))[a-z][a-z0-9]*\b/i.test(combinedRaw);
-    const isCarbon = /\bcarbon\b/i.test(combinedRaw) || modelEnum === 1667 || /M667$/i.test(responseModel) || (!hasCodenameInStep && /\bcarbon\b/i.test(fallbackInputModelId));
-    const isArgon = !isCarbon && (/\bargon\b/i.test(combinedRaw) || modelEnum === 1668 || /M668$/i.test(responseModel) || (!hasCodenameInStep && /\bargon\b/i.test(fallbackInputModelId)));
-    const dynMatch = !isCarbon && !isArgon
-      ? `${combinedRaw} ${fallbackInputModelId}`.match(/Orchestrator\s*\(\s*([A-Za-z][A-Za-z0-9._-]{1,31})\s*\)/i)
-        ?? `${combinedRaw} ${fallbackInputModelId}`.match(/\bgemini-pro-orchestrator-(?!g1(?:-|$))([a-z][a-z0-9]*)\b/i)
-      : null;
-    const rawCode = isCarbon ? 'Carbon' : isArgon ? 'Argon' : dynMatch?.[1] || 'Argon';
-    const lowerCode = rawCode.toLowerCase();
-    const shortLabel = rawCode.charAt(0).toUpperCase() + rawCode.slice(1);
-    const spec = resolveModelCapacity(`gemini-4-${lowerCode}`);
-    return {
-      slotKey: `orchestrator:${lowerCode}`,
-      role: 'planner',
-      modelId: spec.modelId,
-      displayName: modelDisplayName || stepModelName || `Orchestrator (${shortLabel})`,
-      shortLabel,
-      compactLabel: shortLabel.charAt(0).toUpperCase(),
-      capacityTokens: spec.capacityTokens,
-      isFallbackModel: spec.isFallback,
-      hasExplicitEvidence: true,
-    };
-  }
+  const isTrailingOrchestratorExecutor =
+    displayOrch.isTrailingSuffix || stepOrch.isTrailingSuffix;
 
-  if (!combinedRaw && /^gemini-flash-worker(?:-agy)?$|^MODEL_PLACEHOLDER_M669$/i.test(fallbackInputModelId)) {
-    const spec = resolveModelCapacity('gemini-3.8-flash');
-    return {
-      slotKey: 'orchestrator:flash',
-      role: 'executor',
-      modelId: spec.modelId,
-      displayName: 'Gemini 3.8 Flash',
-      shortLabel: 'Flash',
-      compactLabel: 'F',
-      capacityTokens: spec.capacityTokens,
-      isFallbackModel: spec.isFallback,
-      hasExplicitEvidence: true,
-    };
-  }
+  const isLegacyPlanner =
+    /\bgemini-pro-orchestrator\b/i.test(combinedRaw) ||
+    (displayOrch.isOrchestrator && !displayOrch.isTrailingSuffix) ||
+    (plannerOrch.isOrchestrator && !plannerOrch.isTrailingSuffix) ||
+    (stepOrch.isOrchestrator && !stepOrch.isTrailingSuffix);
 
-  const rawModelInput = modelDisplayName || responseModel || plannerModelName || stepModelName || fallbackInputModelId;
-  if (!rawModelInput) {
-    const spec = resolveModelCapacity('');
+  const isFallbackPlanner =
+    !hasStepRaw &&
+    ((fallbackOrch.isOrchestrator && !fallbackOrch.isTrailingSuffix) ||
+      /\bgemini-pro-orchestrator\b/i.test(fallbackInputModelId));
+
+  const isFallbackExecutor =
+    !hasStepRaw &&
+    (fallbackOrch.isTrailingSuffix || /^gemini-flash-worker(?:-agy)?$/i.test(fallbackInputModelId));
+
+  const enumSpec = resolveObservedModelSpecByEnum(modelEnum);
+  const execEnumSpec = hasPlanExecuteProtocol ? resolveObservedModelSpecByEnum(executionModelEnum) : null;
+  const planEnumSpec = hasPlanExecuteProtocol ? resolveObservedModelSpecByEnum(planModelEnum) : null;
+
+  // 解析真实底层物理模型（完全消除硬编码 Argon / Carbon / gemini-4-* 拼接）
+  const resolveUnderlyingSpec = (): ReturnType<typeof resolveModelCapacity> | null => {
+    if (isLegacyWorker || isTrailingOrchestratorExecutor) {
+      if (displayOrch.isTrailingSuffix && displayOrch.inner) {
+        return resolveModelCapacity(displayOrch.inner);
+      }
+      if (stepOrch.isTrailingSuffix && stepOrch.inner) {
+        return resolveModelCapacity(stepOrch.inner);
+      }
+      if (modelDisplayName && !/^gemini-flash-worker(?:-agy)?$/i.test(modelDisplayName)) {
+        return resolveModelCapacity(modelDisplayName);
+      }
+      if (enumSpec && enumSpec.modelId !== 'unknown-model') {
+        return enumSpec;
+      }
+      const workerRef = responseModel || plannerModelName || stepModelName || fallbackInputModelId;
+      return workerRef ? resolveModelCapacity(workerRef) : null;
+    }
+
+    const candidates: Array<string | undefined> = [];
+    if (modelDisplayName && (!displayOrch.isOrchestrator || Boolean(displayOrch.inner))) {
+      candidates.push(modelDisplayName);
+    }
+    const isOpaqueOrchestratorId = /^gemini-pro-orchestrator$/i.test(responseModel);
+    if (responseModel && !isOpaqueOrchestratorId) {
+      candidates.push(responseModel);
+    }
+    for (const c of candidates) {
+      if (!c) continue;
+      const spec = resolveModelCapacity(c);
+      if (spec.modelId !== 'unknown-model' && spec.modelId !== 'orchestrator') {
+        return spec;
+      }
+    }
+    if (enumSpec && enumSpec.modelId !== 'unknown-model') {
+      return enumSpec;
+    }
+    for (const c of [
+      isOpaqueOrchestratorId ? responseModel : undefined,
+      plannerModelName && (!plannerOrch.isOrchestrator || Boolean(plannerOrch.inner)) ? plannerModelName : undefined,
+      stepModelName && (!stepOrch.isOrchestrator || Boolean(stepOrch.inner)) ? stepModelName : undefined,
+      !hasStepRaw && fallbackInputModelId && (!fallbackOrch.isOrchestrator || Boolean(fallbackOrch.inner))
+        ? fallbackInputModelId
+        : undefined,
+    ]) {
+      if (!c) continue;
+      const spec = resolveModelCapacity(c);
+      if (spec.modelId !== 'unknown-model' && spec.modelId !== 'orchestrator') {
+        return spec;
+      }
+    }
+    return null;
+  };
+
+  const spec = resolveUnderlyingSpec();
+
+  // 裸 "Orchestrator" 且无任何模型证据 -> 中性待介入规划槽位（绝不伪造 Argon 或 Carbon）
+  if (!spec || spec.modelId === 'unknown-model') {
+    const fallbackCap = resolveModelCapacity('');
+    if (isLegacyPlanner || isFallbackPlanner || hasPlanExecuteProtocol) {
+      return createPendingPlannerSlot({
+        planModelEnum,
+        plannerModelName,
+        capacityTokens: fallbackCap.capacityTokens,
+        isFallbackModel: true,
+      });
+    }
+    if (isLegacyWorker || isTrailingOrchestratorExecutor || isFallbackExecutor) {
+      return createPendingExecutorSlot({
+        executionModelEnum,
+        capacityTokens: fallbackCap.capacityTokens,
+        isFallbackModel: true,
+      });
+    }
     return {
       slotKey: 'model:unknown',
       role: 'model',
@@ -1090,56 +1384,85 @@ function classifyContextModelSlot(params: {
       displayName: '—',
       shortLabel: '',
       compactLabel: '',
-      capacityTokens: spec.capacityTokens,
+      capacityTokens: fallbackCap.capacityTokens,
       isFallbackModel: true,
       hasExplicitEvidence: false,
     };
   }
 
-  const spec = resolveModelCapacity(rawModelInput);
-  if (params.hasPriorOrchestrator && (spec.modelId === 'gemini-4-hydrogen' || spec.modelId === 'gemini-3.8-flash')) {
-    const isHydrogen = spec.modelId === 'gemini-4-hydrogen';
+  const matchesProtocolExecutorByModelId = Boolean(
+    hasPlanExecuteProtocol &&
+      !matchesProtocolPlanner &&
+      !isLegacyPlanner &&
+      execEnumSpec &&
+      execEnumSpec.modelId === spec.modelId &&
+      (!planEnumSpec || planEnumSpec.modelId !== spec.modelId)
+  );
+
+  const isExecutorRole =
+    matchesProtocolExecutor ||
+    matchesProtocolExecutorByModelId ||
+    isLegacyWorker ||
+    isTrailingOrchestratorExecutor ||
+    isFallbackExecutor ||
+    Boolean(
+      params.hasPriorOrchestrator &&
+        !hasPlanExecuteProtocol &&
+        !isLegacyPlanner &&
+        !matchesProtocolPlanner &&
+        (spec.modelId === 'gemini-4-hydrogen' || spec.modelId === 'gemini-3.8-flash')
+    );
+
+  if (isExecutorRole) {
+    const resolvedDisplayName = modelDisplayName || stepModelName || spec.displayName;
+    const { shortLabel, compactLabel } = buildCompactModelLabel(spec.modelId, resolvedDisplayName);
     return {
-      slotKey: isHydrogen ? 'orchestrator:hydrogen' : 'orchestrator:flash',
+      slotKey: buildOrchestratorSlotKey('executor', spec.modelId),
       role: 'executor',
       modelId: spec.modelId,
-      displayName: modelDisplayName || spec.displayName,
-      shortLabel: isHydrogen ? 'Hydrogen' : 'Flash',
-      compactLabel: isHydrogen ? 'H' : 'F',
+      displayName: resolvedDisplayName,
+      shortLabel,
+      compactLabel,
       capacityTokens: spec.capacityTokens,
       isFallbackModel: spec.isFallback,
       hasExplicitEvidence: true,
     };
   }
 
-  const { shortLabel, compactLabel } = buildCompactModelLabel(spec.modelId, modelDisplayName || spec.displayName);
+  const isPlannerRole =
+    matchesProtocolPlanner ||
+    hasPlanExecuteProtocol ||
+    isLegacyPlanner ||
+    isFallbackPlanner;
+
+  if (isPlannerRole) {
+    const resolvedDisplayName = modelDisplayName || stepModelName || spec.displayName;
+    const { shortLabel, compactLabel } = buildCompactModelLabel(spec.modelId, resolvedDisplayName);
+    return {
+      slotKey: buildOrchestratorSlotKey('planner', spec.modelId),
+      role: 'planner',
+      modelId: spec.modelId,
+      displayName: resolvedDisplayName,
+      shortLabel,
+      compactLabel,
+      capacityTokens: spec.capacityTokens,
+      isFallbackModel: spec.isFallback,
+      hasExplicitEvidence: true,
+    };
+  }
+
+  const resolvedDisplayName = modelDisplayName || spec.displayName;
+  const { shortLabel, compactLabel } = buildCompactModelLabel(spec.modelId, resolvedDisplayName);
   return {
     slotKey: `model:${spec.modelId}`,
     role: 'model',
     modelId: spec.modelId,
-    displayName: modelDisplayName || spec.displayName,
+    displayName: resolvedDisplayName,
     shortLabel,
     compactLabel,
     capacityTokens: spec.capacityTokens,
     isFallbackModel: spec.isFallback,
     hasExplicitEvidence: true,
-  };
-}
-
-function createPendingExecutorSlot(
-  capacityTokens: number,
-  isFallbackModel: boolean
-): ClassifiedContextSlot {
-  return {
-    slotKey: 'orchestrator:executor_pending',
-    role: 'executor',
-    modelId: 'pending',
-    displayName: '',
-    shortLabel: '',
-    compactLabel: '',
-    capacityTokens,
-    isFallbackModel,
-    hasExplicitEvidence: false,
   };
 }
 
@@ -1211,25 +1534,44 @@ function resolveContextStagesAndActiveSlot(
   const inputAsStandaloneSlot = trimmedInputModel
     ? classifyContextModelSlot({ fallbackInputModelId: trimmedInputModel })
     : null;
+  const inputOrch = stripOrchestratorWrapper(trimmedInputModel);
   const inputIsOrchestrator = Boolean(
-    trimmedInputModel && /\borchestrator\b|^MODEL_PLACEHOLDER_M66[789]$/i.test(trimmedInputModel)
+    trimmedInputModel &&
+      (inputOrch.isOrchestrator ||
+        /\bgemini-pro-orchestrator\b|^gemini-flash-worker(?:-agy)?$/i.test(trimmedInputModel))
   );
-  const inputExplicitCapacity =
-    typeof input.modelCapacity === 'number' && Number.isSafeInteger(input.modelCapacity) && input.modelCapacity > 0
-      ? input.modelCapacity
-      : undefined;
+  const inputExplicitCapacity = isPositiveSafeInt(input.modelCapacity) ? input.modelCapacity : undefined;
+  const execMetaPlanEnum = isPositiveSafeInt(input.executorMetadata?.planModelEnum)
+    ? input.executorMetadata!.planModelEnum
+    : undefined;
+  const execMetaExecEnum = isPositiveSafeInt(input.executorMetadata?.executionModelEnum)
+    ? input.executorMetadata!.executionModelEnum
+    : undefined;
+  const executorExplicitCap =
+    (isPositiveSafeInt(input.executorMetadata?.checkpointMaxTokenLimit)
+      ? input.executorMetadata!.checkpointMaxTokenLimit
+      : undefined) ??
+    (isPositiveSafeInt(input.executorMetadata?.maxContextTokens)
+      ? input.executorMetadata!.maxContextTokens
+      : undefined);
 
   if (usageContextEntries.length === 0) {
+    const emptyPlanEnum = input.genMetadata?.planModelEnum ?? execMetaPlanEnum;
+    const emptyExecEnum = input.genMetadata?.executionModelEnum ?? execMetaExecEnum;
     const emptySlot = classifyContextModelSlot({
       responseModel: input.genMetadata?.responseModel,
       modelDisplayName: input.genMetadata?.modelDisplayName,
-      plannerModelName: input.genMetadata?.plannerModelName,
-      modelEnum: input.genMetadata?.modelEnum,
+      plannerModelName: input.genMetadata?.plannerModelName ?? input.executorMetadata?.plannerModelName,
+      modelEnum: input.genMetadata?.modelEnum ?? emptyPlanEnum,
+      planModelEnum: emptyPlanEnum,
+      executionModelEnum: emptyExecEnum,
       fallbackInputModelId: trimmedInputModel,
     });
-    const emptyExplicitCap = [inputExplicitCapacity, input.genMetadata?.maxContextTokens].find(
-      (v): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v > 0
-    );
+    const emptyExplicitCap = [
+      input.genMetadata?.maxContextTokens,
+      executorExplicitCap,
+      inputExplicitCapacity,
+    ].find(isPositiveSafeInt);
     const emptyAcc: StageAccumulator = {
       slot: emptySlot,
       latestStep: undefined,
@@ -1237,45 +1579,71 @@ function resolveContextStagesAndActiveSlot(
       peakContextTokens: 0,
       explicitCapacity: emptyExplicitCap,
     };
-    const isOrchestrator = emptySlot.role === 'planner' || emptySlot.role === 'executor' || inputIsOrchestrator;
+    const isOrchestrator =
+      emptySlot.role === 'planner' ||
+      emptySlot.role === 'executor' ||
+      Boolean(emptyExecEnum && emptyExecEnum > 0) ||
+      inputIsOrchestrator;
     if (isOrchestrator) {
       const pair: StageAccumulator[] = [];
       let historyModelAcc: StageAccumulator | undefined;
       if (emptySlot.role === 'executor') {
-        const plannerSlot =
-          inputAsStandaloneSlot && inputAsStandaloneSlot.role === 'planner'
-            ? inputAsStandaloneSlot
-            : classifyContextModelSlot({ fallbackInputModelId: 'Orchestrator (Carbon)' });
+        const plannerSlot = createPendingPlannerSlot({
+          planModelEnum: emptyPlanEnum,
+          plannerModelName: input.genMetadata?.plannerModelName ?? input.executorMetadata?.plannerModelName,
+          inputPlannerSlot: inputAsStandaloneSlot?.role === 'planner' ? inputAsStandaloneSlot : null,
+          capacityTokens: emptySlot.capacityTokens,
+          isFallbackModel: emptySlot.isFallbackModel,
+        });
         pair.push({ slot: plannerSlot, latestPrompt: 0, peakContextTokens: 0, explicitCapacity: emptyExplicitCap });
         pair.push(emptyAcc);
       } else if (emptySlot.role === 'planner') {
         pair.push(emptyAcc);
-        if (emptySlot.shortLabel !== 'Hydrogen') {
+        const pendingExecSlot = createPendingExecutorSlot({
+          executionModelEnum: emptyExecEnum,
+          capacityTokens: emptySlot.capacityTokens,
+          isFallbackModel: emptySlot.isFallbackModel,
+        });
+        const sameAsPlanner =
+          (pendingExecSlot.modelId !== 'pending' && pendingExecSlot.modelId === emptySlot.modelId) ||
+          (!emptyExecEnum && emptySlot.shortLabel === 'Hydrogen');
+        if (!sameAsPlanner) {
           pair.push({
-            slot: createPendingExecutorSlot(emptySlot.capacityTokens, emptySlot.isFallbackModel),
+            slot: pendingExecSlot,
             latestPrompt: 0,
             peakContextTokens: 0,
             explicitCapacity: emptyExplicitCap,
           });
         }
       } else {
-        const plannerSlot =
-          inputAsStandaloneSlot && inputAsStandaloneSlot.role === 'planner'
-            ? inputAsStandaloneSlot
-            : classifyContextModelSlot({ fallbackInputModelId: 'Orchestrator (Carbon)' });
-        const plannerExplicitCap = inputExplicitCapacity ?? plannerSlot.capacityTokens;
+        const plannerSlot = createPendingPlannerSlot({
+          planModelEnum: emptyPlanEnum,
+          plannerModelName: input.genMetadata?.plannerModelName ?? input.executorMetadata?.plannerModelName,
+          inputPlannerSlot: inputAsStandaloneSlot?.role === 'planner' ? inputAsStandaloneSlot : null,
+          capacityTokens: emptySlot.capacityTokens,
+          isFallbackModel: emptySlot.isFallbackModel,
+        });
+        // 空对话未有 DB / DOM 明确上限时，严禁把参考容量写入 explicitCapacity（保持 ~ 前缀）
         pair.push({
           slot: plannerSlot,
           latestPrompt: 0,
           peakContextTokens: 0,
-          explicitCapacity: plannerExplicitCap,
+          explicitCapacity: emptyExplicitCap,
         });
-        if (plannerSlot.shortLabel !== 'Hydrogen') {
+        const pendingExecSlot = createPendingExecutorSlot({
+          executionModelEnum: emptyExecEnum,
+          capacityTokens: plannerSlot.capacityTokens,
+          isFallbackModel: plannerSlot.isFallbackModel,
+        });
+        const sameAsPlanner =
+          (pendingExecSlot.modelId !== 'pending' && pendingExecSlot.modelId === plannerSlot.modelId) ||
+          (!emptyExecEnum && plannerSlot.shortLabel === 'Hydrogen');
+        if (!sameAsPlanner) {
           pair.push({
-            slot: createPendingExecutorSlot(plannerExplicitCap, plannerSlot.isFallbackModel),
+            slot: pendingExecSlot,
             latestPrompt: 0,
             peakContextTokens: 0,
-            explicitCapacity: plannerExplicitCap,
+            explicitCapacity: emptyExplicitCap,
           });
         }
         if (emptySlot.hasExplicitEvidence && emptySlot.modelId !== 'unknown') {
@@ -1299,6 +1667,8 @@ function resolveContextStagesAndActiveSlot(
             plannerModelName: cpGen?.plannerModelName,
             stepModelName: cpEntry.step.modelName,
             modelEnum: cpGen?.modelEnum,
+            planModelEnum: cpGen?.planModelEnum ?? emptyPlanEnum,
+            executionModelEnum: cpGen?.executionModelEnum ?? emptyExecEnum,
             hasPriorOrchestrator: true,
           });
           if (cpSlot.hasExplicitEvidence && cpSlot.modelId !== 'unknown') {
@@ -1351,12 +1721,21 @@ function resolveContextStagesAndActiveSlot(
   const stageMap = new Map<string, StageAccumulator & { lastSeenSeq: number }>();
   const slotKeyByUsageIndex: string[] = [];
   const orchestratorTurns = new Set<number>();
+  const turnPlanExecConfig = new Map<number, { planModelEnum?: number; executionModelEnum?: number }>();
   let sessionPeakContextTokens = 0;
   let latestEntry!: {
     step: ComputeHudMetricsInput['steps'][number];
     slot: ClassifiedContextSlot;
     genMeta?: ParsedGenMetadata;
   };
+  let latestPlanModelEnum: number | undefined;
+  let latestExecutionModelEnum: number | undefined;
+  const lastTurnNum = usageContextEntries[usageContextEntries.length - 1]?.turnIndex ?? 0;
+  const execMetaAppliesToLatestTurn = Boolean(
+    execMetaExecEnum &&
+      execMetaExecEnum > 0 &&
+      (inputIsOrchestrator || !trimmedInputModel)
+  );
   const hasAnyExplicitUsageModel = usageContextEntries.some((entry, idx) => {
     const isGlobalLatest = idx === usageContextEntries.length - 1;
     const gm = entry.step.generation ?? (isGlobalLatest ? input.genMetadata : undefined);
@@ -1371,6 +1750,52 @@ function resolveContextStagesAndActiveSlot(
     const turnIndex = entry.turnIndex ?? 0;
     const isGlobalLatest = i === usageContextEntries.length - 1;
     const stepGenMeta = entry.step.generation ?? (isGlobalLatest ? input.genMetadata : undefined);
+    const prevTurnConfig = turnPlanExecConfig.get(turnIndex);
+    const stepExecEnum =
+      stepGenMeta?.executionModelEnum ??
+      prevTurnConfig?.executionModelEnum ??
+      (turnIndex === lastTurnNum && execMetaAppliesToLatestTurn ? execMetaExecEnum : undefined);
+    const rawStepPlanEnum = stepGenMeta?.planModelEnum;
+    const distinctPrevPlanEnum =
+      prevTurnConfig?.planModelEnum !== undefined && prevTurnConfig.planModelEnum !== stepExecEnum
+        ? prevTurnConfig.planModelEnum
+        : undefined;
+    const distinctExecMetaPlanEnum =
+      execMetaPlanEnum !== undefined && execMetaPlanEnum !== stepExecEnum
+        ? execMetaPlanEnum
+        : undefined;
+    let stepPlanEnum: number | undefined;
+    if (rawStepPlanEnum !== undefined && stepExecEnum !== undefined && rawStepPlanEnum === stepExecEnum) {
+      // 宿主在执行步会将 gen_metadata.f3.1 改写为当前执行模型枚举（与 f3.60.1 相同）：
+      // 优先保留同轮前步或 executor_metadata 中真实的 planModelEnum；若无则校验 DOM 规划模型是否不同，避免把执行步错判为第二个 Planner。
+      const execSpec = resolveObservedModelSpecByEnum(stepExecEnum);
+      const domSuggestsDifferentPlanner = Boolean(
+        inputAsStandaloneSlot &&
+          inputAsStandaloneSlot.role === 'planner' &&
+          inputAsStandaloneSlot.hasExplicitEvidence &&
+          execSpec &&
+          inputAsStandaloneSlot.modelId !== execSpec.modelId
+      );
+      stepPlanEnum =
+        distinctPrevPlanEnum ??
+        (turnIndex === lastTurnNum || !prevTurnConfig ? distinctExecMetaPlanEnum : undefined) ??
+        (domSuggestsDifferentPlanner ? undefined : rawStepPlanEnum);
+    } else {
+      stepPlanEnum =
+        rawStepPlanEnum ??
+        prevTurnConfig?.planModelEnum ??
+        (turnIndex === lastTurnNum && execMetaAppliesToLatestTurn ? execMetaPlanEnum : undefined);
+    }
+    if (stepExecEnum && stepExecEnum > 0) {
+      const preservedPlanEnum =
+        stepPlanEnum !== undefined && stepPlanEnum !== stepExecEnum
+          ? stepPlanEnum
+          : distinctPrevPlanEnum ?? stepPlanEnum;
+      turnPlanExecConfig.set(turnIndex, {
+        planModelEnum: preservedPlanEnum,
+        executionModelEnum: stepExecEnum,
+      });
+    }
     const hasStepExplicitModel = Boolean(
       stepGenMeta?.responseModel ||
         stepGenMeta?.modelDisplayName ||
@@ -1388,6 +1813,8 @@ function resolveContextStagesAndActiveSlot(
       plannerModelName: stepGenMeta?.plannerModelName,
       stepModelName: entry.step.modelName,
       modelEnum: stepGenMeta?.modelEnum,
+      planModelEnum: stepPlanEnum,
+      executionModelEnum: stepExecEnum,
       fallbackInputModelId: stepFallbackModel,
       hasPriorOrchestrator: orchestratorTurns.has(turnIndex),
     });
@@ -1397,9 +1824,19 @@ function resolveContextStagesAndActiveSlot(
     if (slot.role === 'planner' || slot.role === 'executor') {
       orchestratorTurns.add(turnIndex);
     }
-    const stepExplicitCap = [inputExplicitCapacity, stepGenMeta?.maxContextTokens, entry.step.modelMaxTokens].find(
-      (v): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v > 0
-    );
+    if (isGlobalLatest) {
+      latestPlanModelEnum = stepPlanEnum;
+      latestExecutionModelEnum = stepExecEnum;
+    }
+    // 容量优先级：stepGenMeta.maxContextTokens > executorMetadata.checkpointMaxTokenLimit > step.modelMaxTokens > inputExplicitCapacity > 动态目录 > ~200K
+    const stepExplicitCap = [
+      stepGenMeta?.maxContextTokens,
+      isGlobalLatest || (turnIndex === lastTurnNum && (slot.role === 'planner' || slot.role === 'executor'))
+        ? executorExplicitCap
+        : undefined,
+      entry.step.modelMaxTokens,
+      isGlobalLatest ? inputExplicitCapacity : undefined,
+    ].find(isPositiveSafeInt);
     const prev = stageMap.get(slot.slotKey);
     stageMap.set(slot.slotKey, {
       slot,
@@ -1418,6 +1855,7 @@ function resolveContextStagesAndActiveSlot(
   for (const cpEntry of compactionContextEntries) {
     let targetSlotKey: string | undefined;
     const cpGen = cpEntry.step.generation;
+    const cpTurnCfg = turnPlanExecConfig.get(cpEntry.turnIndex);
     if (
       cpGen?.responseModel ||
       cpGen?.modelDisplayName ||
@@ -1431,6 +1869,8 @@ function resolveContextStagesAndActiveSlot(
         plannerModelName: cpGen?.plannerModelName,
         stepModelName: cpEntry.step.modelName,
         modelEnum: cpGen?.modelEnum,
+        planModelEnum: cpGen?.planModelEnum ?? cpTurnCfg?.planModelEnum,
+        executionModelEnum: cpGen?.executionModelEnum ?? cpTurnCfg?.executionModelEnum,
         hasPriorOrchestrator: orchestratorTurns.has(cpEntry.turnIndex),
       });
       if (cpSlot.hasExplicitEvidence && cpSlot.modelId !== 'unknown') {
@@ -1458,9 +1898,13 @@ function resolveContextStagesAndActiveSlot(
   let effectiveActiveSlotKey = latestEntry.slot.slotKey;
   const activeAcc = stageMap.get(effectiveActiveSlotKey)!;
   const allAccs = [...stageMap.values()];
+  const effectivePlanModelEnum = latestPlanModelEnum ?? (execMetaAppliesToLatestTurn ? execMetaPlanEnum : undefined);
+  const effectiveExecutionModelEnum =
+    latestExecutionModelEnum ?? (execMetaAppliesToLatestTurn ? execMetaExecEnum : undefined);
   const isOrchestrator =
     latestEntry.slot.role === 'planner' ||
     latestEntry.slot.role === 'executor' ||
+    Boolean(effectiveExecutionModelEnum && effectiveExecutionModelEnum > 0) ||
     inputIsOrchestrator;
 
   let orderedEntries: Array<{ acc: StageAccumulator; section: 'primary' | 'history' }>;
@@ -1470,6 +1914,7 @@ function resolveContextStagesAndActiveSlot(
       inputAsStandaloneSlot &&
       inputAsStandaloneSlot.hasExplicitEvidence &&
       inputAsStandaloneSlot.modelId !== 'unknown' &&
+      inputAsStandaloneSlot.modelId !== 'pending' &&
       !accs.some(
         (a) => a.slot.slotKey === inputAsStandaloneSlot.slotKey || a.slot.modelId === inputAsStandaloneSlot.modelId
       )
@@ -1479,13 +1924,18 @@ function resolveContextStagesAndActiveSlot(
     const planners = allAccs.filter((a) => a.slot.role === 'planner');
     const executors = allAccs.filter((a) => a.slot.role === 'executor');
     const others = allAccs.filter((a) => a.slot.role === 'model');
-    inheritedOrchCap = [...planners, ...executors].find((a) => a.explicitCapacity !== undefined)?.explicitCapacity;
+    inheritedOrchCap =
+      [...planners, ...executors].find((a) => a.explicitCapacity !== undefined)?.explicitCapacity ??
+      executorExplicitCap;
 
     if (planners.length === 0) {
-      const fallbackPlannerSlot =
-        inputAsStandaloneSlot && inputAsStandaloneSlot.role === 'planner'
-          ? inputAsStandaloneSlot
-          : classifyContextModelSlot({ fallbackInputModelId: 'Orchestrator (Carbon)' });
+      const fallbackPlannerSlot = createPendingPlannerSlot({
+        planModelEnum: effectivePlanModelEnum,
+        plannerModelName: latestEntry.genMeta?.plannerModelName ?? input.executorMetadata?.plannerModelName,
+        inputPlannerSlot: inputAsStandaloneSlot?.role === 'planner' ? inputAsStandaloneSlot : null,
+        capacityTokens: activeAcc.slot.capacityTokens,
+        isFallbackModel: activeAcc.slot.isFallbackModel,
+      });
       planners.push({
         slot: fallbackPlannerSlot,
         latestPrompt: 0,
@@ -1495,20 +1945,31 @@ function resolveContextStagesAndActiveSlot(
       });
     }
     const primaryPlanner = planners[0]!;
-    if (executors.length === 0 && primaryPlanner.slot.shortLabel !== 'Hydrogen') {
-      executors.push({
-        slot: createPendingExecutorSlot(
-          primaryPlanner.slot.capacityTokens,
-          primaryPlanner.slot.isFallbackModel
-        ),
-        latestPrompt: 0,
-        peakContextTokens: 0,
-        explicitCapacity: inheritedOrchCap ?? inputExplicitCapacity,
-        lastSeenSeq: -1,
+    if (executors.length === 0) {
+      const pendingExecSlot = createPendingExecutorSlot({
+        executionModelEnum: effectiveExecutionModelEnum,
+        capacityTokens: primaryPlanner.slot.capacityTokens,
+        isFallbackModel: primaryPlanner.slot.isFallbackModel,
       });
+      const sameAsAnyPlanner =
+        planners.some(
+          (p) =>
+            p.slot.slotKey === pendingExecSlot.slotKey ||
+            (pendingExecSlot.modelId !== 'pending' && p.slot.modelId === pendingExecSlot.modelId)
+        ) ||
+        (!effectiveExecutionModelEnum && primaryPlanner.slot.shortLabel === 'Hydrogen');
+      if (!sameAsAnyPlanner) {
+        executors.push({
+          slot: pendingExecSlot,
+          latestPrompt: 0,
+          peakContextTokens: 0,
+          explicitCapacity: inheritedOrchCap ?? inputExplicitCapacity,
+          lastSeenSeq: -1,
+        });
+      }
     }
 
-    const activePeByModelId = new Map<string, StageAccumulator & { lastSeenSeq?: number }>();
+    const activePeByModelId = new Map<string, StageAccumulator & { lastSeenSeq: number }>();
     for (const pe of [...planners, ...executors]) {
       if (Boolean(pe.latestStep)) {
         activePeByModelId.set(pe.slot.modelId, pe);
@@ -1517,11 +1978,30 @@ function resolveContextStagesAndActiveSlot(
     const filteredOthersRaw: Array<StageAccumulator & { lastSeenSeq: number }> = [];
     for (const other of others) {
       if (!Boolean(other.latestStep)) continue;
-      const absorbedTarget = activePeByModelId.get(other.slot.modelId);
+      let absorbedTarget = activePeByModelId.get(other.slot.modelId);
+      // 若尚无 planner 步但活跃 step 与 DOM/配置选中的 pending planner 同物理模型（如缺 f3.60 的 2.34.0 轨迹），原地提升吸收而非打入 history
+      if (
+        !absorbedTarget &&
+        planners.length === 1 &&
+        !planners[0]!.latestStep &&
+        planners[0]!.slot.modelId === other.slot.modelId &&
+        other.slot.slotKey === effectiveActiveSlotKey
+      ) {
+        absorbedTarget = planners[0]!;
+        activePeByModelId.set(other.slot.modelId, absorbedTarget);
+      }
       if (absorbedTarget) {
         absorbedTarget.peakContextTokens = Math.max(absorbedTarget.peakContextTokens, other.peakContextTokens);
         if (other.compactionCount && other.compactionCount > 0) {
           absorbedTarget.compactionCount = (absorbedTarget.compactionCount ?? 0) + other.compactionCount;
+        }
+        if (other.lastSeenSeq > absorbedTarget.lastSeenSeq) {
+          absorbedTarget.latestStep = other.latestStep;
+          absorbedTarget.latestPrompt = other.latestPrompt;
+          if (other.explicitCapacity !== undefined) {
+            absorbedTarget.explicitCapacity = other.explicitCapacity;
+          }
+          absorbedTarget.lastSeenSeq = other.lastSeenSeq;
         }
         if (other.slot.slotKey === effectiveActiveSlotKey) {
           effectiveActiveSlotKey = absorbedTarget.slot.slotKey;
@@ -1530,6 +2010,10 @@ function resolveContextStagesAndActiveSlot(
       }
       filteredOthersRaw.push(other);
     }
+    // 吸收可能刚刚填充了 planner 的 explicitCapacity，刷新 inheritedOrchCap 供 pending executor 继承
+    inheritedOrchCap =
+      [...planners, ...executors].find((a) => a.explicitCapacity !== undefined)?.explicitCapacity ??
+      inheritedOrchCap;
     const filteredOthersSorted = [...filteredOthersRaw].sort((a, b) => a.lastSeenSeq - b.lastSeenSeq);
     let filteredOthers: StageAccumulator[];
     if (filteredOthersSorted.length > 3) {
@@ -1632,13 +2116,18 @@ function resolveContextStagesAndActiveSlot(
       primaryNonPending.length >= 2 ||
       orderedEntries.some(({ acc }) => !acc.latestStep));
   const modelStages = isMultiModel
-    ? orderedEntries.map(({ acc, section }) => {
-        const inheritCap =
-          !acc.latestStep && isOrchestrator && (acc.slot.role === 'planner' || acc.slot.role === 'executor')
-            ? inheritedOrchCap
-            : undefined;
-        return createStageSnapshot(acc, acc.slot.slotKey === effectiveActiveSlotKey, inheritCap, section);
-      })
+    ? (() => {
+        let assignedActive = false;
+        return orderedEntries.map(({ acc, section }) => {
+          const inheritCap =
+            !acc.latestStep && isOrchestrator && (acc.slot.role === 'planner' || acc.slot.role === 'executor')
+              ? inheritedOrchCap
+              : undefined;
+          const isMatch = !assignedActive && acc.slot.slotKey === effectiveActiveSlotKey;
+          if (isMatch) assignedActive = true;
+          return createStageSnapshot(acc, isMatch, inheritCap, section);
+        });
+      })()
     : undefined;
   const activeStage =
     modelStages?.find((s) => s.isActive) ??
@@ -1865,8 +2354,11 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
     if (stepType !== 15 || step.hasUsage === false) continue;
     const prompt = safeTokens(step.rawInput ?? step.rawInputTokens) +
       safeTokens(step.cachedTokens ?? step.cachedReadTokens) + safeTokens(step.cacheWriteTokens);
-    if (step.hasUsage === true || prompt > 0) {
-      usageContextEntries.push({ step, prompt, turnIndex: turns });
+    const estCtx = safeTokens(step.generation?.estimatedTokensUsed);
+    const effectivePrompt = prompt > 0 ? prompt : estCtx;
+    const outputTok = safeTokens(step.outputTokens);
+    if (effectivePrompt > 0 || (step.hasUsage === true && outputTok > 0)) {
+      usageContextEntries.push({ step, prompt: effectivePrompt, turnIndex: turns });
     }
   }
   const {
@@ -1888,12 +2380,16 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
   const stepCached = safeTokens(latestStep?.cachedTokens ?? latestStep?.cachedReadTokens);
   const stepUncached = safeTokens(latestStep?.rawInput ?? latestStep?.rawInputTokens) +
     safeTokens(latestStep?.cacheWriteTokens);
-  const usedTokens = stepCached + stepUncached;
+  const rawPromptTokens = stepCached + stepUncached;
+  const fallbackEstimatedTokens =
+    rawPromptTokens === 0 ? safeTokens(latestStep?.generation?.estimatedTokensUsed) : 0;
+  const effectiveStepUncached = rawPromptTokens > 0 ? stepUncached : fallbackEstimatedTokens;
+  const usedTokens = stepCached + effectiveStepUncached;
   const usedRatio = capacityTokens > 0 ? usedTokens / capacityTokens : 0;
   const stepCacheRatio = usedTokens > 0 ? stepCached / usedTokens : 0;
   const denominator = Math.max(capacityTokens, usedTokens, 1);
   const cachedBarRatio = stepCached / denominator * 100;
-  const uncachedBarRatio = stepUncached / denominator * 100;
+  const uncachedBarRatio = effectiveStepUncached / denominator * 100;
   const latestOutput = safeTokens(latestStep?.outputTokens);
   let latestActiveForegroundKind: 'model' | 'tool' | null = null;
   const lastCtx = findLastSubstantiveStep(contextSteps);
@@ -2556,16 +3052,16 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
         cachedContextTokens: stepCached,
         cachedContextFormatted: formatThousandsTokens(stepCached),
         cachedContextRatio: cachedBarRatio,
-        uncachedContextTokens: stepUncached,
-        uncachedContextFormatted: formatThousandsTokens(stepUncached),
+        uncachedContextTokens: effectiveStepUncached,
+        uncachedContextFormatted: formatThousandsTokens(effectiveStepUncached),
         uncachedContextRatio: uncachedBarRatio,
         latestOutputTokens: latestOutput,
         latestOutputFormatted: formatThousandsTokens(latestOutput),
         systemTokens: stepCached,
         systemTokensCompact: formatThousandsTokens(stepCached),
         systemRatio: cachedBarRatio,
-        toolTokens: stepUncached,
-        toolTokensCompact: formatThousandsTokens(stepUncached),
+        toolTokens: effectiveStepUncached,
+        toolTokensCompact: formatThousandsTokens(effectiveStepUncached),
         toolRatio: uncachedBarRatio,
         messageTokens: latestOutput,
         messageTokensCompact: formatThousandsTokens(latestOutput),
@@ -2584,6 +3080,8 @@ interface CachedConversationState {
   lastStepIdx: number;
   lastGenIdx: number;
   parentMetaDigest: string;
+  executorMetaDigest: string;
+  executorMetadata?: ParsedExecutorMetadata;
   stepPrefixCutoffIdx: number;
   stepPrefixDigest: string;
   genDigest: string;
@@ -2649,6 +3147,10 @@ export class ConversationMetricsEngine {
 
   public invalidatePricingCache(): void {
     this.cachedPricingTable = null;
+  }
+
+  public getEffectivePricingTable(): Promise<Record<string, ApiPricingEntry>> {
+    return this.resolveEffectivePricingTable();
   }
 
   private async resolveEffectivePricingTable(): Promise<Record<string, ApiPricingEntry>> {
@@ -2841,6 +3343,10 @@ export class ConversationMetricsEngine {
         canReuseIncremental && !existing!.parentMetaReadError && existing!.parentMetaDigest
           ? existing!.parentMetaDigest
           : undefined,
+      prevExecutorMetaDigest:
+        canReuseIncremental && existing!.executorMetaDigest
+          ? existing!.executorMetaDigest
+          : undefined,
       prevStepPrefixCutoffIdx,
       prevStepPrefixDigest:
         prevStepPrefixCutoffIdx !== undefined ? existing!.stepPrefixDigest : undefined,
@@ -2872,6 +3378,9 @@ export class ConversationMetricsEngine {
         parentMetaReadError,
         parentMetaUnchanged,
         parentMetaDigest,
+        executorMetaUnchanged,
+        executorMetaDigest,
+        executorMetaBlob,
         trajectoryId,
         metaBlobProjectedSlices,
         maxIdx,
@@ -2886,6 +3395,13 @@ export class ConversationMetricsEngine {
         genPrefixDigest,
         genBlobs,
       } = workerRes;
+
+      const executorMetadata: ParsedExecutorMetadata | undefined =
+        executorMetaUnchanged && existing
+          ? existing.executorMetadata
+          : executorMetaBlob && executorMetaBlob.byteLength > 0
+          ? parseExecutorMetadataBlob(executorMetaBlob)
+          : undefined;
 
       const referencedUuidsInMetaBlob = new Set<string>(
         parentMetaReadError || (parentMetaUnchanged && existing)
@@ -3002,6 +3518,8 @@ export class ConversationMetricsEngine {
           ...(generation.modelDisplayName ? { modelDisplayName: generation.modelDisplayName } : {}),
           ...(generation.plannerModelName ? { plannerModelName: generation.plannerModelName } : {}),
           ...(generation.modelEnum ? { modelEnum: generation.modelEnum } : {}),
+          ...(generation.planModelEnum ? { planModelEnum: generation.planModelEnum } : {}),
+          ...(generation.executionModelEnum ? { executionModelEnum: generation.executionModelEnum } : {}),
           ...(generation.maxContextTokens ? { maxContextTokens: generation.maxContextTokens } : {}),
         };
         for (const stepIdx of new Set(generation.stepIndices ?? [])) {
@@ -3050,12 +3568,14 @@ export class ConversationMetricsEngine {
             }
           }
         }
-        if (generation.responseModel || generation.modelDisplayName || generation.plannerModelName || generation.modelEnum || generation.maxContextTokens) {
+        if (generation.responseModel || generation.modelDisplayName || generation.plannerModelName || generation.modelEnum || generation.planModelEnum || generation.executionModelEnum || generation.maxContextTokens) {
           const modelOnlyGen: ParsedGenMetadata = {
             ...(generation.responseModel ? { responseModel: generation.responseModel } : {}),
             ...(generation.modelDisplayName ? { modelDisplayName: generation.modelDisplayName } : {}),
             ...(generation.plannerModelName ? { plannerModelName: generation.plannerModelName } : {}),
             ...(generation.modelEnum ? { modelEnum: generation.modelEnum } : {}),
+            ...(generation.planModelEnum ? { planModelEnum: generation.planModelEnum } : {}),
+            ...(generation.executionModelEnum ? { executionModelEnum: generation.executionModelEnum } : {}),
             ...(generation.maxContextTokens ? { maxContextTokens: generation.maxContextTokens } : {}),
           };
           for (const step of linked) {
@@ -3193,6 +3713,8 @@ export class ConversationMetricsEngine {
         lastStepIdx: lastIdx,
         lastGenIdx,
         parentMetaDigest: parentMetaReadError ? existing?.parentMetaDigest ?? '' : parentMetaDigest,
+        executorMetaDigest: executorMetaDigest ?? '',
+        executorMetadata,
         stepPrefixCutoffIdx,
         stepPrefixDigest,
         genDigest,
@@ -3233,6 +3755,7 @@ export class ConversationMetricsEngine {
     sessionRevision?: number;
     metricsSequence?: number;
     modelId?: string;
+    modelCapacity?: number;
     isStreaming?: boolean;
     activityPhase?: HudActivityPhase;
     isSubagentRunning?: boolean;
@@ -3246,6 +3769,7 @@ export class ConversationMetricsEngine {
       sessionRevision = 1,
       metricsSequence,
       modelId,
+      modelCapacity,
       isStreaming = false,
       activityPhase,
       isSubagentRunning = false,
@@ -3270,6 +3794,7 @@ export class ConversationMetricsEngine {
         isSubagentRunning,
         runningSubagentCount,
         modelId,
+        modelCapacity,
         steps: [],
       });
     }
@@ -3814,8 +4339,10 @@ export class ConversationMetricsEngine {
       allowDbActiveStepInference: mainIsRecent || isStreaming || effectiveSubagentRunning || selfSummaryRunning,
       isSubagentTrajectory,
       modelId,
+      modelCapacity,
       pricingTable,
       genMetadata: mainState.genMetadata,
+      executorMetadata: mainState.executorMetadata,
       extraUsageGenerations: [
         ...mainState.unmatchedUsageGenerations.map(item => ({
           generation: item.generation,

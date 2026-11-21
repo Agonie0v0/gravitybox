@@ -15,23 +15,77 @@ import {
   allowedTarget,
   discover,
   inspectBundle,
+  inspectPageService,
   isApplicationRunning,
-  verifyPageService,
   type Endpoint,
+  type PageServiceKind,
 } from './discovery.js';
 import { compareLayers, type Dictionary } from './dictionary.js';
 import { normalizeLocale, translate } from './i18n.js';
 import {
   isEnglishSource, SUPPORTED_BUNDLES,
+  isSupportedBundleHash,
   fetchBundleFromOrigin,
+  fetchRemoteBundleHashViaCdp,
   computeBundleSha256,
   extractUiStrings, extractedKind,
-  findMissingStrings,
   createPendingList,
+  computeBundleDictionaryCoverage,
+  ADAPTIVE_FULL_TRANSLATION_MIN_COVERAGE,
+  ADAPTIVE_FULL_TRANSLATION_MIN_STRINGS,
 } from './bundle.js';
+import {
+  probeMainWorldSshRemote,
+  supportsSshRemoteBridge,
+  verifyRemotePageWindow,
+  type RemoteWindowVerification,
+  type WindowSourceKind,
+} from './ssh-context.js';
+import { SshRemoteRpcClient, type RemoteRpcClientLike } from './ssh-remote-rpc.js';
+import { buildRemoteEnvironmentId } from './remote-usage-sync.js';
+import type { QuotaData } from './accounts.js';
+
+export type RemoteSessionConnectionState = 'connected' | 'disconnected' | 'auth_expired' | 'unverified';
+
+export interface RemoteSessionState {
+  remoteKey: string;
+  hostLabel: string;
+  targetId: string;
+  origin: string;
+  state: RemoteSessionConnectionState;
+  email: string;
+  name: string | null;
+  tier: string;
+  accountType: 'consumer' | 'enterprise_vertex' | 'unknown';
+  matchedLocalAccountId: string | null;
+  quota: QuotaData | null;
+  quotaOverview: Record<string, unknown> | null;
+  observedAt: number | null;
+  disconnectedAt: number | null;
+  lastError: string;
+  lastFocusedAt: number;
+}
+
+export interface ConnectedRemoteRpcTarget {
+  remoteKey: string;
+  hostLabel: string;
+  environmentId: string;
+  origin: string;
+  rpcClient: RemoteRpcClientLike;
+  email: string;
+  name: string | null;
+  accountType: 'consumer' | 'enterprise_vertex' | 'unknown';
+  matchedLocalAccountId: string | null;
+  state: RemoteSessionConnectionState;
+}
 
 export type AssistantStatus = {
   schema: 1; mode: string; message: string; appVersion?: string; windows: number;
+  sshWindows?: number;
+  sshWindowsCount?: number;
+  activeSshHosts?: string[];
+  focusedContextKey?: string;
+  remoteObservedVersion?: number;
   dictionaryVersion: string; entries: number; dictionaryError?: string; errors: string[];
   rssMB: number; updatedAt: string; pid: number;
   translationEnabled?: boolean;
@@ -49,7 +103,28 @@ export type AssistantStatus = {
   taskRevision?: number;
   bundleReads?:number;bundleBytes?:number;
 };
-type PageSession = { cdp: CDP; targetId: string; contextId?: number; registration?: string; updateChain: Promise<void>; url: string;languageMode?:string;detaching?:boolean };
+export type PageSession = {
+  cdp: CDP;
+  targetId: string;
+  contextId?: number;
+  registration?: string;
+  updateChain: Promise<void>;
+  url: string;
+  languageMode?: string;
+  detaching?: boolean;
+  sourceKind?: WindowSourceKind;
+  remoteKey?: string;
+  hostLabel?: string;
+  browserContextId?: string;
+  bundleSha256?: string;
+  verifiedBundle?: boolean;
+  registeredVerifiedBundle?: boolean;
+  registeredFullTranslation?: boolean;
+  domContractPassed?: boolean;
+  bootedConservative?: boolean;
+  lastFocusedAt?: number;
+  rpcClient?: SshRemoteRpcClient;
+};
 function isSafeCandidate(key: unknown): key is string {
   return typeof key === 'string' && isEnglishSource(key) && key.length <= 400 && !/(?:https?:\/\/|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|(?:^|\s)(?:\/|~\/|[A-Za-z]:\\)|\b(?:sk-|AIza)[A-Za-z0-9_-]{12,})/.test(key);
 }
@@ -96,7 +171,17 @@ export class Controller {
   private lastInspectedSha?: string;
   private lastInspectedAppVersion?: string;
   private inspectingBundle = false;
+  private adaptiveFullTranslationByBundle = new Map<string, boolean>();
   private unverifiedWindowRetries = 0;
+  private sshProbeRetries = 0;
+  private pendingRemoteTargets = new Map<string, number>();
+  private localBrowserContextIds = new Set<string>();
+  private remoteSessions = new Map<string, RemoteSessionState>();
+  private remoteProbeInFlight = new Map<string, Promise<void>>();
+  private remoteObservedVersion = 0;
+  private localFocusedAt = 0;
+  private readonly REMOTE_SESSION_CACHE_TTL_MS = 30_000;
+  private readonly REMOTE_DISCONNECTED_RETENTION_MS = 10 * 60 * 1000;
   private trustedCandidates: PendingItem[] = [];
   private bundleCache = new BundleCache();
   private hudBridge: CdpHudBridge;
@@ -124,6 +209,15 @@ export class Controller {
     discoverEndpoint?: (appPath: string, profile: string) => Promise<Endpoint | undefined>;
     inspectAppBundle?: (appPath: string) => Promise<{ version: string; legacyPatch: boolean }>;
     verifyPage?: (url: string, appPath: string) => Promise<boolean>;
+    inspectPage?: (url: string, appPath: string) => Promise<PageServiceKind>;
+    verifyRemoteWindow?: (params: {
+      appVersion: string;
+      antigravityPid: number;
+      url: string;
+      cdp: CDP;
+      browserContextId?: string;
+      localBrowserContextIds: ReadonlySet<string>;
+    }) => Promise<RemoteWindowVerification>;
     onStatus: (status: AssistantStatus) => void;
   }) {
     const initialLocale = normalizeLocale(options.locale ?? '') ?? (options.initiallyPaused ? 'en' : 'zh-Hans');
@@ -137,7 +231,7 @@ export class Controller {
       stateDir: options.stateDir,
     });
     const effectiveLocale = this.effectiveStatusLocale();
-    this.status = { schema: 1, mode: 'starting', message: this.t('status.starting'), windows: 0, dictionaryVersion: options.dictionary.version, entries: Object.keys(options.dictionary.entries).length, errors: [], rssMB: 0, updatedAt: '', pid: process.pid, menuHooked: false, translationEnabled: !this.paused, hudEnabled: this.hudEnabled, locale: effectiveLocale, configuredLanguage: this.configuredLanguage };
+    this.status = { schema: 1, mode: 'starting', message: this.t('status.starting'), windows: 0, sshWindows: 0, sshWindowsCount: 0, activeSshHosts: [], focusedContextKey: 'local', remoteObservedVersion: 0, dictionaryVersion: options.dictionary.version, entries: Object.keys(options.dictionary.entries).length, errors: [], rssMB: 0, updatedAt: '', pid: process.pid, menuHooked: false, translationEnabled: !this.paused, hudEnabled: this.hudEnabled, locale: effectiveLocale, configuredLanguage: this.configuredLanguage };
   }
   private publish(mode?: string, message?: string) {
     if (mode) this.status.mode = mode;
@@ -148,6 +242,13 @@ export class Controller {
     this.status.locale = effectiveLocale;
     this.status.configuredLanguage = this.configuredLanguage;
     this.status.windows = this.pages.size;
+    const sshSummary = this.getActiveSshWindowsSummary();
+    this.status.sshWindows = sshSummary.count;
+    this.status.sshWindowsCount = sshSummary.count;
+    this.status.activeSshHosts = sshSummary.hosts;
+    this.status.focusedContextKey = this.getFocusedContextKey();
+    this.status.remoteObservedVersion = this.remoteObservedVersion;
+    this.status.unverifiedVersion = !this.effectiveVerifiedStatus();
     this.status.bundleReads=this.bundleCache.downloads;this.status.bundleBytes=this.bundleCache.downloadedBytes;
     const modes=new Set([...this.pages.values()].map(p=>p.languageMode??(this.paused?'en':'zh')));this.status.languageMode=modes.size>1?'mixed':([...modes][0]??(this.paused?'en':'zh'));
     this.status.rssMB = Math.round(process.memoryUsage().rss / 1024 / 1024 * 10) / 10;
@@ -172,10 +273,35 @@ export class Controller {
       ? this.options.inspectAppBundle(appPath)
       : inspectBundle(appPath);
   }
-  private checkPageService(url: string, appPath: string): Promise<boolean> {
-    return this.options.verifyPage
-      ? this.options.verifyPage(url, appPath)
-      : verifyPageService(url, appPath);
+  private async checkPageService(url: string, appPath: string): Promise<boolean> {
+    return (await this.inspectPageState(url, appPath)) === 'local';
+  }
+  private async inspectPageState(url: string, appPath: string): Promise<PageServiceKind> {
+    if (this.options.inspectPage) {
+      return this.options.inspectPage(url, appPath);
+    }
+    if (this.options.verifyPage) {
+      return (await this.options.verifyPage(url, appPath)) ? 'local' : 'unlisted';
+    }
+    return inspectPageService(url, appPath);
+  }
+  private async verifyRemoteWindowTarget(params: {
+    appVersion: string;
+    antigravityPid: number;
+    url: string;
+    cdp: CDP;
+    browserContextId?: string;
+  }): Promise<RemoteWindowVerification> {
+    if (this.options.verifyRemoteWindow) {
+      return this.options.verifyRemoteWindow({
+        ...params,
+        localBrowserContextIds: this.localBrowserContextIds,
+      });
+    }
+    return verifyRemotePageWindow({
+      ...params,
+      localBrowserContextIds: this.localBrowserContextIds,
+    });
   }
   private closeProfileWatchers() {
     for (const w of this.profileWatchers.splice(0)) {
@@ -246,32 +372,39 @@ export class Controller {
       if(this.options.selectDictionary){const dictionary=await this.options.selectDictionary(this.endpoint.appVersion);this.options.dictionary=dictionary;this.status.dictionaryVersion=dictionary.version;this.status.entries=Object.keys(dictionary.entries).length;this.bootCache.clear();}
       if (this.endpoint.legacyPatch) { this.publish('legacy-blocked', this.t('status.legacy_blocked')); this.retry(30000); return; }
       this.status.dictionaryBaseVersion = [...SUPPORTED_BUNDLES.keys()].filter(v=>compareLayers(v+'.json',this.endpoint!.appVersion+'.json')<=0).sort((a,b)=>compareLayers(a+'.json',b+'.json')).at(-1)??'base';
-      if (!this.options.fixture) {
-        const activeApp = this.activeAppPath();
-        const targets = await (await fetch(`http://127.0.0.1:${this.endpoint.port}/json/list`, { signal: AbortSignal.timeout(2000), redirect: 'error' })).json() as {type: string; url: string}[];
-        const target = targets.find(t => allowedTarget(t));
-        if (!target || !await this.checkPageService(target.url, activeApp)) { this.publish('waiting-window', this.t('status.waiting_window')); this.retry(); return; }
-        const bundle=await this.bundleCache.read(activeApp,this.endpoint.pid,this.endpoint.appVersion,new URL(target.url).origin);
-        if(this.status.bundleSha256!==bundle.hash){this.trustedCandidates=[];}this.status.bundleSha256=bundle.hash;this.status.bundleCacheHit=bundle.cacheHit;this.initialBundle=bundle.source;
-      }
-      this.status.unverifiedVersion=!this.verifiedBundle();
+      this.status.unverifiedVersion=!this.effectiveVerifiedStatus();
       const browser = this.browser = new CDP(this.endpoint.browserURL);
       await browser.connect();
       if (this.stopped) { browser.close(); this.browser = undefined; return; }
       browser.on('Target.targetCreated', () => this.scheduleSync());
       browser.on('Target.targetInfoChanged', () => this.scheduleSync());
       browser.on('Target.targetDestroyed', () => this.scheduleSync());
-      browser.on('disconnected', () => { void this.disconnectPages(); this.browser = undefined; if (!this.stopped) { this.reconnectionDelay = 1000; this.unverifiedWindowRetries = 0; this.publish('waiting', this.t('status.reconnecting')); this.retry(); } });
+      browser.on('disconnected', () => { void this.disconnectPages(); this.browser = undefined; this.pendingRemoteTargets.clear(); this.localBrowserContextIds.clear(); if (!this.stopped) { this.reconnectionDelay = 1000; this.unverifiedWindowRetries = 0; this.sshProbeRetries = 0; this.publish('waiting', this.t('status.reconnecting')); this.retry(); } });
       await browser.send('Target.setDiscoverTargets', { discover: true });
       this.reconnectionDelay = 1000;
       this.unverifiedWindowRetries = 0;
+      this.sshProbeRetries = 0;
       await this.sync();
     } catch (error) {
       this.browser?.close(); this.browser = undefined;
       this.publish('error', (error as Error).message); this.retry();
     }
   }
-  private verifiedBundle(){const expected=SUPPORTED_BUNDLES.get(this.status.appVersion??'');return !!this.options.fixture||!!expected&&expected===this.status.bundleSha256;}
+  private verifiedBundle(session?: PageSession){
+    if(this.options.fixture)return true;
+    if(session&&session.verifiedBundle!==undefined)return session.verifiedBundle;
+    return isSupportedBundleHash(this.status.appVersion,this.status.bundleSha256);
+  }
+  private shouldUseFullTranslation(session?: PageSession): boolean {
+    if (this.verifiedBundle(session)) return true;
+    if (!session || session.sourceKind === 'remote') return false;
+    if (!session.domContractPassed || !session.bundleSha256) return false;
+    return this.adaptiveFullTranslationByBundle.get(`${session.bundleSha256}:${this.options.dictionary.version}`) === true;
+  }
+  private effectiveVerifiedStatus(){
+    if(this.pages.size===0)return this.verifiedBundle();
+    return [...this.pages.values()].every(s=>this.verifiedBundle(s));
+  }
   private retry(delay?: number) {
     clearTimeout(this.reconnection);
     if (this.stopped) return;
@@ -288,15 +421,17 @@ export class Controller {
     clearTimeout(this.targetTimer);
     this.targetTimer = setTimeout(() => void this.sync().catch(() => this.publish('error', this.t('status.probe_failed'))), delayMs);
   }
-  private boot(url: string) {
+  private boot(url: string, session?: PageSession) {
     const page = new URL(url);
     const effectiveHudLocale = this.effectiveHudLocale();
     const languageMode = this.paused ? 'en' : (this.locale === 'zh-Hans' ? 'zh' : this.locale);
-    const key = `${page.origin}${page.pathname}:${this.options.dictionary.version}:${this.verifiedBundle()}:${this.hudEnabled}:${this.paused}:${effectiveHudLocale}`;
+    const fullTranslation = this.shouldUseFullTranslation(session);
+    const conservative = !fullTranslation;
+    const key = `${page.origin}${page.pathname}:${this.options.dictionary.version}:${conservative}:${this.hudEnabled}:${this.paused}:${effectiveHudLocale}`;
     const cached = this.bootCache.get(key);
     if (cached) return cached;
-    const source = `delete globalThis.__GRAVITYBOX_ATTACH_DEEP_SCAN__;delete globalThis.__GRAVITYBOX_ATTACH_HUD__;globalThis.__GRAVITYBOX_BOOT__=${JSON.stringify({ origin: page.origin, path: page.pathname, dictionary: this.options.dictionary, conservative:!this.verifiedBundle(),runtimeId:this.runtimeId,shortcutEnabled:this.options.shortcutEnabled!==false,hudEnabled:this.hudEnabled,translationEnabled:!this.paused,languageMode,locale:effectiveHudLocale,shellValidated:true })};\n${this.engine}`;
-    if (this.bootCache.size < 4) this.bootCache.set(key, source);
+    const source = `delete globalThis.__GRAVITYBOX_ATTACH_DEEP_SCAN__;delete globalThis.__GRAVITYBOX_ATTACH_HUD__;globalThis.__GRAVITYBOX_BOOT__=${JSON.stringify({ origin: page.origin, path: page.pathname, dictionary: this.options.dictionary, conservative,runtimeId:this.runtimeId,shortcutEnabled:this.options.shortcutEnabled!==false,hudEnabled:this.hudEnabled,translationEnabled:!this.paused,languageMode,locale:effectiveHudLocale,shellValidated:true })};\n${this.engine}`;
+    if (this.bootCache.size < 16) this.bootCache.set(key, source);
     return source;
   }
   async sync() {
@@ -304,46 +439,176 @@ export class Controller {
     if (!this.endpoint || !this.browser || this.stopped) return;
     this.syncing = true;
     try {
-      const response = await fetch(`http://127.0.0.1:${this.endpoint.port}/json/list`, { signal: AbortSignal.timeout(2000), redirect: 'error' });
+      const [response, targetInfosRes] = await Promise.all([
+        fetch(`http://127.0.0.1:${this.endpoint.port}/json/list`, { signal: AbortSignal.timeout(2000), redirect: 'error' }),
+        typeof this.browser.send === 'function'
+          ? this.browser.send('Target.getTargets').catch(() => ({ targetInfos: [] }))
+          : Promise.resolve({ targetInfos: [] }),
+      ]);
       const targets = await response.json() as { id: string; type: string; url: string; webSocketDebuggerUrl: string }[];
+      const browserContextByTargetId = new Map<string, string>();
+      const rawTargetInfos = (targetInfosRes as { targetInfos?: Array<{ targetId?: string; browserContextId?: string }> })?.targetInfos;
+      if (Array.isArray(rawTargetInfos)) {
+        for (const info of rawTargetInfos) {
+          if (typeof info?.targetId === 'string' && typeof info?.browserContextId === 'string' && info.browserContextId) {
+            browserContextByTargetId.set(info.targetId, info.browserContextId);
+          }
+        }
+      }
+
       const permitted = targets.filter(target => allowedTarget(target, this.options.fixture?.origin));
+      const permittedIds = new Set(permitted.map(t => t.id));
+      for (const pendingId of [...this.pendingRemoteTargets.keys()]) {
+        if (!permittedIds.has(pendingId)) this.pendingRemoteTargets.delete(pendingId);
+      }
+
       for (const [id, session] of this.pages) {
         const target = permitted.find(target => target.id === id);
-        if (!target || this.dormant) { await this.detach(session); this.pages.delete(id); }
-        else if (target.url !== session.url || (session.contextId === undefined && !session.detaching)) {
+        if (!target || this.dormant) {
+          this.markRemoteSessionDisconnected(session);
+          await this.detach(session);
+          this.pages.delete(id);
+        } else if (target.url !== session.url || (session.contextId === undefined && !session.detaching)) {
           try {
             if (target.url !== session.url) {
+              let prevOrigin = '';
+              let nextOrigin = '';
+              try {
+                prevOrigin = new URL(session.url).origin;
+                nextOrigin = new URL(target.url).origin;
+              } catch {}
               session.url = target.url;
+              if (session.sourceKind === 'remote' && prevOrigin !== nextOrigin) {
+                session.bundleSha256 = undefined;
+                session.verifiedBundle = undefined;
+                if (!this.options.verifyRemoteWindow) {
+                  const recheck = await probeMainWorldSshRemote(session.cdp, 800);
+                  if (!recheck.ready || recheck.kind !== 'ssh') {
+                    this.markRemoteSessionDisconnected(session);
+                    await this.detach(session);
+                    this.pages.delete(id);
+                    continue;
+                  }
+                }
+                if (nextOrigin) this.hudBridge.updateTargetOrigin(id, nextOrigin);
+                this.upsertConnectedRemoteSession(session);
+              }
               await this.refreshRegistration(session);
             }
             await this.queueBootstrap(session, false);
           } catch {
+            this.markRemoteSessionDisconnected(session);
             await this.detach(session);
             this.pages.delete(id);
           }
         }
       }
       this.status.errors = [];
+      const activeApp = this.activeAppPath();
+      let hasPendingRemoteProbe = false;
       if (!this.dormant) for (const target of permitted) if (!this.pages.has(target.id)) {
         if (this.dormant || this.stopped) break;
+        let tempCdp: CDP | undefined;
         try {
-          if (!this.options.fixture && !await this.checkPageService(target.url, this.activeAppPath())) {
-            this.status.errors.push(this.t('controller.err.window_unverified'));
-            continue;
+          const browserContextId = browserContextByTargetId.get(target.id);
+          let sourceKind: WindowSourceKind = 'local';
+          let remoteKey: string | undefined;
+          let hostLabel: string | undefined;
+
+          if (this.options.fixture) {
+            sourceKind = 'local';
+          } else {
+            const serviceKind = await this.inspectPageState(target.url, activeApp);
+            if (serviceKind === 'local') {
+              sourceKind = 'local';
+              if (browserContextId) this.localBrowserContextIds.add(browserContextId);
+            } else if (serviceKind === 'foreign') {
+              this.status.errors.push(this.t('controller.err.window_unverified'));
+              continue;
+            } else {
+              if (!this.options.verifyRemoteWindow && !supportsSshRemoteBridge(this.endpoint.appVersion)) {
+                this.status.errors.push(this.t('controller.err.window_unverified'));
+                continue;
+              }
+              const socketURL = assertLoopback(target.webSocketDebuggerUrl);
+              if (Number(socketURL.port) !== this.endpoint.port) throw new Error(this.t('controller.err.window_port_mismatch'));
+              tempCdp = new CDP(socketURL.href);
+              await tempCdp.connect();
+              if (this.dormant || this.stopped) { tempCdp.close(); tempCdp = undefined; break; }
+              const verification = await this.verifyRemoteWindowTarget({
+                appVersion: this.endpoint.appVersion,
+                antigravityPid: this.endpoint.pid,
+                url: target.url,
+                cdp: tempCdp,
+                browserContextId,
+              });
+              if (verification.status === 'verified') {
+                sourceKind = 'remote';
+                remoteKey = verification.identity.remoteKey;
+                hostLabel = verification.identity.hostLabel;
+                this.pendingRemoteTargets.delete(target.id);
+              } else {
+                tempCdp.close();
+                tempCdp = undefined;
+                if (verification.status === 'pending') {
+                  const tries = (this.pendingRemoteTargets.get(target.id) ?? 0) + 1;
+                  this.pendingRemoteTargets.set(target.id, tries);
+                  if (tries <= 30) {
+                    hasPendingRemoteProbe = true;
+                    continue;
+                  }
+                }
+                this.pendingRemoteTargets.delete(target.id);
+                this.status.errors.push(this.t('controller.err.window_unverified'));
+                continue;
+              }
+            }
           }
-          if (this.dormant || this.stopped) break;
+
+          if (this.dormant || this.stopped) { tempCdp?.close(); break; }
           const socketURL = assertLoopback(target.webSocketDebuggerUrl);
-          if (Number(socketURL.port) !== this.endpoint.port) throw new Error(this.t('controller.err.window_port_mismatch'));
-          const cdp = new CDP(socketURL.href);
-          const session: PageSession = { cdp, targetId: target.id, url: target.url, updateChain: Promise.resolve() };
-          await cdp.connect();
+          if (Number(socketURL.port) !== this.endpoint.port) { tempCdp?.close(); throw new Error(this.t('controller.err.window_port_mismatch')); }
+          const cdp = tempCdp ?? new CDP(socketURL.href);
+          if (!tempCdp) await cdp.connect();
+          tempCdp = undefined;
           if (this.dormant || this.stopped) { cdp.close(); break; }
+          const session: PageSession = {
+            cdp,
+            targetId: target.id,
+            url: target.url,
+            updateChain: Promise.resolve(),
+            sourceKind,
+            remoteKey,
+            hostLabel,
+            browserContextId,
+            lastFocusedAt: Date.now(),
+          };
+          if (sourceKind === 'remote') {
+            session.rpcClient = new SshRemoteRpcClient({
+              cdp,
+              getContextId: () => session.contextId,
+            });
+            this.upsertConnectedRemoteSession(session);
+          } else {
+            this.localFocusedAt = Math.max(this.localFocusedAt, session.lastFocusedAt ?? 0);
+          }
+          let targetOrigin = '';
+          try { targetOrigin = new URL(target.url).origin; } catch {}
           this.pages.set(target.id, session);
-          cdp.on('disconnected', () => {this.hudBridge.detachTarget(target.id);if(!session.detaching&&this.pages.get(target.id)===session){this.pages.delete(target.id);this.scheduleSync();}});
+          cdp.on('disconnected', () => {this.hudBridge.detachTarget(target.id);if(!session.detaching&&this.pages.get(target.id)===session){this.pages.delete(target.id);this.markRemoteSessionDisconnected(session);this.scheduleSync();}});
           cdp.on('Page.frameNavigated', (event) => {
             if (!event.frame?.parentId) {
               this.hudBridge.detachTargetPanes(target.id);
               session.contextId = undefined;
+              if (session.sourceKind === 'remote' && event.frame?.url) {
+                try {
+                  const nextOrigin = new URL(event.frame.url).origin;
+                  if (nextOrigin && nextOrigin !== 'null') {
+                    session.url = event.frame.url;
+                    this.hudBridge.updateTargetOrigin(target.id, nextOrigin);
+                  }
+                } catch {}
+              }
               void this.queueBootstrap(session).catch(() => this.scheduleSync(1500));
             }
           });
@@ -355,25 +620,59 @@ export class Controller {
           });
           await cdp.send('Page.enable'); await cdp.send('Runtime.enable');
           await cdp.send('Runtime.addBinding',{name:'__gravityboxLanguageChanged',executionContextName:WORLD});
-          await this.hudBridge.attachToTarget(target.id, cdp, () => session.contextId, WORLD);
-          cdp.on('Runtime.bindingCalled',(event)=>{if(event.name==='__gravityboxLanguageChanged'&&event.executionContextId===session.contextId&&['zh','en'].includes(event.payload)){session.languageMode=event.payload;this.publish();if(this.hudEnabled){void this.hudBridge.refreshAllForLocaleChange();}}else if(event.name===HUD_BRIDGE_BINDING_NAME&&this.hudEnabled&&event.executionContextId===session.contextId){this.hudBridge.handleRawBindingPayload(target.id,event.payload);}});
+          await cdp.send('Runtime.addBinding',{name:'__gravityboxWindowFocus',executionContextName:WORLD});
+          await this.hudBridge.attachToTarget(target.id, cdp, () => session.contextId, WORLD, {
+            sourceKind,
+            ...(remoteKey ? { remoteKey } : {}),
+            ...(hostLabel ? { hostLabel } : {}),
+            ...(targetOrigin ? { origin: targetOrigin } : {}),
+            ...(session.rpcClient ? { rpcClient: session.rpcClient } : {}),
+          });
+          cdp.on('Runtime.bindingCalled',(event)=>{
+            if(event.name==='__gravityboxLanguageChanged'&&event.executionContextId===session.contextId&&['zh','en'].includes(event.payload)){
+              session.languageMode=event.payload;this.publish();if(this.hudEnabled){void this.hudBridge.refreshAllForLocaleChange();}
+            }else if(event.name==='__gravityboxWindowFocus'&&event.executionContextId===session.contextId){
+              const focusTs = Date.now();
+              session.lastFocusedAt = focusTs;
+              if (session.sourceKind === 'remote' && session.remoteKey) {
+                const entry = this.remoteSessions.get(session.remoteKey);
+                if (entry) {
+                  entry.lastFocusedAt = focusTs;
+                  this.remoteObservedVersion++;
+                }
+              } else if (session.sourceKind !== 'remote') {
+                this.localFocusedAt = focusTs;
+              }
+            }else if(event.name===HUD_BRIDGE_BINDING_NAME&&this.hudEnabled&&event.executionContextId===session.contextId){
+              this.hudBridge.handleRawBindingPayload(target.id,event.payload);
+            }
+          });
           await this.refreshRegistration(session);
           await this.queueBootstrap(session, false);
         } catch(error) {
+          tempCdp?.close();
           const failed = this.pages.get(target.id); if (failed) { await this.detach(failed); this.pages.delete(target.id); }
           this.status.errors.push((error as Error).message === this.t('controller.err.unrecognized_structure') ? (error as Error).message : this.t('controller.err.window_inject_failed'));
         }
       }
       const hasUnreadyPage = [...this.pages.values()].some(session => !session.detaching && session.contextId === undefined);
-      if (!this.dormant && !this.stopped && permitted.length > 0 && (this.pages.size < permitted.length || hasUnreadyPage)) {
+      if (!this.dormant && !this.stopped && hasPendingRemoteProbe) {
+        if (this.sshProbeRetries < 30) {
+          this.sshProbeRetries++;
+          this.scheduleSync(300);
+        }
+      } else {
+        this.sshProbeRetries = 0;
+      }
+      if (!this.dormant && !this.stopped && !hasPendingRemoteProbe && permitted.length > 0 && (this.pages.size < permitted.length || hasUnreadyPage)) {
         if (this.unverifiedWindowRetries < 20) {
           this.unverifiedWindowRetries++;
           this.scheduleSync(1500);
         }
-      } else {
+      } else if (!hasPendingRemoteProbe) {
         this.unverifiedWindowRetries = 0;
       }
-      const isVerified = this.verifiedBundle();
+      const isVerified = this.effectiveVerifiedStatus();
       const defaultMode = this.paused
         ? 'paused'
         : this.pages.size
@@ -390,14 +689,12 @@ export class Controller {
           : this.t('status.waiting_supported_window');
       this.publish(defaultMode, defaultMsg);
 
-      if (!this.options.fixture && this.endpoint && permitted.length > 0 && !this.inspectingBundle && (this.lastInspectedAppVersion !== this.endpoint.appVersion || this.lastInspectedSha!==this.status.bundleSha256)) {
-        const pageTarget = permitted[0];
-        if (pageTarget) {
-          try {
-            const origin = new URL(pageTarget.url).origin;
-            void this.inspectBundleInBackground(origin, this.endpoint.appVersion,this.initialBundle);this.initialBundle=undefined;
-          } catch {}
-        }
+      const localSession = [...this.pages.values()].find(s => s.sourceKind !== 'remote');
+      if (!this.options.fixture && this.endpoint && localSession && !this.inspectingBundle && (this.lastInspectedAppVersion !== this.endpoint.appVersion || this.lastInspectedSha!==localSession.bundleSha256)) {
+        try {
+          const origin = new URL(localSession.url).origin;
+          void this.inspectBundleInBackground(origin, this.endpoint.appVersion,this.initialBundle);this.initialBundle=undefined;
+        } catch {}
       }
       } finally {
       this.initialBundle=undefined;
@@ -413,11 +710,13 @@ export class Controller {
       const tree = await session.cdp.send('Page.getFrameTree');
       const frame = tree.frameTree.frame;
       if (!allowedTarget({ type: 'page', url: frame.url }, this.options.fixture?.origin)) return;
-      if(!this.options.fixture&&this.endpoint){
+      const isRemote = session.sourceKind === 'remote';
+      if(!this.options.fixture&&this.endpoint&&!isRemote){
         const activeApp = this.activeAppPath();
         if(!await this.checkPageService(frame.url,activeApp))throw new Error(this.t('controller.err.page_unverified'));
-        const bundle=await this.bundleCache.read(activeApp,this.endpoint.pid,this.endpoint.appVersion,new URL(frame.url).origin);
-        this.status.bundleSha256=bundle.hash;this.status.bundleCacheHit=bundle.cacheHit;this.status.unverifiedVersion=!this.verifiedBundle();
+        const bundle=await this.bundleCache.read(activeApp,this.endpoint.pid,this.endpoint.appVersion,new URL(frame.url).origin,undefined,'local');
+        session.bundleSha256=bundle.hash;session.verifiedBundle=isSupportedBundleHash(this.endpoint.appVersion,bundle.hash);
+        this.status.bundleSha256=bundle.hash;this.status.bundleCacheHit=bundle.cacheHit;this.status.unverifiedVersion=!this.effectiveVerifiedStatus();
         if(bundle.source)this.initialBundle=bundle.source;
       }
 
@@ -434,16 +733,42 @@ export class Controller {
         const context = await session.cdp.send('Page.createIsolatedWorld', { frameId: frame.id, worldName: WORLD });
         session.contextId = context.executionContextId;
       }
-      if(!this.verifiedBundle()){
+      if(!this.options.fixture&&this.endpoint&&isRemote){
+        const activeApp = this.activeAppPath();
+        const bundle=await this.bundleCache.read(
+          activeApp,
+          this.endpoint.pid,
+          this.endpoint.appVersion,
+          new URL(frame.url).origin,
+          () => fetchRemoteBundleHashViaCdp(session.cdp, session.contextId!),
+          session.remoteKey ?? 'remote'
+        );
+        session.bundleSha256=bundle.hash;
+        session.verifiedBundle=isSupportedBundleHash(this.endpoint.appVersion,bundle.hash);
+        this.status.bundleCacheHit=bundle.cacheHit;
+        this.status.unverifiedVersion=!this.effectiveVerifiedStatus();
+      }
+      const sessionVerified = this.verifiedBundle(session);
+      if(!sessionVerified){
         if(/^\/(?:onboarding|oauth|auth|login|sign-in)(?:\/|$)/i.test(new URL(frame.url).pathname))throw new Error(this.t('controller.err.onboarding_skipped'));
         const contract=await session.cdp.evaluate(`(async()=>{for(let i=0;i<30;i++){if(!!document.body&&((!!document.querySelector('[aria-label*="Sidebar" i],[aria-label*="侧边栏"],[data-testid*="sidebar" i],[data-testid="agent-input-box"]')&&!!document.querySelector('[data-testid="model-selector-trigger"],a[href="/history"],a[href="/customizations"],[data-testid="agent-input-box"],textarea,input'))||(/^\\/(?:settings(?:\\/[^?#]*)?|settings-standalone)$/.test(location.pathname)&&!!document.querySelector('[role="dialog"][aria-label="Settings"],[role="dialog"][aria-label="设置"],[data-testid*="settings"]')&&!!document.querySelector('[role="tablist"],nav,[role="navigation"]'))||(location.pathname==='/terminal-standalone'&&!!document.querySelector('.xterm,.monaco-editor,[data-testid*="terminal"]'))))return true;await new Promise(r=>setTimeout(r,100));}return false;})()`,session.contextId);
         if(!contract)throw new Error(this.t('controller.err.unrecognized_structure'));
+        session.domContractPassed = true;
+      }
+      const desiredFullTranslation = this.shouldUseFullTranslation(session);
+      const desiredConservative = !desiredFullTranslation;
+      if (
+        (session.registeredVerifiedBundle !== undefined && session.registeredVerifiedBundle !== sessionVerified) ||
+        (session.registeredFullTranslation !== undefined && session.registeredFullTranslation !== desiredFullTranslation)
+      ) {
+        await this.applyDocumentRegistration(session);
       }
       if(this.dormant||this.stopped||session.detaching)return;
       if (!previous?.active) previous = await session.cdp.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__?.state()', session.contextId);
       if(this.dormant||this.stopped||session.detaching)return;
       const preservedManualEn = !this.paused && session.languageMode === 'en';
-      if (previous?.active&&previous.runtimeId===this.runtimeId) {
+      const conservativeModeChanged = session.bootedConservative !== undefined && session.bootedConservative !== desiredConservative;
+      if (previous?.active&&previous.runtimeId===this.runtimeId&&!conservativeModeChanged) {
         if (previous.version === this.options.dictionary.version) await session.cdp.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.refresh()', session.contextId);
         else await session.cdp.evaluate(`globalThis.__GRAVITYBOX_ENGINE_V1__.update(${JSON.stringify(this.options.dictionary)})`, session.contextId);
         const desiredLanguageMode = this.paused ? 'en' : preservedManualEn ? 'en' : (this.locale === 'zh-Hans' ? 'zh' : 'en');
@@ -451,7 +776,8 @@ export class Controller {
           await session.cdp.evaluate(`globalThis.__GRAVITYBOX_ENGINE_V1__?.toggleLanguage?.(${JSON.stringify(desiredLanguageMode)})`, session.contextId);
         }
       }
-      else{if(previous?.active)await session.cdp.evaluate(this.hudEnabled?'globalThis.__GRAVITYBOX_ENGINE_V1__?.dispose?.({keepHud:true})':'(globalThis.__GRAVITYBOX_ENGINE_V1__?.dispose?.(),globalThis.__GRAVITYBOX_HUD_V1__?.dispose?.())',session.contextId);await session.cdp.evaluate(this.boot(session.url),session.contextId);if((this.options.fixture||preservedManualEn)&&!this.paused&&(previous?.languageMode==='en'||preservedManualEn))await session.cdp.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__?.toggleLanguage?.("en")',session.contextId);}
+      else{if(previous?.active)await session.cdp.evaluate(this.hudEnabled?'globalThis.__GRAVITYBOX_ENGINE_V1__?.dispose?.({keepHud:true})':'(globalThis.__GRAVITYBOX_ENGINE_V1__?.dispose?.(),globalThis.__GRAVITYBOX_HUD_V1__?.dispose?.())',session.contextId);await session.cdp.evaluate(this.boot(session.url,session),session.contextId);session.bootedConservative=desiredConservative;if((this.options.fixture||preservedManualEn)&&!this.paused&&(previous?.languageMode==='en'||preservedManualEn))await session.cdp.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__?.toggleLanguage?.("en")',session.contextId);}
+      if (session.bootedConservative === undefined) session.bootedConservative = desiredConservative;
       let state: any;
       for (let i = 0; i < 10; i++) {
         state = await session.cdp.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__?.state()', session.contextId);
@@ -475,16 +801,20 @@ export class Controller {
     }
     return session.updateChain;
   }
+  private async applyDocumentRegistration(session: PageSession): Promise<void> {
+    if(session.detaching||this.dormant||this.stopped)return;
+    if(session.registration){await session.cdp.send('Page.removeScriptToEvaluateOnNewDocument',{identifier:session.registration});session.registration=undefined;}
+    if(session.detaching||this.dormant||this.stopped)return;
+    const registered=await session.cdp.send('Page.addScriptToEvaluateOnNewDocument',{source:this.boot(session.url,session),worldName:WORLD});
+    if(session.detaching||this.dormant||this.stopped){await session.cdp.send('Page.removeScriptToEvaluateOnNewDocument',{identifier:registered.identifier});return;}
+    session.registration=registered.identifier;
+    session.registeredVerifiedBundle=this.verifiedBundle(session);
+    session.registeredFullTranslation=this.shouldUseFullTranslation(session);
+  }
   private refreshRegistration(session: PageSession):Promise<void> {
     if(session.detaching)return Promise.resolve();
-    session.updateChain=session.updateChain.catch(()=>{}).then(async()=>{
-      if(session.detaching||this.dormant||this.stopped)return;
-      if(session.registration){await session.cdp.send('Page.removeScriptToEvaluateOnNewDocument',{identifier:session.registration});session.registration=undefined;}
-      if(session.detaching||this.dormant||this.stopped)return;
-      const registered=await session.cdp.send('Page.addScriptToEvaluateOnNewDocument',{source:this.boot(session.url),worldName:WORLD});
-      if(session.detaching||this.dormant||this.stopped){await session.cdp.send('Page.removeScriptToEvaluateOnNewDocument',{identifier:registered.identifier});return;}
-      session.registration=registered.identifier;
-    });return session.updateChain;
+    session.updateChain=session.updateChain.catch(()=>{}).then(()=>this.applyDocumentRegistration(session));
+    return session.updateChain;
   }
   /** 后台异步对比界面包指纹，提取界面串并检测未译新词，不阻塞前台窗口注入与翻译。 */
   private async inspectBundleInBackground(origin: string, appVersion: string,initialSource?:string): Promise<void> {
@@ -499,7 +829,12 @@ export class Controller {
       this.lastInspectedSha = sha;
 
       const extracted = extractUiStrings(source, { includeJsxRuntime: true });
-      const missing = findMissingStrings(extracted, this.options.dictionary);
+      const bundleCoverage = computeBundleDictionaryCoverage(extracted, this.options.dictionary);
+      const missing = bundleCoverage.missing;
+      const highConfidenceAdaptive =
+        bundleCoverage.total >= ADAPTIVE_FULL_TRANSLATION_MIN_STRINGS &&
+        bundleCoverage.coverage >= ADAPTIVE_FULL_TRANSLATION_MIN_COVERAGE;
+      this.adaptiveFullTranslationByBundle.set(`${sha}:${this.options.dictionary.version}`, highConfidenceAdaptive);
       this.trustedCandidates = missing.filter(isSafeCandidate).map(key=>({key,kind:extractedKind(extracted.find(e=>e.text===key)?.kinds),source:'static'}));
       this.status.newStringsCount = this.trustedCandidates.length;
 
@@ -530,6 +865,20 @@ export class Controller {
 
       if (this.stopped || this.paused) return;
       const isVerified = this.verifiedBundle();
+      if (!isVerified && highConfidenceAdaptive && !this.dormant) {
+        const upgradeTargets = [...this.pages.values()].filter(
+          (s) => !s.detaching && s.sourceKind !== 'remote' && s.bundleSha256 === sha && s.domContractPassed && s.bootedConservative === true
+        );
+        if (upgradeTargets.length > 0) {
+          this.bootCache.clear();
+          await Promise.allSettled(
+            upgradeTargets.map(async (session) => {
+              await this.refreshRegistration(session);
+              await this.queueBootstrap(session, false);
+            })
+          );
+        }
+      }
       const candidateCount = this.trustedCandidates.length;
       if (!isVerified) {
         const msg = candidateCount > 0
@@ -561,6 +910,284 @@ export class Controller {
     this.publish();
   }
   dictionaryError(message?: string) { this.status.dictionaryError = message; this.publish(); }
+  private upsertConnectedRemoteSession(session: PageSession): void {
+    if (session.sourceKind !== 'remote' || !session.remoteKey) return;
+    let origin = '';
+    try { origin = new URL(session.url).origin; } catch {}
+    const existing = this.remoteSessions.get(session.remoteKey);
+    if (existing) {
+      const originChanged = Boolean(origin && existing.origin && existing.origin !== origin);
+      const changed =
+        existing.state === 'disconnected' ||
+        existing.targetId !== session.targetId ||
+        originChanged;
+      existing.targetId = session.targetId;
+      existing.hostLabel = session.hostLabel || existing.hostLabel || 'ssh-host';
+      if (origin) existing.origin = origin;
+      if (existing.state === 'disconnected' || originChanged) {
+        existing.state = 'connected';
+        existing.disconnectedAt = null;
+        existing.lastError = '';
+      }
+      existing.lastFocusedAt = Math.max(existing.lastFocusedAt, session.lastFocusedAt ?? 0);
+      if (changed) this.remoteObservedVersion++;
+      return;
+    }
+    this.remoteSessions.set(session.remoteKey, {
+      remoteKey: session.remoteKey,
+      hostLabel: session.hostLabel || 'ssh-host',
+      targetId: session.targetId,
+      origin,
+      state: 'connected',
+      email: '',
+      name: null,
+      tier: '',
+      accountType: 'unknown',
+      matchedLocalAccountId: null,
+      quota: null,
+      quotaOverview: null,
+      observedAt: null,
+      disconnectedAt: null,
+      lastError: '',
+      lastFocusedAt: session.lastFocusedAt ?? Date.now(),
+    });
+    this.remoteObservedVersion++;
+  }
+
+  private markRemoteSessionDisconnected(session: PageSession, nowMs = Date.now()): void {
+    if (session.sourceKind !== 'remote' || !session.remoteKey) return;
+    const replacement = [...this.pages.values()].find(
+      p => p !== session && !p.detaching && p.sourceKind === 'remote' && p.remoteKey === session.remoteKey
+    );
+    const entry = this.remoteSessions.get(session.remoteKey);
+    if (!entry) return;
+    if (replacement) {
+      entry.targetId = replacement.targetId;
+      entry.hostLabel = replacement.hostLabel || entry.hostLabel;
+      try {
+        const nextOrigin = new URL(replacement.url).origin;
+        if (nextOrigin) entry.origin = nextOrigin;
+      } catch {}
+      this.remoteObservedVersion++;
+      return;
+    }
+    if (entry.state !== 'disconnected') {
+      entry.state = 'disconnected';
+      entry.disconnectedAt = nowMs;
+      this.remoteObservedVersion++;
+    }
+  }
+
+  private pruneExpiredRemoteSessions(nowMs = Date.now()): void {
+    for (const [key, entry] of this.remoteSessions.entries()) {
+      if (entry.state !== 'disconnected' || entry.disconnectedAt === null) continue;
+      const stillOpen = [...this.pages.values()].some(
+        p => !p.detaching && p.sourceKind === 'remote' && p.remoteKey === key
+      );
+      if (stillOpen) continue;
+      if (nowMs - entry.disconnectedAt >= this.REMOTE_DISCONNECTED_RETENTION_MS) {
+        this.remoteSessions.delete(key);
+        this.remoteObservedVersion++;
+      }
+    }
+  }
+
+  public getActiveSshWindowsSummary(): { count: number; hosts: string[] } {
+    const remotePages = [...this.pages.values()].filter(p => !p.detaching && p.sourceKind === 'remote');
+    const hosts = [...new Set(remotePages.map(p => (p.hostLabel || '').trim()).filter(Boolean))];
+    return { count: remotePages.length, hosts };
+  }
+
+  public getFocusedContextKey(): string {
+    let localFocus = this.localFocusedAt;
+    for (const session of this.pages.values()) {
+      if (!session.detaching && session.sourceKind !== 'remote') {
+        localFocus = Math.max(localFocus, session.lastFocusedAt ?? 0);
+      }
+    }
+    let bestRemote: RemoteSessionState | null = null;
+    for (const entry of this.remoteSessions.values()) {
+      if (entry.state === 'disconnected') continue;
+      const livePage = this.pages.get(entry.targetId);
+      if (!livePage || livePage.detaching || livePage.sourceKind !== 'remote') continue;
+      const entryFocus = Math.max(entry.lastFocusedAt, livePage.lastFocusedAt ?? 0);
+      if (!bestRemote || entryFocus > bestRemote.lastFocusedAt) {
+        bestRemote = { ...entry, lastFocusedAt: entryFocus };
+      }
+    }
+    if (bestRemote && bestRemote.lastFocusedAt > localFocus) {
+      return `remote:${bestRemote.remoteKey}`;
+    }
+    return 'local';
+  }
+
+  public getRemoteSessionsSnapshot(nowMs = Date.now()): RemoteSessionState[] {
+    this.pruneExpiredRemoteSessions(nowMs);
+    return [...this.remoteSessions.values()]
+      .map(entry => ({ ...entry }))
+      .sort((a, b) => {
+        const aConn = a.state === 'disconnected' ? 0 : 1;
+        const bConn = b.state === 'disconnected' ? 0 : 1;
+        if (aConn !== bConn) return bConn - aConn;
+        return b.lastFocusedAt - a.lastFocusedAt;
+      });
+  }
+
+  public getConnectedRemoteRpcTargets(): ConnectedRemoteRpcTarget[] {
+    const pageByRemoteKey = new Map<string, { session: PageSession; rpcClient: RemoteRpcClientLike }>();
+    for (const session of this.pages.values()) {
+      if (session.detaching || session.sourceKind !== 'remote' || !session.remoteKey || !session.rpcClient) {
+        continue;
+      }
+      const existing = pageByRemoteKey.get(session.remoteKey);
+      if (
+        !existing ||
+        (existing.session.contextId === undefined && session.contextId !== undefined) ||
+        (session.lastFocusedAt ?? 0) > (existing.session.lastFocusedAt ?? 0)
+      ) {
+        pageByRemoteKey.set(session.remoteKey, { session, rpcClient: session.rpcClient });
+      }
+    }
+
+    const targets: Array<{ target: ConnectedRemoteRpcTarget; lastFocusedAt: number }> = [];
+    for (const [remoteKey, { session, rpcClient }] of pageByRemoteKey.entries()) {
+      const entry = this.remoteSessions.get(remoteKey);
+      if (entry?.state === 'disconnected') continue;
+      let origin = entry?.origin ?? '';
+      if (!origin) {
+        try {
+          origin = new URL(session.url).origin;
+        } catch {
+          origin = '';
+        }
+      }
+      const hostLabel = entry?.hostLabel || session.hostLabel || 'ssh-host';
+      targets.push({
+        lastFocusedAt: Math.max(entry?.lastFocusedAt ?? 0, session.lastFocusedAt ?? 0),
+        target: {
+          remoteKey,
+          hostLabel,
+          environmentId: buildRemoteEnvironmentId(hostLabel),
+          origin,
+          rpcClient,
+          email: entry?.email ?? '',
+          name: entry?.name ?? null,
+          accountType: entry?.accountType ?? 'unknown',
+          matchedLocalAccountId: entry?.matchedLocalAccountId ?? null,
+          state: entry?.state ?? 'connected',
+        },
+      });
+    }
+
+    targets.sort((a, b) => b.lastFocusedAt - a.lastFocusedAt);
+    return targets.map(item => item.target);
+  }
+
+  public async probeRemoteSessions(options?: {
+    force?: boolean;
+    remoteKey?: string;
+    nowMs?: number;
+    matchAccountId?: (email: string) => string | null;
+    getQuotaOverview?: (quota: QuotaData, nowMs: number) => any;
+  }): Promise<RemoteSessionState[]> {
+    const nowMs = options?.nowMs ?? Date.now();
+    this.pruneExpiredRemoteSessions(nowMs);
+    for (const session of this.pages.values()) {
+      if (!session.detaching && session.sourceKind === 'remote') {
+        this.upsertConnectedRemoteSession(session);
+      }
+    }
+
+    const candidates = [...this.remoteSessions.values()].filter(entry => {
+      if (options?.remoteKey && entry.remoteKey !== options.remoteKey) return false;
+      return entry.state !== 'disconnected';
+    });
+
+    await Promise.all(
+      candidates.map(async entry => {
+        const livePage = [...this.pages.values()].find(
+          p => !p.detaching && p.sourceKind === 'remote' && p.remoteKey === entry.remoteKey
+        );
+        if (!livePage?.rpcClient) {
+          return;
+        }
+        const cacheFresh =
+          !options?.force &&
+          entry.state === 'connected' &&
+          Boolean(entry.email) &&
+          entry.observedAt !== null &&
+          nowMs - entry.observedAt < this.REMOTE_SESSION_CACHE_TTL_MS;
+        if (cacheFresh) {
+          if (entry.email && options?.matchAccountId) {
+            entry.matchedLocalAccountId = options.matchAccountId(entry.email);
+          }
+          if (entry.quota && options?.getQuotaOverview) {
+            entry.quotaOverview = options.getQuotaOverview(entry.quota, nowMs);
+          }
+          return;
+        }
+
+        const existingInFlight = this.remoteProbeInFlight.get(entry.remoteKey);
+        if (existingInFlight) {
+          await existingInFlight;
+          return;
+        }
+
+        const probeTask = (async () => {
+          const probeNowMs = options?.nowMs ?? Date.now();
+          const res = await livePage.rpcClient!.probeUserAndQuota();
+          const current = this.remoteSessions.get(entry.remoteKey);
+          if (!current) return;
+          if (res.ok) {
+            current.state = 'connected';
+            current.disconnectedAt = null;
+            current.lastError = '';
+            current.email = res.data.email;
+            current.name = res.data.name ?? null;
+            current.tier = res.data.tier || '';
+            current.accountType = res.data.accountType ?? 'unknown';
+            current.quota = res.data.quota ?? null;
+            current.observedAt = probeNowMs;
+            current.matchedLocalAccountId = options?.matchAccountId
+              ? options.matchAccountId(current.email)
+              : current.matchedLocalAccountId;
+            current.quotaOverview = current.quota && options?.getQuotaOverview
+              ? options.getQuotaOverview(current.quota, probeNowMs)
+              : current.quotaOverview;
+            this.remoteObservedVersion++;
+            return;
+          }
+          if (res.authExpired) {
+            current.state = 'auth_expired';
+            current.lastError = 'auth_expired';
+            this.remoteObservedVersion++;
+          } else if (res.reason !== 'context_unavailable') {
+            current.lastError = res.reason || 'rpc_error';
+            this.remoteObservedVersion++;
+          }
+        })().finally(() => {
+          this.remoteProbeInFlight.delete(entry.remoteKey);
+        });
+
+        this.remoteProbeInFlight.set(entry.remoteKey, probeTask);
+        await probeTask;
+      })
+    );
+
+    if (options?.matchAccountId || options?.getQuotaOverview) {
+      for (const entry of this.remoteSessions.values()) {
+        if (entry.email && options?.matchAccountId) {
+          entry.matchedLocalAccountId = options.matchAccountId(entry.email);
+        }
+        if (entry.quota && options?.getQuotaOverview) {
+          entry.quotaOverview = options.getQuotaOverview(entry.quota, nowMs);
+        }
+      }
+    }
+
+    return this.getRemoteSessionsSnapshot(nowMs);
+  }
+
   private async detach(session: PageSession) {
     session.detaching=true;
     this.hudBridge.detachTarget(session.targetId);
@@ -579,7 +1206,13 @@ export class Controller {
     session.cdp.close();
     if (restorationFailed) this.status.errors.push(this.t('controller.err.window_lost_restore'));
   }
-  private async disconnectPages() { for (const session of this.pages.values()) await this.detach(session); this.pages.clear(); }
+  private async disconnectPages() {
+    for (const session of this.pages.values()) {
+      this.markRemoteSessionDisconnected(session);
+      await this.detach(session);
+    }
+    this.pages.clear();
+  }
   private async quiescePages() {
     await this.connecting?.catch(() => {});
     if (this.syncing) await new Promise<void>(resolve => this.syncWaiters.push(resolve));
@@ -618,7 +1251,7 @@ export class Controller {
           '(globalThis.__GRAVITYBOX_PENDING_BOOT__?.cancel?.(),globalThis.__GRAVITYBOX_ENGINE_V1__?.dispose?.({keepHud:true}))',
           session.contextId
         );
-        await session.cdp.evaluate(this.boot(session.url), session.contextId);
+        await session.cdp.evaluate(this.boot(session.url, session), session.contextId);
         await session.cdp.evaluate(
           `(globalThis.__GRAVITYBOX_ATTACH_HUD__?.(), globalThis.__GRAVITYBOX_HUD_V1__?.setLanguage?.(${JSON.stringify(hudLocale)}), globalThis.__GRAVITYBOX_HUD_V1__?.setEnabled?.(true))`,
           session.contextId
@@ -850,7 +1483,13 @@ export class Controller {
   snapshot(): AssistantStatus {
     this.status.rssMB = Math.round(process.memoryUsage().rss / 1024 / 1024 * 10) / 10;
     this.status.updatedAt = new Date().toISOString();
-    return { ...this.status, errors: [...this.status.errors] };
+    const sshSummary = this.getActiveSshWindowsSummary();
+    this.status.sshWindows = sshSummary.count;
+    this.status.sshWindowsCount = sshSummary.count;
+    this.status.activeSshHosts = sshSummary.hosts;
+    this.status.focusedContextKey = this.getFocusedContextKey();
+    this.status.remoteObservedVersion = this.remoteObservedVersion;
+    return { ...this.status, errors: [...this.status.errors], activeSshHosts: [...sshSummary.hosts] };
   }
   async coverageReport(): Promise<CoverageReport | undefined> {
     if (this.coverage && (this.coverage.appVersion !== this.status.appVersion || this.coverage.bundleSha256 !== this.status.bundleSha256)) {
@@ -943,8 +1582,9 @@ export class Controller {
     return { busy: false, checked };
   }
   async maintenancePreflight(){
-    if(!this.endpoint||!this.pages.size)return{ok:true,pid:0};
-    const endpoint=await discover(this.options.appPath,this.options.profile);if(!endpoint||endpoint.pid!==this.endpoint.pid)return{ok:true,pid:endpoint?.pid??0};
+    const sshSummary = this.getActiveSshWindowsSummary();
+    if(!this.endpoint||!this.pages.size)return{ok:true,pid:0,activeSshWindowsCount:sshSummary.count,activeSshHosts:sshSummary.hosts};
+    const endpoint=await discover(this.options.appPath,this.options.profile);if(!endpoint||endpoint.pid!==this.endpoint.pid)return{ok:true,pid:endpoint?.pid??0,activeSshWindowsCount:sshSummary.count,activeSshHosts:sshSummary.hosts};
     const agentTask=await this.hasRunningAgentTask();
     if(agentTask.busy)throw new Error(agentTask.reason?this.t('controller.preflight.reason_wait', { reason: agentTask.reason }):this.t('controller.preflight.task_wait'));
     for(const page of this.pages.values()){
@@ -952,7 +1592,7 @@ export class Controller {
       const state=await page.cdp.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__?.maintenanceState?.()',page.contextId);
       if(state?.busy)throw new Error(this.t('controller.preflight.save_drafts'));
     }
-    return{ok:true,pid:endpoint.pid};
+    return{ok:true,pid:endpoint.pid,activeSshWindowsCount:sshSummary.count,activeSshHosts:sshSummary.hosts};
   }
   async prepareDeepScan() {
     if(this.options.fixture)throw new Error(this.t('controller.scan.fixture_unsupported'));

@@ -85,6 +85,12 @@ export const HUD_I18N = {
     statusNewChat: '新对话',
     statusNoData: '暂无数据',
     dataUnavailableAria: '数据暂不可用',
+    remoteHostBadge: 'SSH · {host}',
+    remoteHostFallback: 'SSH · 远程主机',
+    remoteObservedDur: '已观测 {dur}',
+    remoteUnbridgedNote: '远程 SSH 对话（暂未获取远端遥测），展示页面实时状态与本地计时',
+    remoteStaleNote: '远程数据连接中断，沿用最近快照',
+    statusRemoteUnbridged: '远程计时中',
   },
   en: {
     toolbarLabel: 'Antigravity Conversation Telemetry Bar',
@@ -170,6 +176,12 @@ export const HUD_I18N = {
     statusNewChat: 'New Chat',
     statusNoData: 'No Data',
     dataUnavailableAria: 'Data unavailable',
+    remoteHostBadge: 'SSH · {host}',
+    remoteHostFallback: 'SSH · Remote host',
+    remoteObservedDur: 'Observed {dur}',
+    remoteUnbridgedNote: 'Remote SSH conversation (telemetry unavailable); showing live page state and local timer',
+    remoteStaleNote: 'Remote connection interrupted; showing last snapshot',
+    statusRemoteUnbridged: 'Remote timing',
   },
 };
 

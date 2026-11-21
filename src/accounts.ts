@@ -57,6 +57,7 @@ import {
   fuseQuotaData,
   generateDeviceProfile,
   groupToQuotaGroup,
+  hasExpiredQuotaWindow,
   localizeStoredQuotaError,
   modelQuotaFromNormalized,
   normalizedModelFromStored,
@@ -119,6 +120,7 @@ export {
   localizeStoredQuotaError,
   type AccountErrorCode,
   groupToQuotaGroup,
+  hasExpiredQuotaWindow,
   modelQuotaFromNormalized,
   normalizedModelFromStored,
   pickNextReset,
@@ -164,6 +166,7 @@ export class AccountsManager {
   private mutex = new ReentrantMutex();
   private liveProbeCache: { status: LiveLanguageServerStatus | null; expiresAt: number } | null = null;
   private inFlightProbe: Promise<LiveLanguageServerStatus | null> | null = null;
+  private inFlightForceProbe: Promise<LiveLanguageServerStatus | null> | null = null;
   private providerOverride?: CloudProviderContext;
   private providerContextCache: { value: CloudProviderContext; expiresAt: number } | null = null;
   private inFlightProviderContext: Promise<CloudProviderContext | null> | null = null;
@@ -1568,11 +1571,13 @@ export class AccountsManager {
   async probeLiveLanguageServer(fetchImpl: typeof fetch = globalThis.fetch, options: { forceRefresh?: boolean } = {}): Promise<LiveLanguageServerStatus | null> {
     if (process.env.GRAVITYBOX_PROBE_LS === 'false') return null;
     const now = Date.now();
-    if (fetchImpl === globalThis.fetch && this.liveProbeCache && now < (options.forceRefresh ? this.liveProbeCache.expiresAt - 1300 : this.liveProbeCache.expiresAt)) {
+    const forceRefresh = options.forceRefresh === true;
+    if (fetchImpl === globalThis.fetch && !forceRefresh && this.liveProbeCache && now < this.liveProbeCache.expiresAt) {
       return this.liveProbeCache.status;
     }
-    if (fetchImpl === globalThis.fetch && this.inFlightProbe) {
-      return await this.inFlightProbe;
+    if (fetchImpl === globalThis.fetch) {
+      const activeFlight = forceRefresh ? this.inFlightForceProbe : (this.inFlightForceProbe ?? this.inFlightProbe);
+      if (activeFlight) return await activeFlight;
     }
 
     const doProbe = () => probeLiveLanguageServerOnce(this.target, fetchImpl, options, {
@@ -1585,13 +1590,18 @@ export class AccountsManager {
     }
 
     const probePromise = doProbe();
-    this.inFlightProbe = probePromise;
+    if (forceRefresh) this.inFlightForceProbe = probePromise;
+    else this.inFlightProbe = probePromise;
     try {
       const res = await probePromise;
       this.liveProbeCache = { status: res, expiresAt: Date.now() + 5000 };
       return res;
     } finally {
-      this.inFlightProbe = null;
+      if (forceRefresh) {
+        if (this.inFlightForceProbe === probePromise) this.inFlightForceProbe = null;
+      } else if (this.inFlightProbe === probePromise) {
+        this.inFlightProbe = null;
+      }
     }
   }
 
@@ -1963,11 +1973,18 @@ export class AccountsManager {
     const liveSummaryFailed = lsStatus?.quota?.refresh_state?.endpointsAttempted?.includes('live:RetrieveUserQuotaSummary') === true
       && lsStatus.quota.refresh_state?.endpointsSucceeded?.includes('live:RetrieveUserQuotaSummary') !== true
       && (lsStatus.quota.quota_groups?.length ?? 0) === 0;
-    const canFallbackToCloud = liveSummaryFailed && Boolean(account.token?.refresh_token);
-    if (lsStatus && account.email && lsStatus.email && lsStatus.email.trim().toLowerCase() === account.email.trim().toLowerCase() && (lsStatus.quota.models?.length ?? 0) > 0 && !canFallbackToCloud) {
-      const fresh = lsStatus.quota;
+    const hasExpiredLiveWindow = hasExpiredQuotaWindow(lsStatus?.quota, Date.now());
+    const emailMatchedLive = Boolean(
+      lsStatus && account.email && lsStatus.email &&
+      lsStatus.email.trim().toLowerCase() === account.email.trim().toLowerCase() &&
+      (lsStatus.quota.models?.length ?? 0) > 0
+    );
+    const canFallbackToCloud = (liveSummaryFailed || hasExpiredLiveWindow) && Boolean(account.token?.refresh_token);
+
+    const persistLiveResult = async (): Promise<Account> => {
+      const fresh = lsStatus!.quota;
       const old = account.quota;
-      const allowFreeDowngrade = lsStatus.accountType !== 'enterprise_vertex' && !liveSummaryFailed;
+      const allowFreeDowngrade = lsStatus!.accountType !== 'enterprise_vertex' && !liveSummaryFailed;
       const resolvedTier = mergeSubscriptionTier(fresh.subscription_tier, old?.subscription_tier, {
         allowFreeDowngrade,
       });
@@ -1991,10 +2008,32 @@ export class AccountsManager {
       };
       account.quota_refresh_error = null;
       account.quota_refresh_error_code = null;
-      if (lsStatus.name && !account.name) account.name = lsStatus.name;
+      if (lsStatus!.name && !account.name) account.name = lsStatus!.name;
       signal?.throwIfAborted();
       await this.saveRefreshedAccount(account, account.token.refresh_token, signal);
       return account;
+    };
+
+    if (emailMatchedLive && !canFallbackToCloud) {
+      return await persistLiveResult();
+    }
+
+    if (emailMatchedLive && hasExpiredLiveWindow && !liveSummaryFailed) {
+      try {
+        const providerContext = await this.resolveProviderContext(fetchImpl);
+        await fetchCloudQuotaForAccount({
+          account,
+          providerContext,
+          fetchImpl,
+          signal,
+          onTokenRefreshed: (acc, prevRefresh) => this.saveRefreshedAccount(acc, prevRefresh, signal),
+        });
+        await this.saveRefreshedAccount(account, account.token.refresh_token, signal);
+        return account;
+      } catch (cloudErr) {
+        if (signal?.aborted) throw cloudErr;
+        return await persistLiveResult();
+      }
     }
 
     const providerContext=await this.resolveProviderContext(fetchImpl);
@@ -2025,7 +2064,6 @@ export class AccountsManager {
       return bActive - aActive;
     });
     if (fetchImpl === globalThis.fetch && enabledAccounts.length > 0) {
-      void this.probeLiveLanguageServer(fetchImpl, { forceRefresh: true }).catch(() => null);
       void this.resolveProviderContext(fetchImpl).catch(() => null);
     }
     const resultsByIndex: Array<Account | undefined> = new Array(enabledAccounts.length);

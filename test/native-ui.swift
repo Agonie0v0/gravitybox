@@ -2473,6 +2473,57 @@ import Cocoa
             freeDash.view.layoutSubtreeIfNeeded(); pump()
             check(freeDash.standaloneDivider.isHidden && freeDash.standaloneQuotaStack.isHidden, "Free overview with disabled Argon must show zero standalone rows")
 
+            // Future unknown multi-window standalone pool (5h + weekly + daily) & ModelIcons graceful fallback
+            check(ModelIcons.brands(for: "Nova Models").isEmpty && ModelIcons.image("nova") == nil && ModelIcons.fallbackIcon() != nil, "Unknown future pool degrades cleanly to fallback icon without mislabeling or crashing")
+            let fallbackHeader = MenuQuotaHelpers.groupHeader("Nova Models", brands: ["nova"], fontSize: 11.5, iconSize: 13)
+            check((fallbackHeader as? NSStackView)?.arrangedSubviews.contains(where: { $0 is NSImageView }) == true, "MenuQuotaHelpers.groupHeader renders fallback sparkles icon for unknown future pool")
+            let futureIso5h = ISO8601DateFormatter().string(from: Date().addingTimeInterval(3 * 3600 + 25 * 60))
+            let futureIsoDaily = ISO8601DateFormatter().string(from: Date().addingTimeInterval(11 * 3600 + 10 * 60))
+            let futureIsoWeekly = ISO8601DateFormatter().string(from: Date().addingTimeInterval(4 * 24 * 3600 + 2 * 3600))
+            let multiWinStandaloneAcc: [String: Any] = [
+                "activeEmail": "future@example.invalid",
+                "activeName": "Future User",
+                "activeTier": "PRO",
+                "isLiveVerified": true,
+                "quotaLastUpdated": Date().timeIntervalSince1970,
+                "quotaGroups": [
+                    ["key": "gemini", "displayName": "Gemini", "brands": ["gemini"], "isStandalone": false, "availability": "available", "quotaState": "known", "windows": [["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.85, "stale": false, "resetTime": futureIso5h]]],
+                    ["key": "claude_gpt", "displayName": "Claude/GPT", "brands": ["claude", "gpt"], "isStandalone": false, "availability": "available", "quotaState": "known", "windows": [["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.90, "stale": false, "resetTime": futureIso5h]]],
+                    ["key": "gemini-pro-orchestrator-neon", "displayName": "Orchestrator (Neon)", "brands": ["gemini"], "isStandalone": true, "availability": "unknown", "quotaState": "stale", "windows": [["id": "model", "period": "unspecified", "label": "模型配额", "known": true, "remaining": 1.0, "stale": true]]],
+                    [
+                        "key": "nova-models",
+                        "displayName": "Nova Models",
+                        "brands": ["nova"],
+                        "isStandalone": true,
+                        "availability": "available",
+                        "quotaState": "known",
+                        "windows": [
+                            ["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.72, "stale": false, "resetTime": futureIso5h],
+                            ["id": "weekly", "period": "weekly", "label": "每周", "known": true, "remaining": 0.44, "stale": false, "resetTime": futureIsoWeekly]
+                        ]
+                    ],
+                    [
+                        "key": "pulse-daily",
+                        "displayName": "Pulse Daily",
+                        "brands": [],
+                        "isStandalone": true,
+                        "availability": "available",
+                        "quotaState": "known",
+                        "windows": [
+                            ["id": "daily", "period": "daily", "label": "每日", "known": true, "remaining": 0.61, "stale": false, "resetTime": futureIsoDaily]
+                        ]
+                    ]
+                ]
+            ]
+            let multiWinDash = DashboardPage(app: dashHost)
+            multiWinDash.view.frame = NSRect(x: 0, y: 0, width: 920, height: 760)
+            multiWinDash.renderSummary(["accounts": multiWinStandaloneAcc], isStaleFallback: false)
+            multiWinDash.view.layoutSubtreeIfNeeded(); pump()
+            let multiWinTexts = allTextValues(multiWinDash.view)
+            check(!multiWinDash.standaloneDivider.isHidden && !multiWinDash.standaloneQuotaStack.isHidden, "Future multi-window standalone pools render standalone section")
+            check(multiWinTexts.contains("Nova Models · 5 小时") && multiWinTexts.contains("Nova Models · 每周") && multiWinTexts.contains("Pulse Daily · 每日"), "Dashboard renders all 5h, weekly, and daily windows for future standalone pools")
+            check(!multiWinTexts.contains(where: { $0.contains("Orchestrator") }), "Dashboard must never render Orchestrator meta-models as standalone pools")
+
             let singleWindowFreeGroups: [[String: Any]] = [
                 [
                     "key": "gemini",
@@ -3003,6 +3054,34 @@ import Cocoa
             let foldedZhTexts = allTextValues(foldedSheet.sheet.contentView!)
             check(foldedZhTexts.contains("涵盖变体：Low · Medium · High · XHigh · Orchestrator"), "Folded group card must list combined variants: \(foldedZhTexts)")
 
+            // Non-Gemini / standalone orchestrator rows must never fabricate gemini-4-<codename>; sibling matching + hostOrder must work cleanly
+            let standaloneNonGeminiOrch = PricingSyncSheetController.groupUnpricedLiveModels([
+                ["key": "gemini-pro-orchestrator-opus", "displayName": "Orchestrator (Opus)", "disabled": false],
+                ["key": "gemini-flash-worker-agy", "displayName": "Orchestrator (Claude Opus 6)", "disabled": false],
+            ])
+            check(standaloneNonGeminiOrch.count == 2, "Standalone non-Gemini orchestrators remain distinct without fabricating gemini-4-*")
+            check(standaloneNonGeminiOrch[0].key == "gemini-pro-orchestrator-opus" && standaloneNonGeminiOrch[0].displayName == "Orchestrator (Opus)", "Must not fabricate gemini-4-opus for unmatched Opus orchestrator (got \(standaloneNonGeminiOrch[0]))")
+            check(standaloneNonGeminiOrch[1].key == "gemini-flash-worker-agy" && standaloneNonGeminiOrch[1].displayName == "Orchestrator (Claude Opus 6)", "Must preserve canonical key/displayName for unmatched Claude Opus orchestrator (got \(standaloneNonGeminiOrch[1]))")
+
+            let pairedNonGeminiOrch = PricingSyncSheetController.groupUnpricedLiveModels([
+                ["key": "claude-opus-6-high", "displayName": "Claude Opus 6 (High)", "disabled": false, "hostOrder": 2],
+                ["key": "gemini-flash-worker-agy", "displayName": "Claude Opus 6 (Orchestrator)", "disabled": false, "hostOrder": 2],
+                ["key": "gemini-5-zephyr-extra", "displayName": "Gemini 5 Zephyr (Extra)", "disabled": false, "hostOrder": 0],
+            ])
+            check(pairedNonGeminiOrch.count == 2, "Paired non-Gemini orchestrator folds into its sibling while respecting hostOrder")
+            check(pairedNonGeminiOrch[0].key == "gemini-5-zephyr" && pairedNonGeminiOrch[0].displayName == "Gemini 5 Zephyr" && pairedNonGeminiOrch[0].variants == ["Extra"], "Unpriced grouping honors backend hostOrder and -extra variant (got \(pairedNonGeminiOrch[0]))")
+            check(pairedNonGeminiOrch[1].key == "claude-opus-6" && pairedNonGeminiOrch[1].displayName == "Claude Opus 6" && pairedNonGeminiOrch[1].variants == ["High", "Orchestrator"], "Non-Gemini orchestrator folds into matching Claude sibling cleanly (got \(pairedNonGeminiOrch[1]))")
+
+            let customHostOrder = PricingSyncSheetController.sortCurrentPlanKeys(
+                ["gemini-4-neon", "gemini-4-zephyr", "claude-opus-5-5"],
+                catalogState: [
+                    "gemini-4-zephyr": ["availability": "available", "hostOrder": 0],
+                    "claude-opus-5-5": ["availability": "available", "hostOrder": 1],
+                    "gemini-4-neon": ["availability": "available", "hostOrder": 2],
+                ]
+            )
+            check(customHostOrder == ["gemini-4-zephyr", "claude-opus-5-5", "gemini-4-neon"], "sortCurrentPlanKeys must follow backend hostOrder without hardcoded codename precedence (got \(customHostOrder))")
+
             _ = L10n.shared.setLanguage("en", notify: true); pump()
             let enPartialOverview = DashboardPage(app: partialHost)
             let enPartialUsage = UsagePage(app: partialHost)
@@ -3358,6 +3437,1164 @@ import Cocoa
             let designSeg = DesignSegmentedControl(labels: ["One", "Two", "Three"])
             designSeg.moveSelection(by: 2)
             check(designSeg.selectedSegment == 2, "OPT-16: DesignSegmentedControl right arrow moves selection to index 2")
+        }
+
+        // Milestone 1 SSH: 隔离验证 Overview / MenuPanel 远程只读上下文切换、降级态与清空自动回退
+        do {
+            L10n.shared.setLanguage("zh-Hans", notify: false)
+            let sshHost = Assistant(state: state.appendingPathComponent("ssh-context-ui"))
+            sshHost.configuration = try ConfigurationStore(state: sshHost.state)
+            sshHost.bridge = BackendBridge(resources: state, state: sshHost.state)
+            sshHost.reachable = true
+            let nowTs = Date().timeIntervalSince1970
+            let localAccount: [String: Any] = [
+                "id": "acc-local",
+                "name": "LocalUser",
+                "email": "local@example.invalid",
+                "subscription_tier": "PRO",
+                "revision": "rev-local-ssh",
+                "quota_last_updated": Int(nowTs),
+                "quota": ["last_updated": nowTs, "subscription_tier": "PRO"],
+                "quotaGroups": [
+                    [
+                        "key": "gemini",
+                        "displayName": "Gemini",
+                        "summaryLabel": "Gemini",
+                        "brands": ["gemini"],
+                        "isStandalone": false,
+                        "availability": "available",
+                        "quotaState": "known",
+                        "windows": [
+                            ["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.84, "stale": false, "resetCountdown": "4 小时 15 分后重置"],
+                            ["id": "weekly", "period": "weekly", "label": "每周", "known": true, "remaining": 0.90, "stale": false, "resetCountdown": "6 天 2 小时后重置"]
+                        ]
+                    ]
+                ]
+            ]
+            sshHost.cachedAccounts = [localAccount]
+            sshHost.activeAccountId = "acc-local"
+            sshHost.statusValue = LiveStatus([
+                "mode": "connected",
+                "running": true,
+                "runningChannel": "stable",
+                "liveAccountEmail": "local@example.invalid",
+                "accountsRevision": "rev-local-ssh"
+            ])
+            var requestedDashboardEnvs: [String] = []
+            let allUsage: [String: Any] = [
+                "selectedEnvironmentId": "all",
+                "todayTokens": 18000,
+                "totalTokens": 300000,
+                "estimatedUsd": 0.20,
+                "allTimeEstimatedUsd": 3.00,
+                "requestCount": 7,
+                "totalRequestCount": 60,
+                "todayPricedModels": 1,
+                "todayUnpricedModels": 0,
+                "pricedModels": 1,
+                "unpricedModels": 0,
+                "databasesScanned": 10,
+                "databasesDiscovered": 10,
+                "availability": "complete",
+                "environmentBreakdown": [
+                    "local_tokens": 12000, "ssh_tokens": 6000,
+                    "local_share_pct": 67, "ssh_share_pct": 33,
+                    "has_ssh_data": true
+                ],
+                "todayByModel": [
+                    ["model": "gemini-3.8-flash-n", "totalTokens": 18000, "requestCount": 7, "estimatedUsd": 0.20, "priced": true]
+                ]
+            ]
+            let localOnlyUsage: [String: Any] = [
+                "selectedEnvironmentId": "local",
+                "todayTokens": 12000,
+                "totalTokens": 240000,
+                "estimatedUsd": 0.12,
+                "allTimeEstimatedUsd": 2.40,
+                "requestCount": 4,
+                "totalRequestCount": 48,
+                "todayPricedModels": 1,
+                "todayUnpricedModels": 0,
+                "pricedModels": 1,
+                "unpricedModels": 0,
+                "databasesScanned": 10,
+                "databasesDiscovered": 10,
+                "availability": "complete",
+                "todayByModel": [
+                    ["model": "gemini-3.8-flash-n", "totalTokens": 12000, "requestCount": 4, "estimatedUsd": 0.12, "priced": true]
+                ]
+            ]
+            let sshOnlyUsage: [String: Any] = [
+                "selectedEnvironmentId": "ssh:demo-env-1",
+                "todayTokens": 6000,
+                "totalTokens": 60000,
+                "estimatedUsd": 0.08,
+                "allTimeEstimatedUsd": 0.60,
+                "requestCount": 3,
+                "totalRequestCount": 12,
+                "todayPricedModels": 1,
+                "todayUnpricedModels": 0,
+                "pricedModels": 1,
+                "unpricedModels": 0,
+                "databasesScanned": 10,
+                "databasesDiscovered": 10,
+                "availability": "complete",
+                "todayByModel": [
+                    ["model": "gemini-3.8-flash-n", "totalTokens": 6000, "requestCount": 3, "estimatedUsd": 0.08, "priced": true]
+                ]
+            ]
+            let baseAccountsPayload = localAccount.merging([
+                "activeName": "LocalUser",
+                "activeEmail": "local@example.invalid",
+                "activeTier": "PRO",
+                "liveAccountEmail": "local@example.invalid",
+                "isLiveVerified": true
+            ]) { _, new in new }
+            let localSummary: [String: Any] = [
+                "ok": true,
+                "accounts": baseAccountsPayload,
+                "usage": allUsage,
+                "remoteSessions": [],
+                "focusedContextKey": "local"
+            ]
+            sshHost.bridge.fixtureReply = { payload in
+                let cmd = payload["command"] as? String ?? ""
+                if cmd == "account_list" {
+                    return ["ok": true, "activeId": "acc-local", "currentAccountId": "acc-local", "accounts": [localAccount], "pendingSwitch": false]
+                }
+                if cmd == "dashboard_summary" {
+                    let reqEnv = (payload["environmentId"] as? String) ?? "all"
+                    requestedDashboardEnvs.append(reqEnv)
+                    let selectedUsage: [String: Any] = reqEnv == "local" ? localOnlyUsage : (reqEnv == "ssh:demo-env-1" ? sshOnlyUsage : allUsage)
+                    return [
+                        "ok": true,
+                        "accounts": baseAccountsPayload,
+                        "usage": selectedUsage,
+                        "remoteSessions": sshHost.remoteSessions,
+                        "focusedContextKey": "local"
+                    ]
+                }
+                return ["ok": true]
+            }
+
+            let sshOverview = DashboardPage(app: sshHost)
+            sshHost.overview = sshOverview
+            sshOverview.view.frame = NSRect(x: 0, y: 0, width: 960, height: 680)
+            let sshOverviewWin = makeHeadlessHostWindow(width: 960, height: 680)
+            sshOverviewWin.contentView = sshOverview.view
+            sshOverview.renderSummary(localSummary, isStaleFallback: false)
+
+            let sshMenu = sshHost.ensureMenuPanelController()
+            let sshMenuWin = makeHeadlessHostWindow(width: MenuPanelController.panelWidth, height: MenuPanelController.defaultPanelHeight)
+            sshMenuWin.contentViewController = sshMenu
+            sshMenu.panelWillOpen()
+            sshMenu.selectTab(1, persist: false)
+            pump()
+
+            check(sshOverview.contextSwitcherRow.isHidden, "SSH: Overview contextSwitcherRow must remain hidden when remoteSessions is empty")
+            check(sshMenu.quotaContextSwitcherRow.isHidden, "SSH: Menu quotaContextSwitcherRow must remain hidden when remoteSessions is empty")
+            check(sshMenu.accountsLocalOnlyNoteLabel.isHidden, "SSH: Menu accountsLocalOnlyNoteLabel must remain hidden when remoteSessions is empty")
+
+            func makeRemoteSession(
+                remoteKey: String = "rk-test",
+                environmentId: String = "ssh:demo-env-1",
+                hostLabel: String = "demo-ssh-host",
+                state: String,
+                includeQuota: Bool,
+                includeStandalone: Bool = false
+            ) -> [String: Any] {
+                var row: [String: Any] = [
+                    "remoteKey": remoteKey,
+                    "environmentId": environmentId,
+                    "hostLabel": hostLabel,
+                    "state": state,
+                    "email": "remote-only@example.invalid",
+                    "name": "Remote User",
+                    "subscription_tier": "ULTRA",
+                    "matchedLocalAccountId": NSNull(),
+                    "observedAt": nowTs * 1000.0,
+                    "quotaLastUpdated": nowTs,
+                    "availability": includeQuota ? "available" : "unavailable"
+                ]
+                var groups: [[String: Any]] = includeQuota ? [
+                    [
+                        "key": "gemini",
+                        "displayName": "Gemini",
+                        "summaryLabel": "Gemini",
+                        "brands": ["gemini"],
+                        "isStandalone": false,
+                        "availability": "available",
+                        "quotaState": "known",
+                        "windows": [
+                            ["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.91, "stale": false, "resetCountdown": "4 小时 40 分后重置"],
+                            ["id": "weekly", "period": "weekly", "label": "每周", "known": true, "remaining": 0.77, "stale": false, "resetCountdown": "5 天 20 小时后重置"]
+                        ]
+                    ]
+                ] : []
+                if includeStandalone {
+                    groups.append([
+                        "key": "standalone-argon",
+                        "displayName": "Argon",
+                        "summaryLabel": "Argon",
+                        "brands": ["argon"],
+                        "isStandalone": true,
+                        "availability": "available",
+                        "quotaState": "known",
+                        "windows": [
+                            ["id": "weekly", "period": "weekly", "label": "每周", "known": true, "remaining": 0.85, "stale": false, "resetCountdown": "6 天后重置"]
+                        ]
+                    ])
+                }
+                row["quotaGroups"] = groups
+                return row
+            }
+
+            // 1. 注入 1 个不同账号远端会话：总览显示 3 段（总计 / 本机 / SSH），且总览与菜单栏均使用 120Hz DesignSegmentedControl
+            sshHost.syncRemoteSessionsFromPayload([makeRemoteSession(state: "connected", includeQuota: true, includeStandalone: true)], focusedKey: "local")
+            pump()
+            sshOverviewWin.contentView?.layoutSubtreeIfNeeded()
+            check(!sshOverview.contextSwitcherRow.isHidden, "SSH: Overview contextSwitcherRow must appear when remoteSessions is non-empty")
+            check(sshOverview.contextSwitcher.segmentCount == 3, "SSH: Overview switcher must have 3 segments (All / Local / SSH) for 1 SSH host (got \(sshOverview.contextSwitcher.segmentCount))")
+            check(sshHost.overviewEnvironmentKey == "all", "SSH: Overview must default to 'all' (总计) when SSH connects")
+            check(!sshMenu.quotaContextSwitcherRow.isHidden, "SSH: Menu quotaContextSwitcherRow must appear when remoteSessions is non-empty")
+            check(sshMenu.quotaContextSwitcher.segmentCount == 2, "SSH: Menu switcher must have 2 segments (Local / SSH)")
+            check(sshOverview.todayTokensMetric.stringValue == "18K" && sshOverview.todayRequestsMetric.stringValue == "7", "SSH: Overview 'all' must show combined usage (18K / 7)")
+            check(!sshOverview.envSharePill.isHidden && sshOverview.envSharePill.title.contains("67%"), "SSH: Overview 'all' must show environment share pill")
+
+            let baselineMetricsY = sshOverview.metricsContainer?.frame.minY ?? -1
+            let baselineBentoY = sshOverview.bentoRow.frame.minY
+
+            sshMenu.selectTab(2, persist: false); pump()
+            check(!sshMenu.accountsLocalOnlyNoteLabel.isHidden, "SSH: Menu accountsLocalOnlyNoteLabel must disclose local-only scope when remoteSessions is non-empty")
+            sshMenu.selectTab(1, persist: false); pump()
+
+            // 菜单栏切换不影响总览当前视角；总览切到本机后，仅展示本机用量且卡片零位移
+            sshHost.selectQuotaContext("remote:rk-test", userInitiated: true)
+            pump()
+            check(sshHost.selectedContextKey == "remote:rk-test", "SSH: selectQuotaContext must activate remote:rk-test in MenuPanel")
+            check(sshHost.overviewEnvironmentKey == "all", "SSH: Menu context switch must not override Overview environment selection")
+            check(sshMenu.quotaEmailLabel.stringValue == "remote-only@example.invalid", "SSH: Menu quota tab must display remote email")
+            check(!sshMenu.quotaStatusBadge.isHidden && sshMenu.quotaStatusBadge.title == "远程只读", "SSH: Menu quotaStatusBadge must display 远程只读")
+            check(!sshMenu.quotaGroupsContainer.isHidden, "SSH: Menu quotaGroupsContainer must remain visible with remote quota groups")
+            check(sshMenu.quotaFooterLabel.stringValue.contains("与本机不同账号"), "SSH: Menu footer must disclose different account from local (got \(sshMenu.quotaFooterLabel.stringValue))")
+
+            sshHost.selectOverviewEnvironment("local")
+            pump()
+            sshOverviewWin.contentView?.layoutSubtreeIfNeeded()
+            check(requestedDashboardEnvs.contains("local"), "SSH: Switching Overview to local must query dashboard_summary with environmentId=local")
+            check(sshOverview.todayTokensMetric.stringValue == "12K" && sshOverview.todayRequestsMetric.stringValue == "4", "SSH: Overview local view must isolate local usage (12K / 4), got \(sshOverview.todayTokensMetric.stringValue)/\(sshOverview.todayRequestsMetric.stringValue)")
+            check(abs((sshOverview.metricsContainer?.frame.minY ?? -99) - baselineMetricsY) < 0.5, "SSH: Overview metricsContainer must not shift vertically when switching to local")
+            check(abs(sshOverview.bentoRow.frame.minY - baselineBentoY) < 0.5, "SSH: Overview bentoRow must not shift vertically when switching to local")
+
+            sshHost.selectOverviewEnvironment("env:ssh:demo-env-1")
+            pump()
+            sshOverviewWin.contentView?.layoutSubtreeIfNeeded()
+            check(requestedDashboardEnvs.contains("ssh:demo-env-1"), "SSH: Switching Overview to SSH must query dashboard_summary with environmentId=ssh:demo-env-1")
+            check(sshOverview.todayTokensMetric.stringValue == "6K" && sshOverview.todayRequestsMetric.stringValue == "3", "SSH: Overview SSH view must isolate SSH usage (6K / 3), got \(sshOverview.todayTokensMetric.stringValue)/\(sshOverview.todayRequestsMetric.stringValue)")
+            check(sshOverview.activeEmailLabel.stringValue == "remote-only@example.invalid", "SSH: Overview must display remote email in read-only hero (got \(sshOverview.activeEmailLabel.stringValue))")
+            check(!sshOverview.currentAccountPill.isHidden && sshOverview.currentAccountPill.title == "远程只读", "SSH: Overview currentAccountPill must display 远程只读")
+            check(!sshOverview.contextComparisonPill.isHidden && sshOverview.contextComparisonPill.title.contains("与本机不同账号"), "SSH: Overview contextComparisonPill must disclose different account from local (got \(sshOverview.contextComparisonPill.title))")
+            check(abs((sshOverview.metricsContainer?.frame.minY ?? -99) - baselineMetricsY) < 0.5, "SSH: Overview metricsContainer must not shift vertically when switching to SSH with different quota rows")
+            check(abs(sshOverview.bentoRow.frame.minY - baselineBentoY) < 0.5, "SSH: Overview bentoRow must not shift vertically when switching to SSH with different quota rows")
+            check(sshHost.cachedAccounts.count == 1 && sshHost.activeAccountId == "acc-local", "SSH: Remote session inspection must never mutate local cachedAccounts or activeAccountId")
+
+            // 1.5 多 SSH 主机 + 同主机多窗口去重：2 个不同主机 + 1 个同主机额外窗口 -> 总览应显示 4 段（总计 / 本机 / SSH1 / SSH2）
+            sshHost.syncRemoteSessionsFromPayload([
+                makeRemoteSession(remoteKey: "rk-test", environmentId: "ssh:demo-env-1", hostLabel: "demo-ssh-host", state: "connected", includeQuota: true, includeStandalone: true),
+                makeRemoteSession(remoteKey: "rk-test-1b", environmentId: "ssh:demo-env-1", hostLabel: "demo-ssh-host", state: "connected", includeQuota: true, includeStandalone: true),
+                makeRemoteSession(remoteKey: "rk-test-2", environmentId: "ssh:demo-env-2", hostLabel: "gpu-ssh-host", state: "connected", includeQuota: true)
+            ], focusedKey: "local")
+            pump()
+            check(sshOverview.contextSwitcher.segmentCount == 4, "SSH: Overview switcher must deduplicate same-host windows and show 4 segments for 2 distinct SSH hosts (got \(sshOverview.contextSwitcher.segmentCount))")
+
+            // 2. disconnected 与 auth_expired 态：展示专属提示，绝不回退为“尚未保存账号”，且卡片不位移
+            sshHost.syncRemoteSessionsFromPayload([makeRemoteSession(state: "disconnected", includeQuota: true)], focusedKey: nil)
+            pump()
+            sshOverviewWin.contentView?.layoutSubtreeIfNeeded()
+            check(sshOverview.accountStatusLabel.stringValue.contains("SSH 连接已断开"), "SSH: Disconnected remote must show SSH 连接已断开 in Overview (got \(sshOverview.accountStatusLabel.stringValue))")
+            check(!sshMenu.quotaWarningLabel.isHidden && sshMenu.quotaWarningLabel.stringValue.contains("SSH 连接已断开"), "SSH: Disconnected remote must show SSH 连接已断开 in Menu (got \(sshMenu.quotaWarningLabel.stringValue))")
+            check(sshMenu.quotaEmptyButton.isHidden, "SSH: Disconnected remote must not fall back to saved-account empty CTA")
+
+            sshHost.syncRemoteSessionsFromPayload([makeRemoteSession(state: "auth_expired", includeQuota: false)], focusedKey: nil)
+            pump()
+            sshOverviewWin.contentView?.layoutSubtreeIfNeeded()
+            check(sshOverview.accountStatusLabel.stringValue.contains("远端登录态已过期"), "SSH: auth_expired remote must show 远端登录态已过期 in Overview (got \(sshOverview.accountStatusLabel.stringValue))")
+            check(!sshMenu.quotaWarningLabel.isHidden && sshMenu.quotaWarningLabel.stringValue.contains("远端登录态已过期"), "SSH: auth_expired remote must show 远端登录态已过期 in Menu (got \(sshMenu.quotaWarningLabel.stringValue))")
+            check(sshMenu.quotaEmptyButton.isHidden, "SSH: auth_expired remote must not fall back to 尚未保存账号 empty CTA")
+            check(sshMenu.quotaAccountNameLabel.stringValue != L10n.t("menu_panel.quota.no_saved", fallback: "尚未保存账号"), "SSH: auth_expired remote must keep remote identity title")
+
+            // 3. 清空 remoteSessions：自动回退至 all / local 并隐藏切换器与提示
+            sshHost.syncRemoteSessionsFromPayload([], focusedKey: "local")
+            pump()
+            check(sshHost.selectedContextKey == "local", "SSH: Clearing remoteSessions must fall back selectedContextKey to local")
+            check(sshHost.overviewEnvironmentKey == "all", "SSH: Clearing remoteSessions must fall back overviewEnvironmentKey to all")
+            check(sshOverview.contextSwitcherRow.isHidden, "SSH: Clearing remoteSessions must hide Overview contextSwitcherRow")
+            check(sshMenu.quotaContextSwitcherRow.isHidden, "SSH: Clearing remoteSessions must hide Menu quotaContextSwitcherRow")
+            check(sshOverview.currentAccountPill.isHidden, "SSH: Falling back to local must hide 远程只读 pill")
+            sshMenu.selectTab(2, persist: false); pump()
+            check(sshMenu.accountsLocalOnlyNoteLabel.isHidden, "SSH: Clearing remoteSessions must hide Menu accountsLocalOnlyNoteLabel")
+
+            sshOverviewWin.orderOut(nil)
+            sshMenuWin.orderOut(nil)
+        }
+
+        // Milestone 2 Phase 1: 多环境 / 多账号用量筛选、离线 SSH 徽标、UsageQueryIdentity、UsageLogController 与 UsageEventCard 验证
+        do {
+            L10n.shared.setLanguage("zh-Hans", notify: false)
+            let m2Host = Assistant(state: state.appendingPathComponent("m2-usage-env-filter"))
+            m2Host.configuration = try ConfigurationStore(state: m2Host.state)
+            m2Host.bridge = BackendBridge(resources: state, state: m2Host.state)
+            m2Host.reachable = true
+            m2Host.cachedAccounts = [
+                ["id": "acc-local", "email": "local@example.invalid", "subscription_tier": "PRO"],
+                ["id": "acc-remote", "email": "remote@example.invalid", "subscription_tier": "ULTRA"]
+            ]
+            m2Host.activeAccountId = "acc-local"
+
+            check(LiveStatus().remoteSyncRevision == 0, "M2: LiveStatus default remoteSyncRevision must be 0")
+            let revStatus = LiveStatus(["mode": "connected", "remoteSyncRevision": 5])
+            check(revStatus.remoteSyncRevision == 5, "M2: LiveStatus must parse remoteSyncRevision")
+            let mergedKeepRev = m2Host.mergeStatusSnapshot(["mode": "connected"], previous: revStatus)
+            check(mergedKeepRev.remoteSyncRevision == 5, "M2: mergeStatusSnapshot must preserve previous remoteSyncRevision when omitted")
+            let mergedNextRev = m2Host.mergeStatusSnapshot(["mode": "connected", "remoteSyncRevision": 6], previous: mergedKeepRev)
+            check(mergedNextRev.remoteSyncRevision == 6, "M2: mergeStatusSnapshot must update remoteSyncRevision when present")
+            m2Host.statusValue = mergedNextRev
+
+            enum M2FixtureMode {
+                case pureLocal
+                case mixedSsh
+                case mismatchEnv
+            }
+            var m2Mode: M2FixtureMode = .pureLocal
+            var summaryRequests: [[String: Any]] = []
+            var eventRequests: [[String: Any]] = []
+            var eventMismatchEnv: String? = nil
+
+            let m2Models: [[String: Any]] = [
+                ["model": "gemini-3.8-flash-n", "totalTokens": 10000, "promptTokens": 4000, "candidatesTokens": 1000, "cachedTokens": 5000, "requestCount": 10, "estimatedUsd": 0.42, "priced": true]
+            ]
+            let m2SshModels: [[String: Any]] = [
+                ["model": "gemini-3.8-flash-n", "totalTokens": 3600, "promptTokens": 1200, "candidatesTokens": 400, "cachedTokens": 2000, "requestCount": 4, "estimatedUsd": 0.16, "priced": true]
+            ]
+
+            m2Host.bridge.fixtureReply = { payload in
+                let cmd = payload["command"] as? String ?? ""
+                if cmd == "usage_summary" {
+                    summaryRequests.append(payload)
+                    let reqPeriod = payload["period"] as? String ?? "today"
+                    let reqEnv = (payload["environmentId"] as? String) ?? "all"
+                    let reqAcc = (payload["accountId"] as? String) ?? "all"
+                    switch m2Mode {
+                    case .pureLocal:
+                        return [
+                            "ok": true,
+                            "period": reqPeriod,
+                            "snapshotId": "m2-local-snap",
+                            "selectedEnvironmentId": reqEnv,
+                            "selectedAccountId": reqAcc,
+                            "availableEnvironments": [
+                                ["id": "all", "kind": "all", "label": "全部环境"],
+                                ["id": "local", "kind": "local", "label": "本机", "total_tokens": 6400, "request_count": 6, "online": true]
+                            ],
+                            "availableAccounts": [
+                                ["id": "all", "type": "all", "label": "全部账号"],
+                                ["id": "acc-local", "type": "account", "label": "local@example.invalid", "email": "local@example.invalid"]
+                            ],
+                            "environmentBreakdown": [
+                                "local_tokens": 6400, "ssh_tokens": 0,
+                                "local_requests": 6, "ssh_requests": 0,
+                                "local_share_pct": 100, "ssh_share_pct": 0,
+                                "has_ssh_data": false, "offline_ssh_hosts": []
+                            ],
+                            "summary": [
+                                "availability": "complete",
+                                "totalTokens": 6400, "promptTokens": 2400, "cachedTokens": 3400, "candidatesTokens": 600,
+                                "requestCount": 6, "estimatedUsd": 0.26, "pricedModels": 1, "unpricedModels": 0,
+                                "databasesScanned": 5, "databasesDiscovered": 5
+                            ],
+                            "byModel": m2Models,
+                            "dailyTrends": [],
+                            "todayHourly": []
+                        ]
+                    case .mixedSsh:
+                        let isSshOnly = reqEnv == "ssh:demo"
+                        let totalTok = isSshOnly ? 3600 : 10000
+                        let promptTok = isSshOnly ? 1200 : 4000
+                        let cachedTok = isSshOnly ? 2000 : 5000
+                        let outTok = isSshOnly ? 400 : 1000
+                        let reqCount = isSshOnly ? 4 : 10
+                        let usdVal = isSshOnly ? 0.16 : 0.42
+                        return [
+                            "ok": true,
+                            "period": reqPeriod,
+                            "snapshotId": "m2-mixed-\(reqEnv)-\(reqAcc)-\(m2Host.statusValue.remoteSyncRevision)",
+                            "selectedEnvironmentId": reqEnv,
+                            "selectedAccountId": reqAcc,
+                            "availableEnvironments": [
+                                ["id": "all", "kind": "all", "label": "全部环境", "total_tokens": 10000, "request_count": 10],
+                                ["id": "local", "kind": "local", "label": "本机", "total_tokens": 6400, "request_count": 6, "online": true],
+                                ["id": "ssh:demo", "kind": "ssh", "label": "SSH: demo-ssh-host", "host_label": "demo-ssh-host", "total_tokens": 3600, "request_count": 4, "online": false]
+                            ],
+                            "availableAccounts": [
+                                ["id": "all", "type": "all", "label": "全部账号"],
+                                ["id": "acc-local", "type": "account", "label": "local@example.invalid", "email": "local@example.invalid"],
+                                ["id": "acc-remote", "type": "account", "label": "remote@example.invalid", "email": "remote@example.invalid"]
+                            ],
+                            "environmentBreakdown": [
+                                "local_tokens": 6400, "ssh_tokens": 3600,
+                                "local_requests": 6, "ssh_requests": 4,
+                                "local_share_pct": 64, "ssh_share_pct": 36,
+                                "has_ssh_data": true, "offline_ssh_hosts": ["demo-ssh-host"]
+                            ],
+                            "summary": [
+                                "availability": "complete",
+                                "totalTokens": totalTok, "promptTokens": promptTok, "cachedTokens": cachedTok, "candidatesTokens": outTok,
+                                "requestCount": reqCount, "estimatedUsd": usdVal, "pricedModels": 1, "unpricedModels": 0,
+                                "databasesScanned": 5, "databasesDiscovered": 5
+                            ],
+                            "byModel": isSshOnly ? m2SshModels : m2Models,
+                            "dailyTrends": [],
+                            "todayHourly": []
+                        ]
+                    case .mismatchEnv:
+                        return [
+                            "ok": true,
+                            "period": reqPeriod,
+                            "snapshotId": "m2-mismatch",
+                            "selectedEnvironmentId": "local",
+                            "selectedAccountId": reqAcc,
+                            "summary": ["availability": "complete", "totalTokens": 100, "requestCount": 1, "databasesScanned": 1, "databasesDiscovered": 1],
+                            "byModel": [],
+                            "dailyTrends": [],
+                            "todayHourly": []
+                        ]
+                    }
+                }
+                if cmd == "usage_events" {
+                    eventRequests.append(payload)
+                    let reqPeriod = payload["period"] as? String ?? "today"
+                    let reqEnv = (payload["environmentId"] as? String) ?? "all"
+                    let reqAcc = (payload["accountId"] as? String) ?? "all"
+                    let offset = payload["offset"] as? Int ?? 0
+                    let limit = payload["limit"] as? Int ?? 200
+                    if let mismatch = eventMismatchEnv {
+                        return [
+                            "ok": true, "period": reqPeriod,
+                            "selectedEnvironmentId": mismatch, "selectedAccountId": reqAcc,
+                            "snapshot_id": "m2-events-mismatch", "generated_at": 1761544300,
+                            "total": 1, "rows": []
+                        ]
+                    }
+                    if m2Mode == .pureLocal {
+                        return [
+                            "ok": true, "period": reqPeriod,
+                            "selectedEnvironmentId": reqEnv, "selectedAccountId": reqAcc,
+                            "snapshot_id": "m2-events-local", "generated_at": 1761544300,
+                            "scope": "本机历史记录",
+                            "total": 1,
+                            "rows": [
+                                ["model": "gemini-3.8-flash-n", "timestamp_seconds": 1761544267, "input_tokens": 120, "output_tokens": 30, "cached_tokens": 50, "cache_write_tokens": 0, "environment_kind": "local", "environment_id": "local", "account_email": "local@example.invalid", "account_confidence": "observed"]
+                            ]
+                        ]
+                    }
+                    let totalRows = limit >= 500 ? 650 : 250
+                    let batchCount = max(0, min(limit, totalRows - offset))
+                    var rows: [[String: Any]] = []
+                    for i in 0..<min(3, batchCount) {
+                        if reqEnv == "ssh:demo" || i != 1 {
+                            rows.append([
+                                "model": "gemini-3.8-flash-n",
+                                "timestamp_seconds": 1761544267 - i,
+                                "input_tokens": 300 + offset + i,
+                                "output_tokens": 45,
+                                "cached_tokens": 900,
+                                "cache_write_tokens": 15,
+                                "environment_kind": "ssh",
+                                "environment_id": "ssh:demo",
+                                "environment_label": "SSH: demo-ssh-host",
+                                "account_email": (i == 2 ? "" : "remote@example.invalid"),
+                                "account_confidence": (i == 2 ? "unknown" : "observed")
+                            ])
+                        } else {
+                            rows.append([
+                                "model": "claude-sonnet-4-6",
+                                "timestamp_seconds": 1761544250,
+                                "input_tokens": 200,
+                                "output_tokens": 20,
+                                "cached_tokens": 400,
+                                "cache_write_tokens": 0,
+                                "environment_kind": "local",
+                                "environment_id": "local",
+                                "environment_label": "",
+                                "account_email": "local@example.invalid",
+                                "account_confidence": "observed"
+                            ])
+                        }
+                    }
+                    if limit >= 500 && rows.count < batchCount {
+                        for idx in rows.count..<batchCount {
+                            rows.append([
+                                "model": "gemini-3.8-flash-n",
+                                "timestamp_seconds": 1761544000 - idx,
+                                "input_tokens": 100, "output_tokens": 10, "cached_tokens": 50, "cache_write_tokens": 0,
+                                "environment_kind": "ssh", "environment_id": "ssh:demo", "environment_label": "SSH: demo-ssh-host",
+                                "account_email": "remote@example.invalid", "account_confidence": "observed"
+                            ])
+                        }
+                    }
+                    return [
+                        "ok": true,
+                        "period": reqPeriod,
+                        "selectedEnvironmentId": reqEnv,
+                        "selectedAccountId": reqAcc,
+                        "snapshot_id": "m2-events-\(reqEnv)-\(reqAcc)",
+                        "generated_at": 1761544300,
+                        "scope": "本机与 SSH 记录",
+                        "total": totalRows,
+                        "rows": rows,
+                        "availableEnvironments": [
+                            ["id": "all", "kind": "all", "label": "全部环境"],
+                            ["id": "local", "kind": "local", "label": "本机"],
+                            ["id": "ssh:demo", "kind": "ssh", "label": "SSH: demo-ssh-host", "host_label": "demo-ssh-host", "online": false]
+                        ],
+                        "availableAccounts": [
+                            ["id": "all", "type": "all", "label": "全部账号"],
+                            ["id": "acc-local", "type": "account", "label": "local@example.invalid", "email": "local@example.invalid"],
+                            ["id": "acc-remote", "type": "account", "label": "remote@example.invalid", "email": "remote@example.invalid"]
+                        ]
+                    ]
+                }
+                return ["ok": true]
+            }
+
+            let m2Window = makeHeadlessHostWindow(width: 960, height: 640)
+            m2Host.window = m2Window
+            let m2Usage = UsagePage(app: m2Host)
+            m2Host.usagePage = m2Usage
+            m2Window.contentView = m2Usage.view
+            pump()
+            m2Window.contentView?.layoutSubtreeIfNeeded()
+
+            defer {
+                saveUsageJSONTestHook = nil
+                m2Window.contentView = nil
+                m2Host.usagePage = nil
+                m2Host.window = nil
+                m2Window.orderOut(nil)
+            }
+
+            // 1. 纯本机（无 SSH 环境）：filterBarRow 必须默认隐藏，零 tooltip，tokensDetail 无 SSH 占比
+            check(m2Usage.filterBarRow.isHidden == true, "M2: Pure-local UsagePage must hide filterBarRow by default")
+            check(m2Usage.offlineSshBadge.isHidden == true && m2Usage.offlineSshBadge.toolTip == nil, "M2: Pure-local UsagePage must hide offlineSshBadge without tooltip")
+            check(!m2Usage.tokensDetail.stringValue.contains("SSH"), "M2: Pure-local UsagePage tokensDetail must not include SSH share")
+            check(m2Host.cachedUsageReportsByPeriod["today"]?["snapshotId"] as? String == "m2-local-snap", "M2: Default all+all query must populate cachedUsageReportsByPeriod[today]")
+            check(summaryRequests.last?["environmentId"] == nil && summaryRequests.last?["accountId"] == nil, "M2: Default all+all usage_summary IPC payload must preserve legacy keys without environmentId/accountId")
+
+            // 纯本机下打开 UsageLogController 时环境筛选隐藏
+            let pureLocalLog = UsageLogController(app: m2Host, period: "today")
+            pureLocalLog.show(in: m2Window, onDismiss: {})
+            pump()
+            check(pureLocalLog.environmentPopup.isHidden == true, "M2: Pure-local UsageLogController must hide environmentPopup")
+            pureLocalLog.closeSheet()
+            waitForSheetDetach(on: m2Window, description: "M2 pure-local UsageLogController to detach")
+
+            // 2. 注入混合本机 + ssh:demo（离线 demo-ssh-host）报表：显现筛选栏、拼接占比、显示离线徽标
+            m2Mode = .mixedSsh
+            m2Usage.fetch(force: true)
+            pump()
+            m2Window.contentView?.layoutSubtreeIfNeeded()
+
+            check(m2Usage.filterBarRow.isHidden == false, "M2: Mixed SSH UsagePage must reveal filterBarRow")
+            check(m2Usage.tokensDetail.stringValue.contains("本机 64% · SSH 36%"), "M2: Mixed all-env UsagePage tokensDetail must append 本机 64% · SSH 36% (got \(m2Usage.tokensDetail.stringValue))")
+            check(m2Usage.offlineSshBadge.isHidden == false && m2Usage.offlineSshBadge.title == "离线 SSH · 1", "M2: Mixed UsagePage with offline_ssh_hosts must show offlineSshBadge (title=\(m2Usage.offlineSshBadge.title))")
+            check((m2Usage.offlineSshBadge.toolTip ?? "").contains("demo-ssh-host"), "M2: offlineSshBadge tooltip must list offline host demo-ssh-host")
+            check(m2Usage.environmentPopup.itemTitles.contains("SSH: demo-ssh-host（离线）"), "M2: environmentPopup must list offline SSH option")
+            check(m2Usage.accountPopup.itemTitles.contains("remote@example.invalid"), "M2: accountPopup must list available accounts")
+
+            // 验证英文模式下 UsagePage 筛选栏与环境占比零中文泄漏
+            L10n.shared.setLanguage("en", notify: false)
+            let m2UsageEn = UsagePage(app: m2Host)
+            m2UsageEn.fetch(force: true)
+            waitUntil(step: 0.01, description: "M2 English UsagePage fetch") { !m2UsageEn.loading }
+            check(m2UsageEn.tokensDetail.stringValue.contains("Local 64% · SSH 36%"), "M2: English mixed UsagePage must format Local 64% · SSH 36% (got \(m2UsageEn.tokensDetail.stringValue))")
+            check(m2UsageEn.offlineSshBadge.title == "Offline SSH · 1", "M2: English offlineSshBadge must display Offline SSH · 1")
+            let m2EnLeaks = allTextValues(m2UsageEn.view).filter { $0.range(of: "[\\u4E00-\\u9FFF]", options: .regularExpression) != nil }
+            check(m2EnLeaks.isEmpty, "M2: English mixed UsagePage must contain zero Chinese characters: \(m2EnLeaks)")
+            L10n.shared.setLanguage("zh-Hans", notify: false)
+
+            // 3. 切换 environmentPopup 到 ssh:demo 与 accountPopup 到 acc-remote，并验证 MenuPanel all+all 缓存零污染
+            let allCacheBeforeFilter = m2Host.cachedUsageReportsByPeriod["today"]?["snapshotId"] as? String
+            if let sshIdx = m2Usage.environmentPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "ssh:demo" }) {
+                m2Usage.environmentPopup.selectItem(at: sshIdx)
+                m2Usage.environmentChanged(m2Usage.environmentPopup)
+                pump()
+            } else {
+                check(false, "M2: environmentPopup must contain ssh:demo option")
+            }
+            check(m2Usage.selectedEnvironmentId == "ssh:demo" && m2Host.usageSelectedEnvironment == "ssh:demo", "M2: Switching environmentPopup must update selectedEnvironmentId and Assistant.usageSelectedEnvironment")
+            check(summaryRequests.last?["environmentId"] as? String == "ssh:demo", "M2: Switching environmentPopup must dispatch usage_summary with environmentId=ssh:demo")
+            check(m2Usage.totalTokensMetric.stringValue == "3.6K", "M2: Selecting ssh:demo must refresh KPI to SSH-only 3.6K (got \(m2Usage.totalTokensMetric.stringValue))")
+            check(!m2Usage.tokensDetail.stringValue.contains("本机 64%"), "M2: Filtered ssh:demo view must not show all-environments share split")
+            check(m2Host.cachedUsageReportsByPeriod["today"]?["snapshotId"] as? String == allCacheBeforeFilter, "M2: Filtered ssh:demo query must never overwrite MenuPanel's all+all cachedUsageReportsByPeriod[today]")
+
+            if let accIdx = m2Usage.accountPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "acc-remote" }) {
+                m2Usage.accountPopup.selectItem(at: accIdx)
+                m2Usage.accountChanged(m2Usage.accountPopup)
+                pump()
+            } else {
+                check(false, "M2: accountPopup must contain acc-remote option")
+            }
+            check(summaryRequests.last?["environmentId"] as? String == "ssh:demo" && summaryRequests.last?["accountId"] as? String == "acc-remote", "M2: Orthogonal account switch must send both environmentId and accountId")
+            check(m2Usage.exportButton.isEnabled, "M2: Matching filtered report must keep exportButton enabled")
+
+            // 校验 UsageQueryIdentity 错配拦截与 remoteSyncRevision 推进自动重拉
+            m2Mode = .mismatchEnv
+            m2Usage.fetch(force: true)
+            pump()
+            check(!m2Usage.exportButton.isEnabled && !m2Usage.footerBox.isHidden, "M2: Mismatched selectedEnvironmentId must disable exportButton and show warning banner")
+
+            m2Mode = .mixedSsh
+            let reqCountBeforeSyncRev = summaryRequests.count
+            m2Host.statusValue.remoteSyncRevision = 7
+            m2Usage.update(force: false)
+            pump()
+            check(summaryRequests.count > reqCountBeforeSyncRev, "M2: Advancing remoteSyncRevision must trigger UsagePage.update(force: false) refetch")
+
+            var exportedUsagePayload: [String: Any]? = nil
+            saveUsageJSONTestHook = { report, _ in
+                exportedUsagePayload = report
+                return true
+            }
+            m2Usage.exportUsage()
+            pump()
+            check(exportedUsagePayload?["environmentId"] as? String == "ssh:demo" && exportedUsagePayload?["accountId"] as? String == "acc-remote", "M2: UsagePage exportUsage must carry active environmentId and accountId")
+
+            // 4. 打开 UsageLogController：透传过滤参数、验证 UsageEventCard SSH 徽标与账号展示、翻页与多页导出参数透传、快照一致性校验
+            m2Usage.showLog()
+            pump()
+            guard let m2Log = m2Usage.logController else {
+                check(false, "M2: UsagePage.showLog must open UsageLogController")
+                fatalError("Unreachable")
+            }
+            check(m2Log.selectedEnvironmentId == "ssh:demo" && m2Log.selectedAccountId == "acc-remote", "M2: UsageLogController must inherit selected environmentId and accountId from UsagePage")
+            check(!m2Log.environmentPopup.isHidden && !m2Log.accountPopup.isHidden, "M2: Mixed SSH UsageLogController must show both environmentPopup and accountPopup")
+            check(eventRequests.last?["environmentId"] as? String == "ssh:demo" && eventRequests.last?["accountId"] as? String == "acc-remote", "M2: UsageLogController initial usage_events must pass environmentId and accountId")
+
+            // 验证多页导出参数透传 (650 条 -> limit 500 翻 2 页: offset 0 与 offset 500)
+            var exportedLogPayload: [String: Any]? = nil
+            saveUsageJSONTestHook = { report, _ in
+                exportedLogPayload = report
+                return true
+            }
+            let eventReqsBeforeExport = eventRequests.count
+            m2Log.exportRows()
+            waitUntil(step: 0.01, description: "M2 UsageLog exportRows") { exportedLogPayload != nil }
+            let exportReqs = Array(eventRequests.dropFirst(eventReqsBeforeExport))
+            check(exportReqs.count == 2, "M2: UsageLog exportRows for 650 rows must paginate twice (got \(exportReqs.count))")
+            check(exportReqs.allSatisfy { ($0["environmentId"] as? String) == "ssh:demo" && ($0["accountId"] as? String) == "acc-remote" }, "M2: All paginated exportRows usage_events requests must carry environmentId and accountId")
+            check((exportedLogPayload?["environmentId"] as? String) == "ssh:demo" && (exportedLogPayload?["accountId"] as? String) == "acc-remote", "M2: Exported UsageLog JSON must persist environmentId and accountId")
+            check((exportedLogPayload?["rows"] as? [[String: Any]])?.count == 650, "M2: Exported UsageLog JSON must collect all 650 rows")
+
+            // 切到全部环境查看混合事件卡片，并测试下一页参数透传
+            if let allEnvIdx = m2Log.environmentPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "all" }) {
+                m2Log.environmentPopup.selectItem(at: allEnvIdx)
+                m2Log.environmentChanged(m2Log.environmentPopup)
+                waitUntil(step: 0.01, description: "M2 UsageLog switch env to all") { !m2Log.loading }
+            }
+            if let allAccIdx = m2Log.accountPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "all" }) {
+                m2Log.accountPopup.selectItem(at: allAccIdx)
+                m2Log.accountChanged(m2Log.accountPopup)
+                waitUntil(step: 0.01, description: "M2 UsageLog switch acc to all") { !m2Log.loading }
+            }
+            m2Log.nextPage()
+            waitUntil(step: 0.01, description: "M2 UsageLog nextPage") { !m2Log.loading }
+            check(eventRequests.last?["offset"] as? Int == 200 && eventRequests.last?["environmentId"] as? String == "all" && eventRequests.last?["accountId"] as? String == "all", "M2: UsageLog nextPage must preserve current environmentId and accountId")
+
+            m2Log.sheet.contentView?.layoutSubtreeIfNeeded()
+            if let sshCard = m2Log.tableView(m2Log.table, viewFor: nil, row: 0) as? UsageEventCard,
+               let localCardInMixed = m2Log.tableView(m2Log.table, viewFor: nil, row: 1) as? UsageEventCard,
+               let unattributedSshCard = m2Log.tableView(m2Log.table, viewFor: nil, row: 2) as? UsageEventCard {
+                check(!sshCard.envBadge.isHidden && sshCard.envBadge.title == "SSH · demo-ssh-host", "M2: SSH UsageEventCard must display SSH · demo-ssh-host badge (got \(sshCard.envBadge.title))")
+                check(!sshCard.accountLabel.isHidden && sshCard.accountLabel.stringValue == "remote@example.invalid", "M2: SSH UsageEventCard must display account_email (got \(sshCard.accountLabel.stringValue))")
+                check(!localCardInMixed.envBadge.isHidden && localCardInMixed.envBadge.title == "本机", "M2: Mixed-list local UsageEventCard must display 本机 badge")
+                check(!unattributedSshCard.accountLabel.isHidden && unattributedSshCard.accountLabel.stringValue == "未关联账号", "M2: Unattributed SSH UsageEventCard must display 未关联账号")
+                sshCard.frame = NSRect(x: 0, y: 0, width: 640, height: 64)
+                sshCard.layoutSubtreeIfNeeded()
+                check(sshCard.fittingSize.height <= 64, "M2: UsageEventCard with badges must fit within 64pt row height (got \(sshCard.fittingSize.height))")
+                check(sshCard.fittingSize.width <= 640, "M2: UsageEventCard with badges must fit within 640pt table width without overflow (got \(sshCard.fittingSize.width))")
+            } else {
+                check(false, "M2: UsageLog tableView must render UsageEventCard rows")
+            }
+
+            let pureLocalCard = UsageEventCard(frame: NSRect(x: 0, y: 0, width: 640, height: 64))
+            pureLocalCard.configure(["model": "gemini-3.8-flash-n", "timestamp_seconds": 1761544267, "input_tokens": 100, "output_tokens": 20, "cached_tokens": 50, "cache_write_tokens": 0, "environment_kind": "local"], showLocalEnvironmentBadge: false)
+            check(pureLocalCard.envBadge.isHidden && pureLocalCard.accountLabel.isHidden, "M2: Pure-local UsageEventCard without email must hide envBadge and accountLabel")
+
+            // 验证 UsageLogController 快照筛选一致性校验（返回环境与当前选中不一致时拦截）
+            if let sshIdx = m2Log.environmentPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "ssh:demo" }) {
+                eventMismatchEnv = "local"
+                m2Log.environmentPopup.selectItem(at: sshIdx)
+                m2Log.environmentChanged(m2Log.environmentPopup)
+                pump()
+                check(!m2Log.exportButton.isEnabled && m2Log.rows.isEmpty && m2Log.status.stringValue == L10n.t("usage.error.period_mismatch"), "M2: UsageLogController must reject mismatched returned environmentId")
+                eventMismatchEnv = nil
+            }
+
+            m2Log.closeSheet()
+            waitForSheetDetach(on: m2Window, description: "M2 mixed UsageLogController to detach")
+
+            // 5. 切回无 SSH 报表后，filterBarRow 自动重新隐藏
+            m2Mode = .pureLocal
+            if let allAccIdx = m2Usage.accountPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "all" }) {
+                m2Usage.accountPopup.selectItem(at: allAccIdx)
+                m2Usage.accountChanged(m2Usage.accountPopup)
+            }
+            if let allEnvIdx = m2Usage.environmentPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "all" }) {
+                m2Usage.environmentPopup.selectItem(at: allEnvIdx)
+                m2Usage.environmentChanged(m2Usage.environmentPopup)
+            }
+            waitUntil(step: 0.01, description: "M2 return to pure-local report") { !m2Usage.loading && m2Usage.filterBarRow.isHidden }
+            check(m2Usage.filterBarRow.isHidden == true, "M2: Returning to pure-local report without SSH must auto-hide filterBarRow again")
+            check(m2Usage.offlineSshBadge.isHidden == true && m2Usage.offlineSshBadge.toolTip == nil, "M2: Returning to pure-local report must hide offlineSshBadge and clear tooltip")
+        }
+
+        // UsagePage & UsageLogController: 120Hz segmented env bar (<=4 envs), regular glass popups (>4 envs fallback), unattributed option & zero-record notice
+        do {
+            L10n.shared.setLanguage("zh-Hans", notify: false)
+            let u3Host = Assistant(state: state.appendingPathComponent("usage-v12-filter-polish"))
+            u3Host.configuration = try ConfigurationStore(state: u3Host.state)
+            u3Host.bridge = BackendBridge(resources: state, state: u3Host.state)
+            u3Host.reachable = true
+            u3Host.cachedAccounts = [
+                ["id": "acc-local", "name": "Local", "email": "local@example.invalid", "subscription_tier": "PRO"],
+                ["id": "acc-remote", "name": "Remote", "email": "remote@example.invalid", "subscription_tier": "FREE"]
+            ]
+            u3Host.statusValue = LiveStatus([
+                "mode": "connected",
+                "running": true,
+                "runningChannel": "stable",
+                "remoteSyncRevision": 1
+            ])
+            let u3Window = makeHeadlessHostWindow(width: 920, height: 640)
+            u3Host.window = u3Window
+            defer {
+                u3PageCleanup: do {
+                    u3Host.bridge.fixtureReply = nil
+                    u3Host.window = nil
+                    u3Window.orderOut(nil)
+                }
+            }
+
+            var envCountMode = 2
+            var unavailableNoticeCheck = false
+            var summaryCalls: [[String: Any]] = []
+            var eventCalls: [[String: Any]] = []
+
+            let buildEnvs: () -> [[String: Any]] = {
+                var list: [[String: Any]] = [
+                    ["id": "all", "kind": "all", "label": "全部环境", "online": true, "total_tokens": 25_000, "request_count": 5],
+                    ["id": "local", "kind": "local", "label": "本机", "online": true, "total_tokens": 10_000, "request_count": 2]
+                ]
+                if envCountMode == 2 {
+                    list.append(["id": "ssh:demo", "kind": "ssh", "label": "demo-ssh-host", "online": true, "total_tokens": 15_000, "request_count": 3])
+                } else {
+                    for i in 1...5 {
+                        list.append(["id": "ssh:demo\(i)", "kind": "ssh", "label": "demo-ssh-\(i)", "online": true, "total_tokens": 3_000, "request_count": 1])
+                    }
+                }
+                return list
+            }
+            let buildAccs: () -> [[String: Any]] = {
+                [
+                    ["id": "all", "email": "全部账号", "label": "全部账号", "total_tokens": 25_000, "request_count": 5],
+                    ["id": "acc-local", "email": "local@example.invalid", "label": "local@example.invalid", "total_tokens": 10_000, "request_count": 2],
+                    ["id": "acc-remote", "email": "remote@example.invalid", "label": "remote@example.invalid", "total_tokens": 0, "request_count": 0]
+                ]
+            }
+
+            u3Host.bridge.fixtureReply = { payload in
+                let cmd = payload["command"] as? String ?? ""
+                if cmd == "usage_summary" {
+                    summaryCalls.append(payload)
+                    let reqPeriod = payload["period"] as? String ?? "today"
+                    let reqEnv = payload["environmentId"] as? String ?? "all"
+                    let reqAcc = payload["accountId"] as? String ?? "all"
+                    let envs = buildEnvs()
+                    let accs = buildAccs()
+                    let isUnattr = reqAcc == "unattributed"
+                    let isAccInSshZero = reqEnv == "ssh:demo" && reqAcc == "acc-local"
+                    let tokens = isUnattr ? 15_000 : (isAccInSshZero ? 0 : 25_000)
+                    let reqs = isUnattr ? 3 : (isAccInSshZero ? 0 : 5)
+                    let availability = unavailableNoticeCheck ? "unavailable" : "available"
+                    return [
+                        "ok": true,
+                        "period": reqPeriod,
+                        "snapshotId": "u3-snap-\(reqEnv)-\(reqAcc)-\(envCountMode)-\(availability)",
+                        "selectedEnvironmentId": reqEnv,
+                        "selectedAccountId": reqAcc,
+                        "unattributedRequests": 3,
+                        "unattributedTokens": 15_000,
+                        "availableEnvironments": envs,
+                        "availableAccounts": accs,
+                        "environmentBreakdown": [
+                            "local_tokens": 10_000,
+                            "ssh_tokens": 15_000,
+                            "local_requests": 2,
+                            "ssh_requests": 3,
+                            "local_share_pct": 40,
+                            "ssh_share_pct": 60,
+                            "has_ssh_data": true,
+                            "offline_ssh_hosts": []
+                        ],
+                        "summary": [
+                            "availability": availability,
+                            "totalTokens": tokens,
+                            "promptTokens": tokens,
+                            "candidatesTokens": 0,
+                            "cachedTokens": 0,
+                            "cacheWriteTokens": 0,
+                            "requestCount": reqs,
+                            "estimatedUsd": isAccInSshZero ? 0.0 : 0.12,
+                            "unattributedRequests": 3,
+                            "unattributedTokens": 15_000
+                        ],
+                        "byModel": [],
+                        "hourly": [],
+                        "daily": [],
+                        "generatedAt": Int(Date().timeIntervalSince1970)
+                    ]
+                }
+                if cmd == "usage_events" {
+                    eventCalls.append(payload)
+                    let reqPeriod = payload["period"] as? String ?? "today"
+                    let reqEnv = payload["environmentId"] as? String ?? "all"
+                    let reqAcc = payload["accountId"] as? String ?? "all"
+                    let rows: [[String: Any]] = reqAcc == "unattributed" ? [
+                        [
+                            "model": "gemini-3.8-flash-n",
+                            "timestamp_seconds": Int(Date().timeIntervalSince1970) - 60,
+                            "input_tokens": 5_000,
+                            "output_tokens": 0,
+                            "cached_tokens": 0,
+                            "cache_write_tokens": 0,
+                            "total_tokens": 5_000,
+                            "environment_kind": "ssh",
+                            "environment_id": "ssh:demo",
+                            "environment_label": "demo-ssh-host",
+                            "account_confidence": "unknown"
+                        ]
+                    ] : []
+                    return [
+                        "ok": true,
+                        "snapshot_id": "u3-ev-snap",
+                        "generated_at": Int(Date().timeIntervalSince1970),
+                        "period": reqPeriod,
+                        "selectedEnvironmentId": reqEnv,
+                        "selectedAccountId": reqAcc,
+                        "scope": "",
+                        "total": rows.count,
+                        "rows": rows,
+                        "availableEnvironments": buildEnvs(),
+                        "availableAccounts": buildAccs()
+                    ]
+                }
+                return ["ok": true]
+            }
+
+            let u3Page = UsagePage(app: u3Host)
+            _ = u3Page.view
+            u3Host.usagePage = u3Page
+            u3Window.contentView = u3Page.view
+            u3Page.view.layoutSubtreeIfNeeded()
+            u3Page.update(force: true)
+            waitUntil(step: 0.01, description: "UsagePage v1.2 filter bar initial fetch") { !u3Page.loading && !u3Page.filterBarRow.isHidden }
+
+            // 1. <= 4 环境时使用 120Hz DesignSegmentedControl，accountPopup 为 .regular 玻璃控件且包含未关联账号项
+            check(!u3Page.environmentSegment.isHidden && u3Page.environmentPopup.isHidden, "UsagePage with <= 4 environments must display environmentSegment and hide environmentPopup")
+            check(u3Page.environmentSegment.segmentCount == 3, "UsagePage environmentSegment must list All + Local + 1 SSH (got \(u3Page.environmentSegment.segmentCount))")
+            check(u3Page.accountPopup.controlSize == .regular && u3Page.accountPopup.cell is DesignPopUpCell, "UsagePage accountPopup must use .regular size and DesignPopUpCell")
+            check(u3Page.accountPopup.subviews.contains { $0 is DesignPopUpHoverOverlay }, "UsagePage accountPopup must attach DesignPopUpHoverOverlay")
+            check(u3Page.accountPopup.itemTitles.contains(L10n.t("usage.account.unattributed")), "UsagePage accountPopup must append unattributed option when unattributedRequests > 0")
+
+            // 2. 通过 environmentSegment 切到 ssh:demo，并立即中断/切换 accountPopup 到无记录的 acc-local -> 显示 unattributedNoticeBox
+            if let sshSegIdx = u3Page.environmentSegment.labels.firstIndex(where: { $0.contains("demo-ssh-host") }) {
+                u3Page.environmentSegment.selectedSegment = sshSegIdx
+                u3Page.environmentSegmentChanged(u3Page.environmentSegment)
+            } else {
+                check(false, "UsagePage environmentSegment must contain demo-ssh-host")
+            }
+            if let localAccIdx = u3Page.accountPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "acc-local" }) {
+                u3Page.accountPopup.selectItem(at: localAccIdx)
+                u3Page.accountChanged(u3Page.accountPopup)
+            } else {
+                check(false, "UsagePage accountPopup must contain acc-local")
+            }
+            waitUntil(step: 0.01, description: "UsagePage unattributed notice banner") { !u3Page.loading && u3Page.selectedAccountId == "acc-local" }
+            check(u3Page.selectedEnvironmentId == "ssh:demo" && !u3Page.unattributedNoticeBox.isHidden, "UsagePage selecting acc-local with 0 usage under SSH while unattributedRequests > 0 must show unattributedNoticeBox")
+
+            // 3. 点击「查看未关联」一键切至 unattributed 并隐藏提示横幅
+            u3Page.switchToUnattributedPressed()
+            waitUntil(step: 0.01, description: "UsagePage switch to unattributed") { !u3Page.loading && u3Page.selectedAccountId == "unattributed" }
+            check(summaryCalls.last?["accountId"] as? String == "unattributed", "switchToUnattributedPressed must query usage_summary with accountId=unattributed")
+            check(u3Page.totalTokensMetric.stringValue == "15K" && u3Page.unattributedNoticeBox.isHidden, "Switching to unattributed must display 15K tokens and hide unattributedNoticeBox")
+
+            // 4. availability == unavailable 时，即便存在 cachedUnattributedRequests 也不可弹出未关联提示
+            if let localAccIdx = u3Page.accountPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "acc-local" }) {
+                unavailableNoticeCheck = true
+                u3Page.accountPopup.selectItem(at: localAccIdx)
+                u3Page.accountChanged(u3Page.accountPopup)
+                u3Page.update(force: true)
+                waitUntil(step: 0.01, description: "UsagePage unavailable notice suppression") { !u3Page.loading && u3Page.totalTokensMetric.stringValue == "—" }
+                check(u3Page.unattributedNoticeBox.isHidden, "UsagePage must keep unattributedNoticeBox hidden when availability is unavailable")
+                unavailableNoticeCheck = false
+            }
+
+            // 5. > 4 环境时自动回退为 .regular 玻璃 environmentPopup 并隐藏 environmentSegment
+            envCountMode = 6
+            u3Page.switchToUnattributedPressed()
+            waitUntil(step: 0.01, description: "UsagePage switch back to unattributed") { !u3Page.loading && u3Page.selectedAccountId == "unattributed" }
+            u3Page.update(force: true)
+            waitUntil(step: 0.01, description: "UsagePage >4 environments popup fallback") { !u3Page.loading && !u3Page.environmentPopup.isHidden }
+            check(u3Page.environmentSegment.isHidden && !u3Page.environmentPopup.isHidden, "UsagePage with > 4 environments must fall back to environmentPopup")
+            check(u3Page.environmentPopup.controlSize == .regular && u3Page.environmentPopup.cell is DesignPopUpCell && u3Page.environmentPopup.subviews.contains { $0 is DesignPopUpHoverOverlay }, "UsagePage environmentPopup fallback must use .regular size, DesignPopUpCell, and hover overlay")
+
+            // 6. 打开 UsageLogController 验证 .regular 尺寸、DesignPopUpCell 与 unattributed 透传
+            u3Page.showLog()
+            pump()
+            guard let u3Log = u3Page.logController else {
+                check(false, "UsagePage.showLog must open UsageLogController")
+                fatalError("Unreachable")
+            }
+            waitUntil(step: 0.01, description: "UsageLogController v1.2 unattributed fetch") { !u3Log.loading }
+            check(u3Log.environmentPopup.controlSize == .regular && u3Log.accountPopup.controlSize == .regular, "UsageLogController filter popups must use .regular size")
+            check(u3Log.environmentPopup.cell is DesignPopUpCell && u3Log.accountPopup.cell is DesignPopUpCell, "UsageLogController filter popups must use DesignPopUpCell")
+            check(u3Log.selectedAccountId == "unattributed" && u3Log.accountPopup.itemTitles.contains(L10n.t("usage.account.unattributed")), "UsageLogController must inherit and expose unattributed account item")
+            check(eventCalls.last?["accountId"] as? String == "unattributed" && u3Log.rows.count == 1, "UsageLogController must query usage_events with accountId=unattributed and render 1 row")
+            u3Log.closeSheet()
+            waitForSheetDetach(on: u3Window, description: "UsageLogController v1.2 sheet detach")
+        }
+
+        // MenuPanelController Tab 0 (Usage): 条件显隐环境切换栏（无账号选择器、<=3 紧凑分段 / >3 玻璃下拉、396pt 宽度与英文零泄漏、主窗口环境同步）
+        do {
+            L10n.shared.setLanguage("zh-Hans", notify: false)
+            let m4Host = Assistant(state: state.appendingPathComponent("menu-usage-env-filter"))
+            m4Host.configuration = try ConfigurationStore(state: m4Host.state)
+            m4Host.bridge = BackendBridge(resources: state, state: m4Host.state)
+            m4Host.reachable = true
+            m4Host.statusValue = LiveStatus([
+                "mode": "connected",
+                "running": true,
+                "runningChannel": "stable",
+                "remoteSyncRevision": 1
+            ])
+            defer {
+                m4Host.bridge.fixtureReply = nil
+                m4Host.window?.orderOut(nil)
+            }
+
+            enum M4EnvMode { case pureLocal, oneSsh, multiSsh }
+            var m4Mode: M4EnvMode = .pureLocal
+            var m4SummaryCalls: [[String: Any]] = []
+
+            m4Host.bridge.fixtureReply = { payload in
+                let cmd = payload["command"] as? String ?? ""
+                if cmd == "usage_summary" {
+                    m4SummaryCalls.append(payload)
+                    let reqPeriod = payload["period"] as? String ?? "today"
+                    let reqEnv = payload["environmentId"] as? String ?? "all"
+                    switch m4Mode {
+                    case .pureLocal:
+                        return [
+                            "ok": true,
+                            "period": reqPeriod,
+                            "snapshotId": "m4-local-\(reqPeriod)-\(reqEnv)",
+                            "selectedEnvironmentId": reqEnv,
+                            "selectedAccountId": "all",
+                            "availableEnvironments": [
+                                ["id": "all", "kind": "all", "label": "全部环境", "online": true, "total_tokens": 100_000, "request_count": 4],
+                                ["id": "local", "kind": "local", "label": "本机", "online": true, "total_tokens": 100_000, "request_count": 4]
+                            ],
+                            "environmentBreakdown": [
+                                "local_tokens": 100_000,
+                                "ssh_tokens": 0,
+                                "has_ssh_data": false
+                            ],
+                            "summary": [
+                                "availability": "available",
+                                "totalTokens": 100_000,
+                                "promptTokens": 80_000,
+                                "candidatesTokens": 20_000,
+                                "cachedTokens": 0,
+                                "cacheWriteTokens": 0,
+                                "requestCount": 4,
+                                "estimatedUsd": 0.45
+                            ],
+                            "byModel": [["model": "gemini-3.8-flash-n", "totalTokens": 100_000, "requestCount": 4, "estimatedUsd": 0.45, "priced": true]],
+                            "todayHourly": [],
+                            "dailyTrends": []
+                        ]
+                    case .oneSsh:
+                        let isSsh = (reqEnv == "ssh:very-long-remote-dev-hostname-oracle-phx.internal")
+                        let isLocal = (reqEnv == "local")
+                        let tokens = isSsh ? 91_200 : (isLocal ? 100_000 : 191_200)
+                        let reqs = isSsh ? 7 : (isLocal ? 4 : 11)
+                        return [
+                            "ok": true,
+                            "period": reqPeriod,
+                            "snapshotId": "m4-onessh-\(reqPeriod)-\(reqEnv)",
+                            "selectedEnvironmentId": reqEnv,
+                            "selectedAccountId": "all",
+                            "availableEnvironments": [
+                                ["id": "all", "kind": "all", "label": "全部环境", "online": true, "total_tokens": 191_200, "request_count": 11],
+                                ["id": "local", "kind": "local", "label": "本机", "online": true, "total_tokens": 100_000, "request_count": 4],
+                                ["id": "ssh:very-long-remote-dev-hostname-oracle-phx.internal", "kind": "ssh", "label": "very-long-remote-dev-hostname-oracle-phx.internal", "online": true, "total_tokens": 91_200, "request_count": 7]
+                            ],
+                            "environmentBreakdown": [
+                                "local_tokens": 100_000,
+                                "ssh_tokens": 91_200,
+                                "local_share_pct": 52,
+                                "ssh_share_pct": 48,
+                                "has_ssh_data": true
+                            ],
+                            "summary": [
+                                "availability": "available",
+                                "totalTokens": tokens,
+                                "promptTokens": tokens,
+                                "candidatesTokens": 0,
+                                "cachedTokens": 0,
+                                "cacheWriteTokens": 0,
+                                "requestCount": reqs,
+                                "estimatedUsd": isSsh ? 0.04 : 0.49
+                            ],
+                            "byModel": [["model": "gemini-3.8-flash-n", "totalTokens": tokens, "requestCount": reqs, "estimatedUsd": isSsh ? 0.04 : 0.49, "priced": true]],
+                            "todayHourly": [],
+                            "dailyTrends": []
+                        ]
+                    case .multiSsh:
+                        let isOffline = (reqEnv == "ssh:offline-demo")
+                        let tokens = isOffline ? 30_000 : 221_200
+                        return [
+                            "ok": true,
+                            "period": reqPeriod,
+                            "snapshotId": "m4-multi-\(reqPeriod)-\(reqEnv)",
+                            "selectedEnvironmentId": reqEnv,
+                            "selectedAccountId": "all",
+                            "availableEnvironments": [
+                                ["id": "all", "kind": "all", "label": "全部环境", "online": true, "total_tokens": 221_200, "request_count": 13],
+                                ["id": "local", "kind": "local", "label": "本机", "online": true, "total_tokens": 100_000, "request_count": 4],
+                                ["id": "ssh:online-demo", "kind": "ssh", "label": "online-demo", "online": true, "total_tokens": 91_200, "request_count": 7],
+                                ["id": "ssh:offline-demo", "kind": "ssh", "label": "offline-demo", "online": false, "total_tokens": 30_000, "request_count": 2]
+                            ],
+                            "environmentBreakdown": [
+                                "local_tokens": 100_000,
+                                "ssh_tokens": 121_200,
+                                "local_share_pct": 45,
+                                "ssh_share_pct": 55,
+                                "has_ssh_data": true,
+                                "offline_ssh_hosts": ["offline-demo"]
+                            ],
+                            "summary": [
+                                "availability": "available",
+                                "totalTokens": tokens,
+                                "promptTokens": tokens,
+                                "candidatesTokens": 0,
+                                "cachedTokens": 0,
+                                "cacheWriteTokens": 0,
+                                "requestCount": isOffline ? 2 : 13,
+                                "estimatedUsd": 0.55
+                            ],
+                            "byModel": [],
+                            "todayHourly": [],
+                            "dailyTrends": []
+                        ]
+                    }
+                }
+                return ["ok": true]
+            }
+
+            let m4Panel = MenuPanelController(app: m4Host)
+            m4Host.menuPanelController = m4Panel
+            _ = m4Panel.view
+            m4Panel.selectTab(0, persist: false)
+            m4Panel.panelWillOpen()
+            waitUntil(step: 0.01, description: "MenuPanel Tab 0 pure-local fetch") { m4Host.cachedUsageReportsByPeriod["today"] != nil }
+            pump()
+
+            // 1. 纯本机模式下隐藏 usageEnvironmentBar（0pt 占位）
+            check(m4Panel.usageEnvironmentBar.isHidden == true, "MenuPanel Tab 0 in pure-local mode must hide usageEnvironmentBar")
+
+            // 2. 存在 1 台 SSH 时展示紧凑分段条（<=3 项），右方显示占比，总宽严守 <= 396pt 且零静态 tooltip
+            m4Mode = .oneSsh
+            m4Host.fetchUsageSummary(period: "today", environmentId: "all", force: true)
+            waitUntil(step: 0.01, description: "MenuPanel Tab 0 one-SSH fetch") { !m4Panel.usageEnvironmentBar.isHidden }
+            m4Panel.view.layoutSubtreeIfNeeded()
+            check(!m4Panel.usageEnvironmentBar.isHidden && !m4Panel.usageEnvironmentSegment.isHidden && m4Panel.usageEnvironmentPopup.isHidden, "MenuPanel Tab 0 with <=3 environments must show usageEnvironmentSegment and hide usageEnvironmentPopup")
+            check(m4Panel.usageEnvironmentSegment.segmentCount == 3, "MenuPanel usageEnvironmentSegment must contain 3 items (All / Local / SSH)")
+            check(m4Panel.usageEnvShareLabel.stringValue == "本机 52% · SSH 48%", "MenuPanel usageEnvShareLabel must show 本机 52% · SSH 48% (got \(m4Panel.usageEnvShareLabel.stringValue))")
+            let contentBudget = MenuPanelController.panelWidth - 28
+            check(m4Panel.usageEnvironmentBar.fittingSize.width <= contentBudget, "MenuPanel usageEnvironmentBar with long SSH host must fit within \(contentBudget)pt (got \(m4Panel.usageEnvironmentBar.fittingSize.width))")
+            func viewTreeHasNoTooltip(_ root: NSView) -> Bool {
+                if let tip = root.toolTip, !tip.isEmpty { return false }
+                return root.subviews.allSatisfy(viewTreeHasNoTooltip)
+            }
+            check(viewTreeHasNoTooltip(m4Panel.usageEnvironmentSegment), "MenuPanel usageEnvironmentSegment must have zero static tooltips")
+
+            // 3. 切换至 SSH 环境：请求不带 accountId、刷新为 91.2K、持久化 configuration、且不覆盖默认 all 缓存
+            let allCacheSnap = m4Host.cachedUsageReportsByPeriod["today"]?["snapshotId"] as? String
+            m4Panel.usageEnvironmentSegment.selectedSegment = 2
+            m4Panel.usageEnvironmentSegmentChanged(m4Panel.usageEnvironmentSegment)
+            waitUntil(step: 0.01, description: "MenuPanel switch to SSH environment") { m4Host.cachedUsageReportsByPeriod["today|env=ssh:very-long-remote-dev-hostname-oracle-phx.internal|acc=all"] != nil && m4Panel.tokensTile.valueLabel.stringValue == "91.2K" }
+            check(m4SummaryCalls.last?["environmentId"] as? String == "ssh:very-long-remote-dev-hostname-oracle-phx.internal" && m4SummaryCalls.last?["accountId"] == nil, "MenuPanel environment switch must send environmentId without accountId")
+            check(m4Host.configuration?.value.menuUsageEnvironmentId == "ssh:very-long-remote-dev-hostname-oracle-phx.internal", "MenuPanel environment switch must persist menuUsageEnvironmentId")
+            check(m4Host.cachedUsageReportsByPeriod["today"]?["snapshotId"] as? String == allCacheSnap, "MenuPanel filtered environment fetch must preserve default all cachedUsageReportsByPeriod[today]")
+            check(m4Panel.usageEnvShareLabel.isHidden == true, "MenuPanel viewing specific online SSH env must hide share label")
+
+            // 4. 从菜单栏深链跳转到主窗口用量页时，透传当前选中的环境筛选
+            m4Host.openMainWindowFromMenuPanel(tab: 0, usagePeriod: 0, usageEnvironmentId: m4Panel.selectedEnvironmentId)
+            pump()
+            check(m4Host.currentPage == 2 && m4Host.usagePage?.selectedEnvironmentId == "ssh:very-long-remote-dev-hostname-oracle-phx.internal" && m4Host.usagePage?.selectedAccountId == "all", "openMainWindowFromMenuPanel must carry selectedEnvironmentId to UsagePage")
+
+            // 5. > 3 环境（多台 SSH）自动切换为 .small 玻璃下拉弹出框，选中离线主机显示「离线快照」
+            m4Panel.selectUsageEnvironment("all", persist: true)
+            m4Mode = .multiSsh
+            m4Host.fetchUsageSummary(period: "today", environmentId: "all", force: true)
+            waitUntil(step: 0.01, description: "MenuPanel >3 environments popup fallback") { !m4Panel.usageEnvironmentPopup.isHidden }
+            check(m4Panel.usageEnvironmentSegment.isHidden && !m4Panel.usageEnvironmentPopup.isHidden, "MenuPanel Tab 0 with >3 environments must fall back to usageEnvironmentPopup")
+            check(m4Panel.usageEnvironmentPopup.controlSize == .small && m4Panel.usageEnvironmentPopup.cell is DesignPopUpCell && m4Panel.usageEnvironmentPopup.subviews.contains { $0 is DesignPopUpHoverOverlay }, "MenuPanel usageEnvironmentPopup must use .small size, DesignPopUpCell, and hover overlay")
+            if let offlineIdx = m4Panel.usageEnvironmentPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "ssh:offline-demo" }) {
+                m4Panel.usageEnvironmentPopup.selectItem(at: offlineIdx)
+                m4Panel.usageEnvironmentPopupChanged(m4Panel.usageEnvironmentPopup)
+                waitUntil(step: 0.01, description: "MenuPanel select offline SSH host") { m4Panel.usageEnvShareLabel.stringValue == L10n.t("menu_panel.env.offline_hint") }
+                check(!m4Panel.usageEnvShareLabel.isHidden && m4Panel.usageEnvShareLabel.stringValue == "离线快照", "MenuPanel selecting offline SSH host must display 离线快照 hint")
+            } else {
+                check(false, "MenuPanel usageEnvironmentPopup must include ssh:offline-demo")
+            }
+
+            // 6. 英文语言验证：无中文泄漏且宽度仍 <= 396pt
+            L10n.shared.setLanguage("en", notify: false)
+            m4Panel.selectUsageEnvironment("all", persist: true)
+            m4Mode = .oneSsh
+            let m4PanelEn = MenuPanelController(app: m4Host)
+            m4Host.menuPanelController = m4PanelEn
+            _ = m4PanelEn.view
+            m4PanelEn.panelWillOpen()
+            m4Host.fetchUsageSummary(period: "today", environmentId: "all", force: true)
+            waitUntil(step: 0.01, description: "MenuPanel English one-SSH layout") { m4PanelEn.usageEnvShareLabel.stringValue.contains("Local 52%") }
+            m4PanelEn.view.layoutSubtreeIfNeeded()
+            check(m4PanelEn.usageEnvironmentBar.fittingSize.width <= contentBudget, "English MenuPanel usageEnvironmentBar must fit within \(contentBudget)pt (got \(m4PanelEn.usageEnvironmentBar.fittingSize.width))")
+            let m4EnTexts = allTextValues(m4PanelEn.usageEnvironmentBar) + m4PanelEn.usageEnvironmentSegment.labels
+            let m4EnLeaks = m4EnTexts.filter { $0.range(of: "[\\u4E00-\\u9FFF]", options: .regularExpression) != nil }
+            check(m4EnLeaks.isEmpty, "English MenuPanel usageEnvironmentBar must contain zero Chinese characters: \(m4EnLeaks)")
+
+            // 7. 恢复中文并验证无 SSH 纯本机回退时自动清回 all 并隐藏 bar
+            L10n.shared.setLanguage("zh-Hans", notify: false)
+            m4Host.menuPanelController = m4Panel
+            m4Panel.selectUsageEnvironment("ssh:offline-demo", persist: true)
+            waitUntil(step: 0.01, description: "MenuPanel select stale ssh before fallback") { m4Panel.selectedEnvironmentId == "ssh:offline-demo" }
+            m4Mode = .pureLocal
+            m4Host.fetchUsageSummary(period: "today", environmentId: "ssh:offline-demo", force: true)
+            waitUntil(step: 0.01, description: "MenuPanel stale SSH auto-fallback to all") { m4Panel.selectedEnvironmentId == "all" && m4Panel.usageEnvironmentBar.isHidden }
+            check(m4Panel.selectedEnvironmentId == "all" && m4Panel.usageEnvironmentBar.isHidden, "MenuPanel must auto-fallback stale SSH selection to all and hide usageEnvironmentBar on pure-local report")
         }
 
         let result:[String:Any] = ["stableOnlySelectionPassed":true,"nativeLayouts":captures.count,"captures":captures,"enCaptures":enCaptures,"menuCaptures":6,"safeSwitchSharedFlowPassed":true,"emailWidthPassed":true,"partialPricingPassed":true,"headlessNoVisibleWindowLeaksPassed":true,"nativeAssertions":assertionCount,"scope":"isolated synthetic AppKit fixture; not installed-app acceptance"]

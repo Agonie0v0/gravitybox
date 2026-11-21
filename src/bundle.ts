@@ -1,6 +1,7 @@
 import { get as httpsGet } from 'node:https';
 import { get as httpGet } from 'node:http';
 import { createHash } from 'node:crypto';
+import type { CDP } from './cdp.js';
 import type { Dictionary } from './dictionary.js';
 import { bt } from './i18n.js';
 
@@ -22,6 +23,14 @@ export const SUPPORTED_BUNDLES = new Map([
   ['2.33.0', 'f066a497c9c61198394cb3218e42ff61d85b03910d81282589c3ef066905f347'],
 ]);
 export const VERIFIED_VERSIONS = new Set(SUPPORTED_BUNDLES.keys());
+export const ADDITIONAL_REMOTE_BUNDLES = new Map<string, Set<string>>();
+
+export function isSupportedBundleHash(version: string | undefined, sha256: string | undefined): boolean {
+  if (!version || !sha256) return false;
+  const expected = SUPPORTED_BUNDLES.get(version);
+  if (expected && expected === sha256) return true;
+  return Boolean(ADDITIONAL_REMOTE_BUNDLES.get(version)?.has(sha256));
+}
 
 export function isVerifiedVersion(version?: string): boolean {
   return typeof version === 'string' && VERIFIED_VERSIONS.has(version);
@@ -178,7 +187,7 @@ export function looksLikeNoise(text: string): boolean {
   if (/^!?[a-z-]+(?:-[a-z0-9./%[\]]+)*\s/.test(text) && /\s[a-z-]+:/.test(text)) return true;
   if (/^[+.]/.test(text) || /this\.|style\[/.test(text)) return true;
   if (/^(?:solid|dashed|dotted|double|groove|ridge|inset|outset|none|hidden)$/i.test(text)) return true;
-  if (/^(?:translate|scale|rotate|skew|matrix|blur|grayscale|opacity|hue-rotate|rgba?|hsla?|url|linear-gradient|radial-gradient|calc|var|repeat|drop-shadow)\(/.test(text)) return true;
+  if (/^(?:translate|scale|rotate|skew|matrix|blur|grayscale|opacity|hue-rotate|rgba?|hsla?|url|linear-gradient|radial-gradient|calc|clamp|var|repeat|drop-shadow)\(/.test(text)) return true;
   if (/^-?\d+(?:\.\d+)?(?:deg|rad|turn|s|ms)?$/.test(text)) return true;
   if (/^[A-Za-z]+\d+[-_][A-Za-z0-9-]+$/.test(text)) return true;
   if (/^\[object [A-Za-z]+\]$/.test(text)) return true;
@@ -195,7 +204,16 @@ export function looksLikeNoise(text: string): boolean {
   if (/^system-ui,|^ui-monospace,/.test(text)) return true;
   if (/^translate[XY]\(/.test(text)) return true;
   if (/^(?:grid-rows-|opacity-|scale-|max-h-|max-w-|min-w-|h-|w-|p-|bg-|border)/.test(text) && /-|:/.test(text)) return true;
-  if (/\b(?:flex|grid|items-center|justify-center|bg-|text-|border-|opacity-|animate-|px-|py-|shrink|grow|sticky|top-0|z-10)\b/.test(text) && /\s/.test(text)) return true;
+  if (/\b(?:flex|grid|items-center|justify-center|bg-|text-|border-|opacity-|animate-|px-|py-|shrink|grow|sticky|top-0|z-10|object-cover|object-contain)\b/.test(text) && /\s/.test(text)) return true;
+  if (/\s/.test(text) && /\b(?:block|inline|inline-block|relative|absolute|fixed|hidden|truncate)\b/.test(text)) {
+    const parts = text.trim().split(/\s+/);
+    if (
+      parts.some(part => /-|:/.test(part)) &&
+      parts.every(part => /^(?:[a-z-]+:)*(?:block|inline|inline-block|relative|absolute|fixed|hidden|truncate|[a-z][a-z0-9]*(?:-[a-z0-9./%[\]]+)+)$/.test(part))
+    ) {
+      return true;
+    }
+  }
   if (/\bminmax\(/.test(text) || /^page\.(?:reload|goBack|goForward)\(\)$/.test(text)) return true;
   if (/^[A-Z_]+(?:\s+[A-Z_]+)+$/.test(text)) return true;
   if (/^[a-z_]+(?:\s+[a-z_]+){2,}$/.test(text)) return true;
@@ -349,6 +367,26 @@ export function findMissingStrings(extracted: { text: string; kinds?: string[] }
   return [...new Set(missing)].sort((a, b) => a.localeCompare(b));
 }
 
+export const ADAPTIVE_FULL_TRANSLATION_MIN_COVERAGE = 0.85;
+export const ADAPTIVE_FULL_TRANSLATION_MIN_STRINGS = 10;
+
+export function computeBundleDictionaryCoverage(
+  extracted: readonly { text: string; kinds?: string[] }[],
+  dictionary: Dictionary
+): { total: number; matched: number; missing: string[]; coverage: number } {
+  const translatableKeys = new Set<string>();
+  for (const item of extracted) {
+    if (item.kinds?.includes('template') || item.kinds?.includes('fragment')) continue;
+    const key = normalizeText(item.text);
+    if (key) translatableKeys.add(key);
+  }
+  const missing = findMissingStrings(extracted as { text: string; kinds?: string[] }[], dictionary);
+  const total = translatableKeys.size;
+  const matched = Math.max(0, total - missing.length);
+  const coverage = total > 0 ? matched / total : 0;
+  return { total, matched, missing, coverage };
+}
+
 export type PendingList = {
   schema: 1;
   appVersion: string;
@@ -379,6 +417,29 @@ export async function fetchBundleWithHash(origin: string, timeout = 8000): Promi
     timeoutError: bt('bundle.resource_timeout'),
   });
   return { source: buffer.toString('utf8'), hash, bytes: buffer.length };
+}
+
+/** 通过 CDP Isolated World 同源缓存计算远端 /main.js SHA-256，零重复跨网流量，不传源码回主进程。 */
+export async function fetchRemoteBundleHashViaCdp(
+  cdp: Pick<CDP, 'evaluate'>,
+  contextId: number
+): Promise<{ source: string | undefined; hash: string; bytes: number }> {
+  const res = await cdp.evaluate(
+    `(async () => {
+      const resp = await fetch('/main.js', { cache: 'force-cache' });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const buf = await resp.arrayBuffer();
+      if (buf.byteLength > 20000000) throw new Error('bundle_size_exceeded');
+      const digest = await crypto.subtle.digest('SHA-256', buf);
+      const hash = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+      return { hash, bytes: buf.byteLength };
+    })()`,
+    contextId
+  );
+  if (!res || typeof res.hash !== 'string' || !/^[0-9a-f]{64}$/i.test(res.hash)) {
+    throw new Error(bt('bundle.resource_timeout'));
+  }
+  return { source: undefined, hash: res.hash.toLowerCase(), bytes: Number(res.bytes) || 0 };
 }
 
 /** Keep extractor evidence; generic text is a label, never invent a button role. */

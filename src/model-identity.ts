@@ -1,8 +1,11 @@
 export const THINKING_EFFORT_SUFFIX_RE =
-  /(?:-(?:extra-high|extra-low|xhigh|high|medium|low|minimal|max|thinking))+$/i;
+  /(?:-(?:extra-high|extra-low|xhigh|extra|high|medium|low|minimal|max|thinking))+$/i;
 
 export const THINKING_EFFORT_OR_LATEST_SUFFIX_RE =
-  /(?:-(?:extra-high|extra-low|xhigh|high|medium|low|minimal|max|thinking|latest))+$/i;
+  /(?:-(?:extra-high|extra-low|xhigh|extra|high|medium|low|minimal|max|thinking|latest))+$/i;
+
+export const TIERED_OR_THINKING_EFFORT_SUFFIX_RE =
+  /(?:-(?:tiered|extra-high|extra-low|xhigh|extra|high|medium|low|minimal|max|thinking))+$/i;
 
 /** Strip Vertex AI / GCP / Cloud publisher prefixes and RPC method suffixes while preserving case. */
 export function stripModelProviderPrefix(name: string): string {
