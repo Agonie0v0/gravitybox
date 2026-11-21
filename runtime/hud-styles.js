@@ -50,10 +50,8 @@ export const HUD_STYLES_CSS = `
   --hud-compaction-danger-fg: #FFFFFF;
   --hud-compaction-danger-border: transparent;
   --hud-compaction-danger-shadow: 0 1px 2px rgba(185, 28, 28, 0.30), inset 0 0.5px 0 rgba(255, 255, 255, 0.24);
-  --hud-role-planner-bg: rgba(99, 102, 241, 0.12);
-  --hud-role-planner-fg: #4f46e5;
-  --hud-role-executor-bg: rgba(14, 165, 233, 0.12);
-  --hud-role-executor-fg: #0284c7;
+  --hud-role-badge-bg: rgba(10, 10, 12, 0.055);
+  --hud-role-badge-fg: #52525B;
 
   /* 骨架屏扫描动效 Tokens (Light) */
   --hud-skeleton-base: rgba(10, 10, 12, 0.04);
@@ -117,10 +115,8 @@ export const HUD_STYLES_CSS = `
   --hud-compaction-danger-fg: #FFFFFF;
   --hud-compaction-danger-border: transparent;
   --hud-compaction-danger-shadow: 0 1px 3px rgba(239, 68, 68, 0.36), inset 0 0.5px 0 rgba(255, 255, 255, 0.26);
-  --hud-role-planner-bg: rgba(129, 140, 248, 0.18);
-  --hud-role-planner-fg: #a5b4fc;
-  --hud-role-executor-bg: rgba(56, 189, 248, 0.16);
-  --hud-role-executor-fg: #7dd3fc;
+  --hud-role-badge-bg: rgba(255, 255, 255, 0.08);
+  --hud-role-badge-fg: #A1A1AA;
 
   /* 骨架屏扫描动效 Tokens (Dark) */
   --hud-skeleton-base: rgba(255, 255, 255, 0.05);
@@ -882,12 +878,12 @@ export const HUD_STYLES_CSS = `
 .hud-role-badge {
   display: inline-flex;
   align-items: center;
-  padding: 1px 4.5px;
+  padding: 1.5px 5px;
   border-radius: 4px;
-  background-color: var(--hud-badge-bg);
-  color: var(--hud-text-secondary);
+  background-color: var(--hud-role-badge-bg);
+  color: var(--hud-role-badge-fg);
   font-size: 9.5px;
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1.2;
   white-space: nowrap;
   flex: 0 0 auto;
@@ -896,16 +892,6 @@ export const HUD_STYLES_CSS = `
 
 .hud-role-badge[hidden] {
   display: none !important;
-}
-
-.hud-role-badge.is-role-planner {
-  background-color: var(--hud-role-planner-bg);
-  color: var(--hud-role-planner-fg);
-}
-
-.hud-role-badge.is-role-executor {
-  background-color: var(--hud-role-executor-bg);
-  color: var(--hud-role-executor-fg);
 }
 
 .hud-popover-badge {
