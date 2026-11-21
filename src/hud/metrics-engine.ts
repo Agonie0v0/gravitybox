@@ -1646,7 +1646,11 @@ function resolveContextStagesAndActiveSlot(
             explicitCapacity: emptyExplicitCap,
           });
         }
-        if (emptySlot.hasExplicitEvidence && emptySlot.modelId !== 'unknown') {
+        if (
+          emptySlot.hasExplicitEvidence &&
+          emptySlot.modelId !== 'unknown' &&
+          !pair.some((a) => a.slot.modelId === emptySlot.modelId)
+        ) {
           historyModelAcc = emptyAcc;
         }
       }
@@ -1686,7 +1690,7 @@ function resolveContextStagesAndActiveSlot(
       const stages = [
         ...pair.map((acc) => createStageSnapshot(acc, acc.slot.slotKey === emptySlot.slotKey, emptyExplicitCap, 'primary')),
         ...(historyModelAcc
-          ? [createStageSnapshot(historyModelAcc, historyModelAcc.slot.slotKey === emptySlot.slotKey, undefined, 'history')]
+          ? [createStageSnapshot(historyModelAcc, historyModelAcc.slot.slotKey === emptySlot.slotKey, undefined, 'primary')]
           : []),
       ];
       const activeStage = stages.find((s) => s.isActive) ?? stages[0]!;
@@ -1969,27 +1973,20 @@ function resolveContextStagesAndActiveSlot(
       }
     }
 
-    const activePeByModelId = new Map<string, StageAccumulator & { lastSeenSeq: number }>();
+    const peByModelId = new Map<string, StageAccumulator & { lastSeenSeq: number }>();
     for (const pe of [...planners, ...executors]) {
-      if (Boolean(pe.latestStep)) {
-        activePeByModelId.set(pe.slot.modelId, pe);
+      const modelId = pe.slot.modelId;
+      if (modelId && modelId !== 'pending' && modelId !== 'unknown') {
+        const existingPe = peByModelId.get(modelId);
+        if (!existingPe || (!existingPe.latestStep && Boolean(pe.latestStep))) {
+          peByModelId.set(modelId, pe);
+        }
       }
     }
     const filteredOthersRaw: Array<StageAccumulator & { lastSeenSeq: number }> = [];
     for (const other of others) {
       if (!Boolean(other.latestStep)) continue;
-      let absorbedTarget = activePeByModelId.get(other.slot.modelId);
-      // 若尚无 planner 步但活跃 step 与 DOM/配置选中的 pending planner 同物理模型（如缺 f3.60 的 2.34.0 轨迹），原地提升吸收而非打入 history
-      if (
-        !absorbedTarget &&
-        planners.length === 1 &&
-        !planners[0]!.latestStep &&
-        planners[0]!.slot.modelId === other.slot.modelId &&
-        other.slot.slotKey === effectiveActiveSlotKey
-      ) {
-        absorbedTarget = planners[0]!;
-        activePeByModelId.set(other.slot.modelId, absorbedTarget);
-      }
+      const absorbedTarget = peByModelId.get(other.slot.modelId);
       if (absorbedTarget) {
         absorbedTarget.peakContextTokens = Math.max(absorbedTarget.peakContextTokens, other.peakContextTokens);
         if (other.compactionCount && other.compactionCount > 0) {
@@ -2002,6 +1999,8 @@ function resolveContextStagesAndActiveSlot(
             absorbedTarget.explicitCapacity = other.explicitCapacity;
           }
           absorbedTarget.lastSeenSeq = other.lastSeenSeq;
+        } else if (absorbedTarget.explicitCapacity === undefined && other.explicitCapacity !== undefined) {
+          absorbedTarget.explicitCapacity = other.explicitCapacity;
         }
         if (other.slot.slotKey === effectiveActiveSlotKey) {
           effectiveActiveSlotKey = absorbedTarget.slot.slotKey;
@@ -2010,26 +2009,14 @@ function resolveContextStagesAndActiveSlot(
       }
       filteredOthersRaw.push(other);
     }
-    // 吸收可能刚刚填充了 planner 的 explicitCapacity，刷新 inheritedOrchCap 供 pending executor 继承
+    // 吸收可能刚刚填充了 planner/executor 的 explicitCapacity，刷新 inheritedOrchCap 供 pending 槽位继承
     inheritedOrchCap =
       [...planners, ...executors].find((a) => a.explicitCapacity !== undefined)?.explicitCapacity ??
       inheritedOrchCap;
     const filteredOthersSorted = [...filteredOthersRaw].sort((a, b) => a.lastSeenSeq - b.lastSeenSeq);
-    let filteredOthers: StageAccumulator[];
-    if (filteredOthersSorted.length > 3) {
-      const tail = filteredOthersSorted.slice(-3);
-      const activeInOthers = filteredOthersSorted.find((a) => a.slot.slotKey === effectiveActiveSlotKey);
-      if (activeInOthers && !tail.includes(activeInOthers)) {
-        filteredOthers = [activeInOthers, ...tail.slice(1)];
-      } else {
-        filteredOthers = tail;
-      }
-    } else {
-      filteredOthers = filteredOthersSorted;
-    }
 
     const primaryAccs: StageAccumulator[] = [...planners, ...executors];
-    if (hasPendingInputSlot([...primaryAccs, ...filteredOthers]) && inputAsStandaloneSlot) {
+    if (hasPendingInputSlot([...primaryAccs, ...filteredOthersSorted]) && inputAsStandaloneSlot) {
       primaryAccs.push({
         slot: inputAsStandaloneSlot,
         latestPrompt: 0,
@@ -2037,12 +2024,51 @@ function resolveContextStagesAndActiveSlot(
         explicitCapacity: inputExplicitCapacity,
       });
     }
-    orderedEntries = [
-      ...primaryAccs.map((acc) => ({ acc, section: 'primary' as const })),
-      ...filteredOthers.map((acc) => ({ acc, section: 'history' as const })),
-    ];
+    const allOrchAccs: StageAccumulator[] = [...primaryAccs, ...filteredOthersSorted];
+    let cappedAccs: StageAccumulator[];
+    if (allOrchAccs.length > 5) {
+      const maxOthers = Math.max(0, 5 - primaryAccs.length);
+      if (primaryAccs.length >= 5) {
+        const tail = primaryAccs.slice(-5);
+        const activeInPrimary = primaryAccs.find((a) => a.slot.slotKey === effectiveActiveSlotKey);
+        cappedAccs =
+          activeInPrimary && !tail.includes(activeInPrimary)
+            ? [activeInPrimary, ...tail.slice(1)]
+            : tail;
+      } else {
+        const tailOthers = maxOthers > 0 ? filteredOthersSorted.slice(-maxOthers) : [];
+        const activeInOthers = filteredOthersSorted.find((a) => a.slot.slotKey === effectiveActiveSlotKey);
+        const keptOthers =
+          activeInOthers && !tailOthers.includes(activeInOthers)
+            ? maxOthers > 0
+              ? [activeInOthers, ...tailOthers.slice(1)]
+              : [activeInOthers]
+            : tailOthers;
+        cappedAccs = [...primaryAccs, ...keptOthers].slice(0, 5);
+      }
+    } else {
+      cappedAccs = allOrchAccs;
+    }
+    orderedEntries = cappedAccs.map((acc) => ({ acc, section: 'primary' as const }));
   } else {
     const dedupByModelId = new Map<string, StageAccumulator & { lastSeenSeq: number }>();
+    const latestOrchRoleByModelId = new Map<
+      string,
+      { role: 'planner' | 'executor'; slotKey: string; lastSeenSeq: number }
+    >();
+    for (const acc of allAccs) {
+      if (acc.slot.role === 'planner' || acc.slot.role === 'executor') {
+        const key = acc.slot.modelId || acc.slot.slotKey;
+        const prevOrch = latestOrchRoleByModelId.get(key);
+        if (!prevOrch || acc.lastSeenSeq > prevOrch.lastSeenSeq) {
+          latestOrchRoleByModelId.set(key, {
+            role: acc.slot.role,
+            slotKey: acc.slot.slotKey,
+            lastSeenSeq: acc.lastSeenSeq,
+          });
+        }
+      }
+    }
     for (const acc of allAccs) {
       const key = acc.slot.modelId || acc.slot.slotKey;
       const existing = dedupByModelId.get(key);
@@ -2068,6 +2094,22 @@ function resolveContextStagesAndActiveSlot(
         });
       }
     }
+    for (const [key, acc] of dedupByModelId.entries()) {
+      const orch = latestOrchRoleByModelId.get(key);
+      if (orch && acc.slot.role === 'model') {
+        if (acc.slot.slotKey === effectiveActiveSlotKey) {
+          effectiveActiveSlotKey = orch.slotKey;
+        }
+        dedupByModelId.set(key, {
+          ...acc,
+          slot: {
+            ...acc.slot,
+            role: orch.role,
+            slotKey: orch.slotKey,
+          },
+        });
+      }
+    }
     const orderedAccs: StageAccumulator[] = [...dedupByModelId.values()].sort(
       (a, b) => a.lastSeenSeq - b.lastSeenSeq
     );
@@ -2080,8 +2122,8 @@ function resolveContextStagesAndActiveSlot(
       });
     }
     let finalAccs: StageAccumulator[];
-    if (orderedAccs.length > 4) {
-      const tail = orderedAccs.slice(-4);
+    if (orderedAccs.length > 5) {
+      const tail = orderedAccs.slice(-5);
       const pinnedInput =
         inputAsStandaloneSlot &&
         inputAsStandaloneSlot.hasExplicitEvidence &&

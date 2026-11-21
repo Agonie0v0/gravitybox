@@ -1640,7 +1640,7 @@
     "ctxPeakCompSuffix": " (已压缩 {count} 次)",
     "lblCtxModel": "当前模型",
     "lblStageSectionOrchestrator": "Orchestrator 上下文",
-    "lblStageSectionMulti": "曾用模型上下文",
+    "lblStageSectionMulti": "本对话曾用模型",
     "lblStageSectionPending": "待切换模型",
     "lblStageSectionHistory": "本对话曾用模型",
     "stageRolePlanner": "规划 · {model}",

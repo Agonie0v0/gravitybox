@@ -2192,14 +2192,19 @@ export class HudInstance {
     const ctxTxtEl = q('#hud-txt-context');
     const meterFillEl = q('#hud-meter-fill');
     const stages = Array.isArray(c.modelStages) ? c.modelStages : [];
-    const isOrchestratorMode = Boolean(c.isOrchestrator);
-    const visibleStages = isOrchestratorMode
-      ? stages
-      : stages.filter((st) => st && !st.isActive);
+    const visibleStages = stages.filter((st) => st && !st.isActive);
+    const conciseModelName = formatConciseStageModelName(c.modelDisplayName || '');
     const rawShortLabel = String(
-      c.modelShortLabel || formatConciseStageModelName(c.modelDisplayName || '') || c.modelId || ''
+      c.modelShortLabel ||
+        (conciseModelName && conciseModelName !== '—' ? conciseModelName : '') ||
+        (c.modelId && c.modelId !== 'pending' && c.modelId !== 'unknown' ? c.modelId : '') ||
+        ''
     ).trim();
-    const showMultiModel = hasTelemetry && Boolean(c.isMultiModel && visibleStages.length > 0 && rawShortLabel);
+    const validShortLabel =
+      rawShortLabel && rawShortLabel !== '—' && rawShortLabel !== 'pending' && rawShortLabel !== 'unknown'
+        ? rawShortLabel
+        : '';
+    const showMultiModel = hasTelemetry && Boolean(c.isMultiModel && visibleStages.length > 0 && validShortLabel);
     const activeStageObj = stages.find((st) => st && st.isActive);
     const sessionCompCount = !hasTelemetry ? 0 : Math.max(0, Math.floor(Number(s.compactionCount) || 0));
     const hasPerModelCompaction =
@@ -2242,7 +2247,7 @@ export class HudInstance {
     }
     if (modelTagEl) {
       if (showMultiModel) {
-        const shortLbl = rawShortLabel;
+        const shortLbl = validShortLabel;
         const compactLbl = String(c.modelCompactLabel || shortLbl.charAt(0).toUpperCase() || '');
         setElText(modelFullEl, shortLbl);
         setElText(modelShortEl, compactLbl);
@@ -2501,12 +2506,19 @@ export class HudInstance {
     q('#val-cache-saved')?.setAttribute('aria-description', this.t('descCacheSaved'));
 
     // 6. 更新 Popover 3 (当前上下文实况 - 100% 真实底层数据)
-    setTxt(
-      '#pop-ctx-prefix',
-      showMultiModel
-        ? this.t('popCtxPrefixWithModel', { model: rawShortLabel })
-        : this.t('popCtxPrefix')
-    );
+    const activeRole = activeStageObj?.role;
+    const hasActiveRole = activeRole === 'planner' || activeRole === 'executor';
+    let popCtxPrefixText = this.t('popCtxPrefix');
+    if (hasTelemetry && (showMultiModel || hasActiveRole) && validShortLabel) {
+      const headerModelLabel =
+        activeRole === 'planner'
+          ? this.t('stageRolePlanner', { model: validShortLabel })
+          : activeRole === 'executor'
+          ? this.t('stageRoleExecutor', { model: validShortLabel })
+          : validShortLabel;
+      popCtxPrefixText = this.t('popCtxPrefixWithModel', { model: headerModelLabel });
+    }
+    setTxt('#pop-ctx-prefix', popCtxPrefixText);
     setTxt('#pop-ctx-pct', `${ctxPctPrefix}${formatPopoverPercent(contextRatio, c.usedRatioFormatted)}`);
     const capacityText = isRawNumber(c.capacityTokens) && c.capacityTokens > 0
       ? `${c.isFallbackCapacity ? '~' : ''}${formatDetailCompactNumber(c.capacityTokens)}` : '—';
@@ -2566,9 +2578,7 @@ export class HudInstance {
     const stagesListEl = q('#hud-ctx-stages-list');
     if (stagesWrapEl) {
       if (showMultiModel) {
-        const stagesSectionTitle = isOrchestratorMode
-          ? this.t('lblStageSectionOrchestrator')
-          : visibleStages.every((st) => st.hasUsageData !== true)
+        const stagesSectionTitle = visibleStages.every((st) => st.hasUsageData !== true)
           ? this.t('lblStageSectionPending')
           : this.t('lblStageSectionMulti');
         setTxt('#lbl-ctx-stages', stagesSectionTitle);
@@ -2618,7 +2628,7 @@ export class HudInstance {
     }
     if (capContext) {
       const modelNote = showMultiModel
-        ? this.t('ariaContextModelNote', { model: rawShortLabel })
+        ? this.t('ariaContextModelNote', { model: validShortLabel })
         : '';
       let compNote = '';
       if (compCount >= 1) {
@@ -2748,33 +2758,26 @@ export class HudInstance {
     );
     const nodes = [];
     const htmlParts = [];
-    let renderedHistoryHeader = false;
 
     for (const stage of stages) {
       if (!stage || typeof stage !== 'object') continue;
-      if (stage.section === 'history' && !renderedHistoryHeader) {
-        renderedHistoryHeader = true;
-        if (useDomNodes) {
-          const historyTitle = doc.createElement('div');
-          historyTitle.className = 'hud-ctx-history-title';
-          historyTitle.textContent = this.t('lblStageSectionHistory');
-          nodes.push(historyTitle);
-        } else {
-          htmlParts.push(`<div class="hud-ctx-history-title">${escapeHudHtml(this.t('lblStageSectionHistory'))}</div>`);
-        }
-      }
       const isPending = stage.hasUsageData !== true;
       const isActive = Boolean(stage.isActive);
-      const shortModel = String(stage.shortLabel || stage.modelDisplayName || stage.modelId || '—');
+      const rawStageShort = String(stage.shortLabel || '').trim();
+      const hasNamedStageShort =
+        Boolean(rawStageShort) && rawStageShort !== 'pending' && rawStageShort !== 'unknown' && rawStageShort !== '—';
+      const shortModel = hasNamedStageShort
+        ? rawStageShort
+        : String(stage.modelDisplayName || stage.modelId || '—');
       const stageTitle =
         stage.role === 'planner'
-          ? !stage.shortLabel
+          ? !hasNamedStageShort
             ? (this.locale === 'en' ? 'Plan Stage' : '规划阶段')
             : this.t('stageRolePlanner', { model: shortModel })
           : stage.role === 'executor'
-          ? !stage.shortLabel
+          ? !hasNamedStageShort
             ? this.t('stageRoleExecutorPending')
-            : this.t('stageRoleExecutor', { model: String(stage.shortLabel) })
+            : this.t('stageRoleExecutor', { model: shortModel })
           : formatConciseStageModelName(stage.modelDisplayName || shortModel);
 
       let valText;

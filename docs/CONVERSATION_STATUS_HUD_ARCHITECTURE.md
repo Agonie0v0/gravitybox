@@ -64,3 +64,10 @@ Token 账本仅从步骤用量累计一次。生成记录用于匹配计时和�
 - 汉化与 HUD 可分别开关。HUD-only 隔离世界不注册翻译器或项目名标记，保持英文 HUD；两者均关闭时断开页面连接。
 - 数字紧凑格式由共享模块先舍入后进位，全端计数统一保留 3 位有效数字并去尾零；超过一小时按小时显示。详情提供真实整数统计复制、来源状态、观测时间与计时样本数。
 - 模型容量参考值的比例也带 ~；所有 unknown/partial/cached 与精确实测容量有区别。消息包发出时间不冒充数据库观测时间。
+
+## 多模型与 Orchestrator 统一列表合同 (Option A)
+
+- **顶部激活模型呈现**：展开“当前上下文”卡片时，当前活跃模型仅在卡片顶部标题（`#pop-ctx-prefix`）呈现；当活跃阶段在 Orchestrator 中担任 `planner` 或 `executor` 且具备有效模型短名时，顶部前缀保留角色标识（`当前上下文 · 规划 · {model}` / `当前上下文 · 执行 · {model}`，英文 `Current Context · Plan · {model}` / `Current Context · Exec · {model}`），普通模型展示 `当前上下文 · {model}` / `Current Context · {model}`。
+- **底部统一非活跃列表**：底部列表（`#hud-ctx-stages-list`）严格仅展示非活跃模型（`!stage.isActive`），不再重复列出当前活跃模型；取消独立 `Orchestrator 上下文` 分组标题与列表内二次 `history` 分隔标题，全部非活跃模型按平铺统一列表展示。
+- **分区标题收敛**：当全部可见非活跃阶段均尚无实测用量（`hasUsageData !== true`）时，分区标题（`#lbl-ctx-stages`）展示为“待切换模型 / Pending Model”；只要存在至少一个具备实测用量的非活跃模型，统一展示为“本对话曾用模型 / Models in Session”。
+- **物理模型去重与角色保留**：按物理 `modelId` 做 1:1 去重（待介入的 Orchestrator 阶段槽位直接吸收同 `modelId` 历史步骤并保留 `planner`/`executor` 角色），列表中每个曾经在 Orchestrator 中担任 `planner` / `executor` 的模型均保留 `规划 · ` / `执行 · `（`Plan · ` / `Exec · `）前缀。

@@ -2368,7 +2368,7 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
       assert.equal(inst.shadow.querySelector('#hud-txt-context').textContent, '91%');
       assert.equal(
         inst.shadow.querySelector('#pop-ctx-prefix').textContent,
-        lang === 'en' ? 'Current Context · Hydrogen ' : '当前上下文 · Hydrogen '
+        lang === 'en' ? 'Current Context · Exec · Hydrogen ' : '当前上下文 · 执行 · Hydrogen '
       );
       assert.equal(
         inst.shadow.querySelector('#lbl-ctx-peak').textContent,
@@ -2378,20 +2378,18 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
       assert.equal(inst.shadow.querySelector('#hud-ctx-stages-wrap').hasAttribute('hidden'), false);
       assert.equal(
         inst.shadow.querySelector('#lbl-ctx-stages').textContent,
-        lang === 'en' ? 'Orchestrator Context' : 'Orchestrator 上下文'
+        lang === 'en' ? 'Models in Session' : '本对话曾用模型'
       );
       const listHtml = inst.shadow.querySelector('#hud-ctx-stages-list').innerHTML;
       assert.equal(listHtml.includes(lang === 'en' ? 'Plan · Carbon' : '规划 · Carbon'), true);
       assert.equal(listHtml.includes('90.2% · 462K / 512K'), true);
-      assert.equal(listHtml.includes(lang === 'en' ? 'Exec · Hydrogen' : '执行 · Hydrogen'), true);
-      assert.equal(listHtml.includes(lang === 'en' ? 'Active' : '当前'), true);
-      assert.equal(listHtml.includes('91.4% · 468K / 512K'), true);
+      assert.equal(listHtml.includes(lang === 'en' ? 'Exec · Hydrogen' : '执行 · Hydrogen'), false, 'Option A 底部列表不得重复渲染当前活跃模型');
+      assert.equal(listHtml.includes('class="hud-stage-badge"'), false, 'Option A 底部列表不应出现当前活跃徽章');
       assert.equal(listHtml.includes('class="hud-stage-label"'), true);
     }
 
-    // 3b. 验证通用待介入执行阶段（不写死 Hydrogen）、history 分组标题与简化模型短名（保留 .hud-stage-label 防徽章裁切）
+    // 3b. 验证通用待介入执行阶段（不写死 Hydrogen）、统一单标题平铺列表（无二次 history 标题）与角色前缀保留（保留 .hud-stage-label 防徽章裁切）
     assert.match(HUD_STYLES_CSS, /\.hud-stage-label\s*\{[^}]*text-overflow:\s*ellipsis/);
-    assert.match(HUD_STYLES_CSS, /\.hud-ctx-history-title\s*\{[^}]*border-top:/);
     assert.match(HUD_STYLES_CSS, /\.hud-stage-badge\s*\{[^}]*flex:\s*0\s+0\s+auto/);
 
     const historyMetrics = {
@@ -2505,11 +2503,20 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
 
     for (const lang of ['zh', 'en']) {
       const inst = renderWithLang(historyMetrics, lang);
+      assert.equal(
+        inst.shadow.querySelector('#pop-ctx-prefix').textContent,
+        lang === 'en' ? 'Current Context · Plan · Carbon ' : '当前上下文 · 规划 · Carbon '
+      );
+      assert.equal(
+        inst.shadow.querySelector('#lbl-ctx-stages').textContent,
+        lang === 'en' ? 'Models in Session' : '本对话曾用模型'
+      );
       const listHtml = inst.shadow.querySelector('#hud-ctx-stages-list').innerHTML;
       assert.equal(listHtml.includes(lang === 'en' ? 'Exec Stage' : '执行阶段'), true);
       assert.equal(listHtml.includes(lang === 'en' ? 'Pending' : '待介入'), true);
-      assert.equal(listHtml.includes(lang === 'en' ? 'Earlier in Session' : '本对话曾用模型'), true);
-      assert.equal((listHtml.match(/class="hud-ctx-history-title"/g) || []).length, 1, 'history 标题应只渲染一次');
+      assert.equal(listHtml.includes('hud-ctx-history-title'), false, '统一列表不应再渲染二次 history 标题');
+      assert.equal(listHtml.includes('Plan · Carbon'), false, 'Option A 底部列表不得重复渲染当前活跃规划模型');
+      assert.equal(listHtml.includes('规划 · Carbon'), false, 'Option A 底部列表不得重复渲染当前活跃规划模型');
       assert.equal(listHtml.includes('<span class="hud-stage-label">Hydrogen (High)</span>'), true);
       assert.equal(listHtml.includes('<span class="hud-stage-label">3.8 Flash (High)</span>'), true);
       assert.equal(listHtml.includes('<span class="hud-stage-label">Sonnet 4.6</span>'), true);
@@ -2522,12 +2529,92 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
       };
       inst.renderModelStagesList(domList, historyMetrics.context.modelStages, false);
       const historyNodes = domList.children.filter((n) => n.className === 'hud-ctx-history-title');
-      assert.equal(historyNodes.length, 1);
-      assert.equal(historyNodes[0].textContent, lang === 'en' ? 'Earlier in Session' : '本对话曾用模型');
+      assert.equal(historyNodes.length, 0);
       const stageNodes = domList.children.filter((n) => n.classList.contains('hud-stage-item'));
       assert.equal(stageNodes.length, 5);
       const firstLabel = stageNodes[0].children[0].children[0].children[1];
       assert.equal(firstLabel.className, 'hud-stage-label');
+    }
+
+    // 3c. 验证全 pending 非活跃列表使用“待切换模型 / Pending Model”，以及无模型短名时的顶部前缀兜底
+    const pendingOnlyMetrics = {
+      availability: 'ready',
+      session: { turns: 1, steps: 2, compactionCount: 0 },
+      tokens: { totalTokens: 10000, cacheHitRate: 0.5 },
+      context: {
+        hasUsageData: true,
+        modelId: 'gemini-4-carbon',
+        modelDisplayName: 'Orchestrator (Carbon)',
+        modelShortLabel: 'Carbon',
+        modelCompactLabel: 'C',
+        isMultiModel: true,
+        isOrchestrator: true,
+        usedTokens: 5000,
+        peakContextTokens: 5000,
+        capacityTokens: 512000,
+        usedRatio: 5000 / 512000,
+        usedRatioFormatted: '0.98%',
+        breakdown: { cachedContextTokens: 2000, uncachedContextTokens: 3000, latestOutputTokens: 200 },
+        modelStages: [
+          {
+            slotKey: 'orchestrator:carbon',
+            role: 'planner',
+            section: 'primary',
+            modelId: 'gemini-4-carbon',
+            modelDisplayName: 'Orchestrator (Carbon)',
+            shortLabel: 'Carbon',
+            compactLabel: 'C',
+            hasUsageData: true,
+            isActive: true,
+            usedTokens: 5000,
+            peakContextTokens: 5000,
+            capacityTokens: 512000,
+            usedRatio: 5000 / 512000,
+            usedRatioFormatted: '0.98%',
+          },
+          {
+            slotKey: 'orchestrator:executor_pending',
+            role: 'executor',
+            section: 'primary',
+            modelId: 'pending',
+            modelDisplayName: '',
+            shortLabel: '',
+            compactLabel: '',
+            hasUsageData: false,
+            isActive: false,
+            usedTokens: 0,
+            peakContextTokens: 0,
+            capacityTokens: 512000,
+            usedRatio: 0,
+            usedRatioFormatted: '0%',
+          },
+        ],
+      },
+    };
+    for (const lang of ['zh', 'en']) {
+      const pendingInst = renderWithLang(pendingOnlyMetrics, lang);
+      assert.equal(
+        pendingInst.shadow.querySelector('#pop-ctx-prefix').textContent,
+        lang === 'en' ? 'Current Context · Plan · Carbon ' : '当前上下文 · 规划 · Carbon '
+      );
+      assert.equal(
+        pendingInst.shadow.querySelector('#lbl-ctx-stages').textContent,
+        lang === 'en' ? 'Pending Model' : '待切换模型'
+      );
+      const bareInst = renderWithLang({
+        ...pendingOnlyMetrics,
+        context: {
+          ...pendingOnlyMetrics.context,
+          modelId: 'pending',
+          modelDisplayName: '',
+          modelShortLabel: '',
+          modelCompactLabel: '',
+        },
+      }, lang);
+      assert.equal(
+        bareInst.shadow.querySelector('#pop-ctx-prefix').textContent,
+        lang === 'en' ? 'Current Context ' : '当前上下文 '
+      );
     }
 
     // 4. 验证渲染阶段的模型名 XSS 防护转义
@@ -2883,7 +2970,7 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
         lang === 'en' ? 'Compacted 2 times' : '已压缩 2 次'
       );
 
-      // C. 非 Orchestrator 3 模型切换场景：标题为“曾用模型上下文 / Prior Model Context”，自动剔除当前模型防重复，且 unavailable 态清理压缩徽章
+      // C. 非 Orchestrator 3 模型切换场景：标题统一为“本对话曾用模型 / Models in Session”，自动剔除当前模型防重复，且保留曾经担任 planner/executor 的角色前缀
       const nonOrchInst = new HudInstance(`non-orch-dedup-${lang}`, { languageMode: lang });
       nonOrchInst.shadow = new FakeShadowRoot('open', null);
       nonOrchInst.shadow.innerHTML = nonOrchInst.buildHudHtml();
@@ -2926,7 +3013,7 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
             },
             {
               slotKey: 'model:gemini-4-carbon',
-              role: 'model',
+              role: 'planner',
               section: 'primary',
               modelId: 'gemini-4-carbon',
               modelDisplayName: 'Gemini 4 Carbon (Medium)',
@@ -2961,12 +3048,16 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
         },
       });
       assert.equal(
+        nonOrchInst.shadow.querySelector('#pop-ctx-prefix').textContent,
+        lang === 'en' ? 'Current Context · Hydrogen ' : '当前上下文 · Hydrogen '
+      );
+      assert.equal(
         nonOrchInst.shadow.querySelector('#lbl-ctx-stages').textContent,
-        lang === 'en' ? 'Prior Model Context' : '曾用模型上下文'
+        lang === 'en' ? 'Models in Session' : '本对话曾用模型'
       );
       const nonOrchListHtml = nonOrchInst.shadow.querySelector('#hud-ctx-stages-list').innerHTML;
       assert.equal(nonOrchListHtml.includes('Opus 5.5 (Medium)'), true);
-      assert.equal(nonOrchListHtml.includes('Carbon (Medium)'), true);
+      assert.equal(nonOrchListHtml.includes(lang === 'en' ? 'Plan · Carbon' : '规划 · Carbon'), true);
       assert.equal(nonOrchListHtml.includes('Hydrogen (High)'), false, '非 Orchestrator 下半区必须剔除当前已激活模型防重复');
       assert.equal(
         nonOrchListHtml.includes(

@@ -1667,7 +1667,7 @@ test('多模型与曾用模型 (history) 压缩归因、当前模型峰值解耦
   const opusHistoryStage = atCarbon.context.modelStages?.find((s) => s.shortLabel === 'Opus');
   assert.equal(carbonStage1?.isActive, true);
   assert.equal(carbonStage1?.compactionCount, undefined);
-  assert.equal(opusHistoryStage?.section, 'history');
+  assert.equal(opusHistoryStage?.section, 'primary');
   assert.equal(opusHistoryStage?.compactionCount, 2);
 
   // Hydrogen 执行器介入并触发 1 次压缩后：总压缩 3 次，当前活跃 Hydrogen 压缩 1 次，曾用模型 Opus 保持 2 次
@@ -1694,10 +1694,10 @@ test('多模型与曾用模型 (history) 压缩归因、当前模型峰值解耦
   assert.equal(carbonStage2?.compactionCount, undefined);
   assert.equal(hydrogenStage2?.isActive, true);
   assert.equal(hydrogenStage2?.compactionCount, 1);
-  assert.equal(opusHistory2?.section, 'history');
+  assert.equal(opusHistory2?.section, 'primary');
   assert.equal(opusHistory2?.compactionCount, 2);
 
-  // 场景 2：Orchestrator Hydrogen 压缩 1 次后切回独立 Gemini 4 Hydrogen (High)，去重合并时压缩次数守恒不丢失
+  // 场景 2：Orchestrator Hydrogen 压缩 1 次后切回独立 Gemini 4 Hydrogen (High)，去重合并时压缩次数守恒不丢失，且保留 executor 角色
   const standaloneHydrogenStep = step({
     idx: 10,
     rawInputTokens: 30000,
@@ -1725,7 +1725,8 @@ test('多模型与曾用模型 (history) 压缩归因、当前模型峰值解耦
   assert.equal(deduped.session.compactionCount, 1);
   assert.equal(deduped.context.activeModelCompactionCount, 1);
   assert.equal(deduped.context.modelStages?.length, 2);
-  assert.equal(deduped.context.modelStages?.[1]?.slotKey, 'model:gemini-4-hydrogen');
+  assert.equal(deduped.context.modelStages?.[1]?.slotKey, 'orchestrator:hydrogen');
+  assert.equal(deduped.context.modelStages?.[1]?.role, 'executor');
   assert.equal(deduped.context.modelStages?.[1]?.compactionCount, 1);
 });
 
