@@ -1023,7 +1023,7 @@ extension Assistant {
             guard let self else { return }
             if case .success = result { self.directorySource?.cancel(); NSApp.terminate(nil) }
             else if !self.bridge.isOwnedProcessRunning { self.directorySource?.cancel(); NSApp.terminate(nil) }
-            else { self.quitting = false; self.configureRefreshTimer(); self.configureQuotaRefreshTimer(); self.configureAutoUpdateTimer(); self.showPanel(); self.showMessage(L10n.t("assistant.quit_pending_restore"), error:true) }
+            else { self.quitting = false; self.installQuotaScheduleObservers(); self.configureRefreshTimer(); self.configureQuotaRefreshTimer(); self.configureAutoUpdateTimer(); self.showPanel(); self.showMessage(L10n.t("assistant.quit_pending_restore"), error:true) }
         }
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply { if quitting { return .terminateNow }; quit(); return .terminateCancel }
