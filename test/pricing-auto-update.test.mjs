@@ -62,6 +62,11 @@ test('HTML 降噪：剥离噪声标签、保留表格结构并在超长页面优
     'anti_bot_challenge'
   );
   assert.equal(detectBlockedOrEmptyPage('<html><body></body></html>', 'tiny', null), 'empty_or_csr_shell');
+
+  const mediumLongDoc = `<p>${'Gemini pricing row sample text '.repeat(3500)}</p><p>Tail Marker: gemini-2.5-flash $0.30</p>`;
+  const cleanDefault = extractCleanPricingText(mediumLongDoc);
+  assert.ok(cleanDefault.length > 100_000);
+  assert.match(cleanDefault, /Tail Marker: gemini-2\.5-flash \$0\.30/);
 });
 
 test('LiteLLM 与 OpenRouter 解析：过滤区域/batch/非文本通道，保留直连标准报价', () => {

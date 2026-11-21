@@ -11,7 +11,7 @@ const OPENROUTER_URL = 'https://openrouter.ai/api/v1/models';
 const ANTIGRAVITY_MODELS_MD_URL = 'https://antigravity.google/docs/models.md';
 const ANTIGRAVITY_ENTERPRISE_MD_URL = 'https://antigravity.google/docs/enterprise.md';
 
-const MAX_PAGE_CHARS = 55_000;
+const MAX_PAGE_CHARS = 160_000;
 const WARN_HORIZON_MS = 14 * 24 * 60 * 60 * 1000;
 const CONSENSUS_TOLERANCE = 0.01;
 const CONSENSUS_ABS_EPSILON = 0.0005;
