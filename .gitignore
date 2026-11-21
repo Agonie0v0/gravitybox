@@ -20,6 +20,7 @@
 /dict/.backups/
 /dict/.imports/
 /文档/当前版本验收摘要.json
+/pricing-watch-alert.json
 /vendor/
 *.dmg
 *.sha256
