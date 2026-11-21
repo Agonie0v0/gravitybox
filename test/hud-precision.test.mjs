@@ -2739,3 +2739,70 @@ test('P1-1 回归：>4MB 超大 gen_metadata 投影成功不静默丢弃，且 >
   assert.equal(scan3.genPrefixCutoffIdx, 2, '前缀截断点应越过 5MB 历史行推进至 2');
 });
 
+test('2.34.0 主对话 trajectory_metadata_blob field 6 引用自身 UUID 时不得误判为 isSubagentTrajectory', async (t) => {
+  const baseDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'gb-self-root-ref-'));
+  const convDir = path.join(baseDir, 'antigravity', 'conversations');
+  await fs.promises.mkdir(convDir, { recursive: true });
+  t.after(async () => {
+    await fs.promises.rm(baseDir, { recursive: true, force: true });
+  });
+
+  const mainId = '91111111-1111-4111-8111-111111111111';
+  const childId = '92222222-2222-4222-8222-222222222222';
+  const dbPath = path.join(convDir, `${mainId}.db`);
+  const mainDb = new DatabaseSync(dbPath);
+  const childDb = new DatabaseSync(path.join(convDir, `${childId}.db`));
+  t.after(() => {
+    try { mainDb.close(); } catch {}
+    try { childDb.close(); } catch {}
+  });
+
+  const createSchema = (db) => {
+    db.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER NOT NULL, status INTEGER NOT NULL, metadata BLOB, render_info BLOB, step_payload BLOB);
+      CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB, size INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE trajectory_meta (trajectory_id TEXT PRIMARY KEY, cascade_id TEXT, trajectory_type INTEGER);
+      CREATE TABLE trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB);
+    `);
+  };
+  createSchema(mainDb);
+  createSchema(childDb);
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  // Antigravity 2.34.0 主对话会在 trajectory_metadata_blob.field 6 写入自身 root_cascade_id（无 field 5）
+  mainDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?, 0)').run(mainId, mainId);
+  mainDb.prepare('INSERT INTO trajectory_metadata_blob VALUES (?, ?)').run('main', Buffer.from(string(6, mainId)));
+  mainDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (0, 14, 3, ?)').run(
+    Buffer.from(seconds(1, nowSec - 20))
+  );
+  // 模拟一个未闭合工具步（step_type=132, status=1），验证非子轨迹在 isStreaming=false 时不会把小圆点保活点亮
+  mainDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (1, 132, 1, ?)').run(
+    Buffer.from([...seconds(1, nowSec - 10), ...message(4, string(2, 'run_command'))])
+  );
+
+  // 真实子智能体：field 5 指向父对话 mainId，field 6 指向根对话 mainId
+  childDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?, 0)').run(childId, childId);
+  childDb.prepare('INSERT INTO trajectory_metadata_blob VALUES (?, ?)').run(
+    'main',
+    Buffer.from([...string(5, mainId), ...string(6, mainId)])
+  );
+  childDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (0, 15, 3, ?)').run(
+    Buffer.from([...seconds(1, nowSec - 15), ...message(9, usageBytes(usage({ rawInputTokens: 1000, outputTokens: 100 })))])
+  );
+
+  const engine = new ConversationMetricsEngine({ geminiDir: baseDir });
+  const mainMetrics = await engine.getConversationMetrics({
+    conversationId: mainId,
+    isStreaming: false,
+  });
+  assert.equal(Boolean(mainMetrics.session.isSubagentTrajectory), false, '主对话自身 root 引用不得误判为子智能体轨迹');
+  assert.equal(mainMetrics.activityPhase, 'idle', '主对话非流式时残留工具步不得使 activityPhase 虚亮');
+
+  const childMetrics = await engine.getConversationMetrics({
+    conversationId: childId,
+    isStreaming: false,
+  });
+  assert.equal(childMetrics.session.isSubagentTrajectory, true, '带外部父/根引用的子智能体仍必须判定为 true');
+});
+

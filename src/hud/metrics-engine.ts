@@ -3403,6 +3403,8 @@ export class ConversationMetricsEngine {
           ? parseExecutorMetadataBlob(executorMetaBlob)
           : undefined;
 
+      const selfLower = selfConversationId.toLowerCase();
+      const selfTrajLower = trajectoryId?.toLowerCase() ?? '';
       const referencedUuidsInMetaBlob = new Set<string>(
         parentMetaReadError || (parentMetaUnchanged && existing)
           ? existing?.referencedUuidsInMetaBlob ?? []
@@ -3411,14 +3413,13 @@ export class ConversationMetricsEngine {
       if (!parentMetaReadError && !parentMetaUnchanged) {
         for (const slice of metaBlobProjectedSlices) {
           for (const u of parentReferences(slice)) {
+            if (u === selfLower || (selfTrajLower && u === selfTrajLower)) continue;
             referencedUuidsInMetaBlob.add(u);
           }
         }
       }
 
       const childConversationIds = new Set<string>();
-      const selfLower = selfConversationId.toLowerCase();
-      const selfTrajLower = trajectoryId?.toLowerCase() ?? '';
 
       const parseStepRow = (row: HudWorkerRawStepRow): ParsedConversationStep => {
         const extraList = [row.render_info, row.step_payload].filter(
@@ -3845,8 +3846,15 @@ export class ConversationMetricsEngine {
         Boolean(s.toolCallName && SUBAGENT_TOOL_NAMES.has(s.toolCallName))
     );
 
+    let hasExternalParentRef = false;
+    for (const ref of mainState.referencedUuidsInMetaBlob) {
+      if (ref !== mainIdLower && (!mainTrajLower || ref !== mainTrajLower)) {
+        hasExternalParentRef = true;
+        break;
+      }
+    }
     const isSubagentTrajectory = Boolean(
-      dbPathOverride || (mainState.hasParentMetadataBlob && mainState.referencedUuidsInMetaBlob.size > 0)
+      dbPathOverride || (mainState.hasParentMetadataBlob && hasExternalParentRef)
     );
     // 优先通过官方 conversation_summaries.db 索引表 O(log N) 精确检索全量子会话与分屏子智能体自身运行态
     const indexedSummaryChildren = new Set<string>();
