@@ -354,9 +354,9 @@ test('P1-37/P1-39：dict/base.json 无首尾空格，HUD 与 engine.js 术语和
   assert.equal(baseDict['Extra'], 'Extra');
   assert.equal(baseDict['Extra High'], 'Extra High');
   assert.equal(baseDict['Max'], 'Max');
-  assert.equal(baseDict['Orchestrator Settings'], '编排器设置');
-  assert.equal(baseDict['Orchestrator Model'], '编排器模型');
-  assert.equal(baseDict['Executor Model'], '执行器模型');
+  assert.equal(baseDict['Orchestrator Settings'], 'Orchestrator 设置');
+  assert.equal(baseDict['Orchestrator Model'], 'Orchestrator 模型');
+  assert.equal(baseDict['Executor Model'], 'Executor 模型');
   assert.equal(baseDict['Input Box'], '对话输入框');
   assert.equal(baseDict['Choose which key sends a message in the chat composer.'], '选择在对话输入框中发送消息的按键。');
   const { classifyCoverage } = await import('../dist/coverage.js');

@@ -1078,10 +1078,10 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
       await cdp.evaluate(`document.body.innerHTML=${JSON.stringify(html)}`);
       const engine = await readFile(join(root, 'dist/engine.js'), 'utf8');
       await cdp.evaluate(`globalThis.__GRAVITYBOX_BOOT__=${JSON.stringify({ origin, path: '/', dictionary: { schema: 1, version: 'orch-model-row-1', entries: baseDict }, conservative: true })};\n${engine}`);
-      await until(async () => await text(cdp, '#orch-label') === '编排器模型');
-      assert.equal(await text(cdp, '#orch-sec'), '编排器设置');
+      await until(async () => await text(cdp, '#orch-label') === 'Orchestrator 模型');
+      assert.equal(await text(cdp, '#orch-sec'), 'Orchestrator 设置');
       assert.equal(await text(cdp, '#orch-desc'), baseDict['Plans the work, makes design decisions, and reviews the result. Pick a top-tier model. You can also pick one per conversation from the Orchestrator row in the model menu.']);
-      assert.equal(await text(cdp, '#exec-label'), '执行器模型');
+      assert.equal(await text(cdp, '#exec-label'), 'Executor 模型');
       assert.equal(await text(cdp, '#exec-desc'), '负责执行计划：搜索、编辑、构建与测试。建议选择速度更快、成本更低的模型。');
       assert.equal(await text(cdp, '#orch-trigger'), 'Settings');
       assert.equal(await text(cdp, '#exec-trigger'), 'Settings');
