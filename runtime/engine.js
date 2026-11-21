@@ -116,7 +116,10 @@
   /* PROTECTED keeps user content, code and editors in English. `[data-testid="conversation-row-sidebar"]`
      is the container the app really uses for the conversation list: its title <span> is NOT inside
      `a[href^="/c/"]`, so relying on the anchor alone left conversation titles translatable. */
-  const PROTECTED = 'script,style,code,pre,input,textarea,svg,canvas,.file-tree,[data-message-id],[contenteditable]:not([contenteditable="false"]),[data-gravitybox-protect],[data-message-author-role],[data-testid*="message"]:not([data-testid="cascade-system-message-toolbar"]),[data-testid*="conversation-title"],[data-testid="conversation-row-sidebar"],[data-testid*="conversation-row"],[data-testid*="model"]:not([data-testid^="shortcut-row-"]),[data-testid*="artifact"]:not([data-testid^="shortcut-row-"]),[data-testid="planner-response-text"],[data-testid="user-input-step"],[data-testid="breadcrumb-segment"],[data-testid="project-header"],[data-testid="project-selector-trigger"],a[href^="/c/"],a[href*="/c/"],.monaco-editor,.xterm,.markdown,.markdown-frontmatter,.markdown-alert-title,.notebook-markdown-cell,.prose,[role="log"],.chat-message,.message-content,.conversation-title,.terminal,.output-view,.debug-console,.code-view,.artifact-container,.model-item,.gravitybox-project-name,[data-testid*="attachment"],[data-testid*="file-chip"],[data-testid*="context-chip"],[data-testid="side-question-followup-user"],[data-testid="voice-transcript-summary"],[data-testid="coordinator-card-latest-line"],[data-testid="coordinator-worker-card"] .truncate';
+  const PROTECTED_CORE = 'script,style,code,pre,input,textarea,svg,canvas,.file-tree,[data-message-id],[contenteditable]:not([contenteditable="false"]),[data-gravitybox-protect],[data-message-author-role],[data-testid*="message"]:not([data-testid="cascade-system-message-toolbar"]),[data-testid*="conversation-title"],[data-testid="conversation-row-sidebar"],[data-testid*="conversation-row"],[data-testid*="artifact"]:not([data-testid^="shortcut-row-"]),[data-testid="planner-response-text"],[data-testid="user-input-step"],[data-testid="breadcrumb-segment"],[data-testid="project-header"],[data-testid="project-selector-trigger"],a[href^="/c/"],a[href*="/c/"],.monaco-editor,.xterm,.markdown,.markdown-frontmatter,.markdown-alert-title,.notebook-markdown-cell,.prose,[role="log"],.chat-message,.message-content,.conversation-title,.terminal,.output-view,.debug-console,.code-view,.artifact-container,.model-item,.gravitybox-project-name,[data-testid*="attachment"],[data-testid*="file-chip"],[data-testid*="context-chip"],[data-testid="side-question-followup-user"],[data-testid="voice-transcript-summary"],[data-testid="coordinator-card-latest-line"],[data-testid="coordinator-worker-card"] .truncate';
+  const PROTECTED = PROTECTED_CORE + ',[data-testid*="model"]:not([data-testid^="shortcut-row-"])';
+  const SETTINGS_MODEL_PROTECTED = '[data-testid*="model-selector"],[data-testid*="model-picker"],[data-testid*="model-option"],[data-testid*="model-item"],[data-testid*="model-name"],[data-testid*="custom-model"]';
+  const SETTINGS_MODEL_WIDGET = '[role="combobox"],[aria-haspopup],[role="menu"],[role="listbox"],[role="option"]';
   /* J01 positive user-content contract. A container marked `data-gravitybox-user-content` or an element
      marked `data-gravitybox-user-name` is user-authored text: never translated, never collected. On top
      of the explicit contract (usable by adapters and tests) entity surfaces are recognised
@@ -587,6 +590,13 @@
     const next=headings.find(e=>e!==start&&(start.compareDocumentPosition(e)&Node.DOCUMENT_POSITION_FOLLOWING));
     return !next||!!(button.compareDocumentPosition(next)&Node.DOCUMENT_POSITION_FOLLOWING);
   }
+  function isProtectedElement(el, scan = 0) {
+    if (matches(el, PROTECTED_CORE)) return true;
+    if (matches(el, '[data-testid*="model"]:not([data-testid^="shortcut-row-"])')) {
+      return !inSystemSettings(el, scan) || matches(el, SETTINGS_MODEL_PROTECTED);
+    }
+    return inSystemSettings(el, scan) && matches(el, SETTINGS_MODEL_WIDGET) && Boolean(el.closest('[data-testid*="model"]'));
+  }
   function blocked(element, scan = 0) {
     if(routeExcluded||restrictedAdaptiveRoute())return true;
     if (!element || element.nodeType !== Node.ELEMENT_NODE) return true;
@@ -597,7 +607,7 @@
     if (userNamed(element) || settingsProjectName(element,scan)) return true;
     const cached = blockedCache.get(element);
     if (cached !== undefined && cached.scan === scan) return cached.val;
-    const isProt = ancestors(element).some(el => matches(el, PROTECTED)) || (element.tagName === 'BUTTON' && Boolean(element.closest('[role="dialog"]')) && projectNames.has(normalize(element.textContent || '')));
+    const isProt = ancestors(element).some(el => isProtectedElement(el, scan)) || (element.tagName === 'BUTTON' && Boolean(element.closest('[role="dialog"]')) && projectNames.has(normalize(element.textContent || '')));
     blockedCache.set(element, { scan, val: isProt });
     return isProt;
   }
@@ -2289,7 +2299,7 @@
         && /^Select model,\s*current:\s*.+$/i.test(original)) {
       return ancestors(element).every(el => !matches(el, PROTECTED) || el === element);
     }
-    const protectedParents = ancestors(element).filter(el => matches(el, PROTECTED));
+    const protectedParents = ancestors(element).filter(el => isProtectedElement(el, scanCount));
     if (protectedParents.some(el => el !== element || !['INPUT', 'TEXTAREA'].includes(el.tagName))) return false;
     // These first-party controls have no UI ancestor. Keep the exception exact so arbitrary
     // form metadata outside known UI (including the unknown-area fixture) remains untouched.

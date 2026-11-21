@@ -1037,6 +1037,53 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
       assert.equal(await text(cdp,'#flash-inline'),'Type / and select plan to have the agent generate a plan.');
     } finally { cdp?.close();if(target?.targetId)await browserCommand('Target.closeTarget',{targetId:target.targetId}).catch(error => { chromeErrors += '\nTarget cleanup: ' + error.message; }); }
   });
+  await check('设置面板 Orchestrator/Executor Model 行不被 data-testid*="model" 误拦截，下拉选择器仍受保护', async () => {
+    let target, cdp;
+    try {
+      ({ target, cdp } = await openIsolatedPage('/?settingsOpen=true&settingsScreen=Models'));
+      const html = `
+        <nav aria-label="Sidebar"><a href="/history">History</a></nav>
+        <div role="dialog" aria-label="Settings">
+          <aside>
+            <h1>Settings</h1>
+            <button>General</button>
+            <button>Application</button>
+            <button>Models</button>
+          </aside>
+          <main>
+            <h2>Models</h2>
+            <h3 id="orch-sec">Orchestrator Settings</h3>
+            <div data-testid="orchestrator-model-row">
+              <span id="orch-label">Orchestrator Model</span>
+              <span id="orch-desc">Plans the work, makes design decisions, and reviews the result. Pick a top-tier model. You can also pick one per conversation from the Orchestrator row in the model menu.</span>
+              <button id="orch-trigger" data-testid="model-selector-trigger">Settings</button>
+            </div>
+            <div data-testid="executor-model-row">
+              <span id="exec-label">Executor Model</span>
+              <span id="exec-desc">Carries out the plan: searches, edits, builds, and tests. Pick a faster, cheaper model.</span>
+              <button id="exec-trigger" aria-haspopup="menu">Settings</button>
+            </div>
+          </main>
+        </div>
+        <div data-testid="orchestrator-model-row"><span id="outside-model-row-text">Orchestrator Model</span></div>
+      `;
+      const baseDict = JSON.parse(await readFile(join(root, 'dict/base.json'), 'utf8'));
+      await cdp.evaluate(`document.body.innerHTML=${JSON.stringify(html)}`);
+      const engine = await readFile(join(root, 'dist/engine.js'), 'utf8');
+      await cdp.evaluate(`globalThis.__GRAVITYBOX_BOOT__=${JSON.stringify({ origin, path: '/', dictionary: { schema: 1, version: 'orch-model-row-1', entries: baseDict }, conservative: true })};\n${engine}`);
+      await until(async () => await text(cdp, '#orch-label') === '编排器模型');
+      assert.equal(await text(cdp, '#orch-sec'), '编排器设置');
+      assert.equal(await text(cdp, '#orch-desc'), baseDict['Plans the work, makes design decisions, and reviews the result. Pick a top-tier model. You can also pick one per conversation from the Orchestrator row in the model menu.']);
+      assert.equal(await text(cdp, '#exec-label'), '执行器模型');
+      assert.equal(await text(cdp, '#exec-desc'), '负责执行计划：搜索、编辑、构建与测试。建议选择速度更快、成本更低的模型。');
+      assert.equal(await text(cdp, '#orch-trigger'), 'Settings');
+      assert.equal(await text(cdp, '#exec-trigger'), 'Settings');
+      assert.equal(await text(cdp, '#outside-model-row-text'), 'Orchestrator Model');
+    } finally {
+      cdp?.close();
+      if (target?.targetId) await browserCommand('Target.closeTarget', { targetId: target.targetId }).catch(error => { chromeErrors += '\nTarget cleanup: ' + error.message; });
+    }
+  });
   await check('HUD 独立挂载不覆盖输入区、窄屏单行、向上弹出及输入框零焦点争夺', async () => {
     await main.send('Page.bringToFront');
     await main.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
