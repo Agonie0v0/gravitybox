@@ -1874,6 +1874,51 @@ import Cocoa
                 ) == false,
                 "Unrelated process mentioning app path in arguments must not block switching"
             )
+            check(
+                Assistant.hasRunningAntigravityProcess(
+                    psOutput: "/Applications/Antigravity.app/Contents/Resources/bin/language_server --standalone --subclient_type hub\n",
+                    appPaths: appPaths,
+                    includeLanguageServer: true
+                ) == true,
+                "Standalone language_server must still block full quit when includeLanguageServer=true"
+            )
+            check(
+                Assistant.hasRunningAntigravityProcess(
+                    psOutput: "/Applications/Antigravity.app/Contents/Resources/bin/language_server --standalone --subclient_type hub\n",
+                    appPaths: appPaths,
+                    includeLanguageServer: false
+                ) == false,
+                "Safe debug relaunch must ignore external/detached language_server when includeLanguageServer=false"
+            )
+            check(
+                Assistant.hasRunningAntigravityProcess(
+                    psOutput: "/Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper --type=gpu-process\n",
+                    appPaths: appPaths,
+                    includeLanguageServer: false
+                ) == true,
+                "Safe debug relaunch must still drain Electron helper processes when includeLanguageServer=false"
+            )
+            check(
+                Assistant.parseDevToolsActivePort("55777\n/devtools/browser/mock-id\n") == 55777 &&
+                Assistant.parseDevToolsActivePort("0\n/devtools/browser/mock-id\n") == nil &&
+                Assistant.parseDevToolsActivePort("not-a-port\n") == nil,
+                "parseDevToolsActivePort must accept valid TCP ports and reject invalid values"
+            )
+            check(
+                Assistant.hasDebugPortArgument(
+                    inPsOutput: "/Applications/Antigravity.app/Contents/MacOS/Antigravity --remote-debugging-port=0\n",
+                    appPaths: appPaths
+                ) == true &&
+                Assistant.hasDebugPortArgument(
+                    inPsOutput: "/Applications/Antigravity.app/Contents/MacOS/Antigravity\n",
+                    appPaths: appPaths
+                ) == false &&
+                Assistant.hasDebugPortArgument(
+                    inPsOutput: "/Applications/Other.app/Contents/MacOS/Other --remote-debugging-port=0\n",
+                    appPaths: appPaths
+                ) == false,
+                "hasDebugPortArgument must strictly match Antigravity main executable with --remote-debugging-port"
+            )
             isolated.suppressLifecycleAutoQuit(seconds: 60.0)
             let longDeadline = isolated.suppressLifecycleAutoQuitUntil
             isolated.suppressLifecycleAutoQuit(seconds: 5.0)
@@ -2812,6 +2857,27 @@ import Cocoa
                 assistant.openedApplications == opensBeforeSafeConfirm + 1
             }
             check(terminateCalls == 2 && assistant.openedApplications == opensBeforeSafeConfirm + 1, "Overview safe relaunch must terminate gracefully and reopen Antigravity with --remote-debugging-port=0")
+
+            // Clicking openAntigravity while in debug-port-missing must route through safeRelaunchAntigravityForDebug instead of focusing the non-debug instance
+            assistant.statusValue = LiveStatus(["mode": "debug-port-missing", "running": true])
+            simulatedRunning = true
+            let opensBeforeOpenBtnInDebugMissing = assistant.openedApplications
+            assistant.setSafeRelaunchTestingHooks(SafeRelaunchTestingHooks(
+                isRunning: { simulatedRunning },
+                terminate: {
+                    terminateCalls += 1
+                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(30)) {
+                        simulatedRunning = false
+                    }
+                },
+                timeoutSeconds: 2.0,
+                pollIntervalMilliseconds: 20
+            ))
+            assistant.openAntigravity()
+            waitUntil(description: "openAntigravity in debug-port-missing triggers safe relaunch") {
+                assistant.openedApplications == opensBeforeOpenBtnInDebugMissing + 1
+            }
+            check(terminateCalls == 3 && assistant.openedApplications == opensBeforeOpenBtnInDebugMissing + 1, "openAntigravity during debug-port-missing must execute safe relaunch instead of silently activating the non-debug app")
 
             // Timeout path: Antigravity stays running past timeout, must report manual quit guidance and never reopen or force-kill
             var stuckRunning = true
