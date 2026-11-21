@@ -128,7 +128,7 @@ export class UsageLedger {
                 return;
             }
             const id = randomUUID();
-            const timeoutMs = ['save', 'aggregate', 'revalue'].includes(operation) ? 90000 : 30000;
+            const timeoutMs = ['save', 'aggregate', 'revalue', 'purge-forked-clones'].includes(operation) ? 90000 : 30000;
             const timer = setTimeout(() => {
                 if (this.inflight?.id === id) {
                     this.destroyWorker(new Error(bt('ledger.err.timeout')));
@@ -185,6 +185,24 @@ export class UsageLedger {
         offset: number;
         limit: number;
     }> { return this.request('events', undefined, options); }
+    async purgeForkedClones(
+        targets: Array<{ dbFile: string; excludedGenIndices: number[] }>
+    ): Promise<{ deleted: number }> {
+        const normalized = Array.isArray(targets)
+            ? targets
+                .map(t => ({
+                    dbFile: typeof t?.dbFile === 'string' ? t.dbFile.trim() : '',
+                    excludedGenIndices: Array.isArray(t?.excludedGenIndices)
+                        ? [...new Set(t.excludedGenIndices.filter(n => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0))]
+                        : [],
+                }))
+                .filter(t => t.dbFile.length > 0 && t.excludedGenIndices.length > 0)
+            : [];
+        if (normalized.length === 0) {
+            return { deleted: 0 };
+        }
+        return this.request('purge-forked-clones', undefined, { targets: normalized });
+    }
     async save(
         events: LedgerEvent[],
         options?: { billingPrices?: Record<string, ApiPricingEntry>; receipts?: SyncReceipt[] }

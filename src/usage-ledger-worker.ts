@@ -613,6 +613,8 @@ function runRequest(payload: {
         throw Error(bt('ledger.err.snapshot_unavailable'));
     if (!existsSync(path) && operation === 'load')
         return [...result.values()];
+    if (!existsSync(path) && operation === 'purge-forked-clones')
+        return { deleted: 0 };
     if (existsSync(path))
         regular(path);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -745,6 +747,95 @@ function runRequest(payload: {
         }
         if (operation === 'count')
             return Number(db.prepare('SELECT COUNT(*) AS count FROM events').get()?.count) + legacyEvents.length;
+        if (operation === 'purge-forked-clones') {
+            const rawTargets = Array.isArray(options?.targets) ? options.targets : [];
+            const targets: Array<{ dbFile: string; excludedSet: Set<number> }> = [];
+            for (const item of rawTargets) {
+                if (!item || typeof item !== 'object') continue;
+                const dbFile = typeof item.dbFile === 'string' ? item.dbFile.trim() : '';
+                if (!dbFile) continue;
+                const rawIndices = Array.isArray(item.excludedGenIndices) ? item.excludedGenIndices : [];
+                const excludedSet = new Set<number>();
+                for (const n of rawIndices) {
+                    if (typeof n === 'number' && Number.isSafeInteger(n) && n >= 0) {
+                        excludedSet.add(n);
+                    }
+                }
+                if (excludedSet.size > 0) {
+                    targets.push({ dbFile, excludedSet });
+                }
+            }
+            if (targets.length === 0) {
+                return { deleted: 0 };
+            }
+
+            const selectByDb = db.prepare(
+                "SELECT event_key, json_extract(payload, '$.generation_index') AS gen_idx, json_extract(payload, '$.legacy_event_key') AS legacy_event_key FROM events WHERE json_extract(payload, '$.db_file') = ? AND json_extract(payload, '$.generation_index') IS NOT NULL"
+            );
+            const selectAliasByEvent = db.prepare('SELECT legacy_key FROM event_aliases WHERE event_key = ?');
+            const deleteEvent = db.prepare('DELETE FROM events WHERE event_key = ?');
+            const deleteRevision = db.prepare('DELETE FROM event_revisions WHERE event_key = ?');
+            const deleteRateLock = db.prepare('DELETE FROM rate_locks WHERE event_key = ?');
+            const deleteAlias = db.prepare('DELETE FROM event_aliases WHERE event_key = ? OR legacy_key = ?');
+
+            let deleted = 0;
+            const eventKeysToDelete = new Set<string>();
+            const allCleanupKeys = new Set<string>();
+
+            db.exec('BEGIN IMMEDIATE');
+            try {
+                for (const target of targets) {
+                    const rows = selectByDb.all(target.dbFile) as Array<{
+                        event_key: unknown;
+                        gen_idx: unknown;
+                        legacy_event_key: unknown;
+                    }>;
+                    for (const row of rows) {
+                        const genIdx = typeof row.gen_idx === 'number' ? row.gen_idx : Number.NaN;
+                        if (!Number.isSafeInteger(genIdx) || !target.excludedSet.has(genIdx)) continue;
+                        const eventKey = typeof row.event_key === 'string' ? row.event_key : '';
+                        if (!eventKey) continue;
+                        eventKeysToDelete.add(eventKey);
+                        allCleanupKeys.add(eventKey);
+                        if (typeof row.legacy_event_key === 'string' && row.legacy_event_key.length > 0) {
+                            allCleanupKeys.add(row.legacy_event_key);
+                        }
+                        for (const aliasRow of selectAliasByEvent.all(eventKey) as Array<{ legacy_key?: unknown }>) {
+                            if (typeof aliasRow.legacy_key === 'string' && aliasRow.legacy_key.length > 0) {
+                                allCleanupKeys.add(aliasRow.legacy_key);
+                            }
+                        }
+                    }
+                }
+
+                for (const eventKey of eventKeysToDelete) {
+                    deleted += Number(deleteEvent.run(eventKey).changes ?? 0);
+                    deleteRevision.run(eventKey);
+                }
+                for (const key of allCleanupKeys) {
+                    deleteRateLock.run(key);
+                    deleteAlias.run(key, key);
+                }
+
+                if (deleted > 0) {
+                    db.prepare('INSERT INTO rate_changes VALUES((SELECT COALESCE(MAX(version),0)+1 FROM rate_changes),?)').run(0);
+                }
+                db.exec('COMMIT');
+            } catch (error) {
+                db.exec('ROLLBACK');
+                throw error;
+            }
+
+            if (deleted > 0) {
+                chmodSync(path, 0o600);
+                const ratesPath = join(dirname(path), 'usage-rate-locks.json');
+                if (existsSync(ratesPath)) {
+                    writeRateLocksJsonMirror(db, ratesPath);
+                    refreshImportedRatesStamp(path);
+                }
+            }
+            return { deleted };
+        }
         if (operation === 'revalue') {
             ensureImportedLegacyBaseline(db, path, legacyPath, legacyEvents);
             reconcileDuplicateLegacyAliases(db);
