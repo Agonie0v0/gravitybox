@@ -374,10 +374,10 @@ extension Assistant {
         #else
         let wantsTranslation = pendingTranslationTarget ?? statusValue.translationEnabled ?? (effectiveConfiguredLanguage() != "en")
         let wantsConnection = effectiveHudEnabled() || wantsTranslation
-        let runningWithoutDebugFile = wantsConnection
+        let runningWithoutDebugPort = wantsConnection
             && Self.isAntigravityRunning()
-            && !FileManager.default.fileExists(atPath: Self.devToolsActivePortFilePath())
-        if statusValue.mode == "debug-port-missing" || runningWithoutDebugFile {
+            && !(Self.hasLiveDevToolsPort() || Self.hasLiveAntigravityWithDebugPort())
+        if statusValue.mode == "debug-port-missing" || runningWithoutDebugPort {
             safeRelaunchAntigravityForDebug()
             return
         }
