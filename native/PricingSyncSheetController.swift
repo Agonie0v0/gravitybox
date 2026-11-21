@@ -718,7 +718,11 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
             options: [.caseInsensitive]
         )
         let orchLabelRegex = try? NSRegularExpression(
-            pattern: "^Orchestrator\\s*\\(\\s*([^)]+?)\\s*\\)$",
+            pattern: "^Orchestrator\\s*[（(]\\s*([^)）]+?)\\s*[)）]$",
+            options: [.caseInsensitive]
+        )
+        let spaceOrchLabelRegex = try? NSRegularExpression(
+            pattern: "^Orchestrator\\s+(.+?)$",
             options: [.caseInsensitive]
         )
         let trailingOrchLabelRegex = try? NSRegularExpression(
@@ -741,6 +745,7 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
             if orchIdRegex?.firstMatch(in: lower, range: keyRange) != nil { continue }
             let dispRange = NSRange(item.displayName.startIndex..<item.displayName.endIndex, in: item.displayName)
             if orchLabelRegex?.firstMatch(in: item.displayName, range: dispRange) != nil { continue }
+            if spaceOrchLabelRegex?.firstMatch(in: item.displayName, range: dispRange) != nil { continue }
             if trailingOrchLabelRegex?.firstMatch(in: item.displayName, range: dispRange) != nil { continue }
 
             var baseKey = lower
@@ -803,6 +808,16 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
                         if !["pro", "flash", "default", "unknown", "g1"].contains(candidate.lowercased()) {
                             orchCandidate = candidate
                         }
+                    }
+                }
+            }
+            if orchCandidate == nil, let regex = spaceOrchLabelRegex {
+                let range = NSRange(item.displayName.startIndex..<item.displayName.endIndex, in: item.displayName)
+                if let m = regex.firstMatch(in: item.displayName, range: range), let r = Range(m.range(at: 1), in: item.displayName) {
+                    isOrchLabel = true
+                    let candidate = stripDisplayTierSuffix(String(item.displayName[r]))
+                    if !candidate.isEmpty, !["pro", "flash", "default", "unknown", "g1"].contains(candidate.lowercased()) {
+                        orchCandidate = candidate
                     }
                 }
             }

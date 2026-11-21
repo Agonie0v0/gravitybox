@@ -814,7 +814,7 @@ final class AccountsPage: NSObject {
                     return l == r ? left.offset < right.offset : l
                 }.map(\.element)
                 self.updateAutoSwitchState()
-                let newFingerprint = "\(self.activeId):\(self.app.statusValue.liveAccountEmail):" + self.accounts.map { item in
+                let newFingerprint = "\(self.activeId):\(self.app.statusValue.liveAccountEmail):\(self.app.quotaStaleThresholdSeconds):" + self.accounts.map { item in
                     let id = item["id"] as? String ?? ""
                     let rev = item["revision"] as? String ?? ""
                     let g5Cd = item["geminiFiveHourResetCountdown"] as? String ?? ""

@@ -533,7 +533,7 @@ final class AppUpdateManager {
         downloadTask = Task { @MainActor [weak self] in
             guard let self else { return }
             let reportProgress: @Sendable (Int) -> Void = { [weak self] pct in
-                DispatchQueue.main.async { [weak self] in
+                Task { @MainActor [weak self] in
                     guard let self, self.downloadInFlight else { return }
                     if case .downloading = self.state {
                         self.downloadProgressPercent = pct

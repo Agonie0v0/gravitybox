@@ -258,7 +258,7 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
       }
       if (hasRenderInfoColumn) {
         extraCols.push(
-          `CASE WHEN step_type IN (85, 127, 132) AND length(render_info) <= ${inlineLimit} THEN render_info WHEN step_type NOT IN (14, 15, 23, 101) AND length(metadata) > ${inlineLimit} THEN substr(render_info, 1, 16384) ELSE NULL END as render_info, CASE WHEN step_type IN (85, 127, 132) THEN COALESCE(length(render_info), 0) ELSE 0 END as render_info_len, CASE WHEN step_type IN (85, 127, 132) AND length(render_info) > ${inlineLimit} THEN substr(render_info, 1, 512) ELSE NULL END as render_info_head, CASE WHEN step_type IN (85, 127, 132) AND length(render_info) > ${inlineLimit} THEN substr(render_info, max(1, length(render_info) - 511), 512) ELSE NULL END as render_info_tail`
+          `CASE WHEN step_type IN (85, 127, 132) AND length(render_info) <= ${inlineLimit} THEN render_info WHEN step_type NOT IN (14, 15, 23, 85, 101, 127, 132) AND length(metadata) > ${inlineLimit} THEN substr(render_info, 1, 16384) ELSE NULL END as render_info, CASE WHEN step_type IN (85, 127, 132) THEN COALESCE(length(render_info), 0) ELSE 0 END as render_info_len, CASE WHEN step_type IN (85, 127, 132) AND length(render_info) > ${inlineLimit} THEN substr(render_info, 1, 512) ELSE NULL END as render_info_head, CASE WHEN step_type IN (85, 127, 132) AND length(render_info) > ${inlineLimit} THEN substr(render_info, max(1, length(render_info) - 511), 512) ELSE NULL END as render_info_tail`
         );
       }
       if (hasStepPayloadColumn) {
@@ -865,7 +865,8 @@ function hasValidStartedAtField4(startBuf: Uint8Array): boolean {
         if ((tsTag & 0x07) === 0 && (tsTag >>> 3) === 1) {
           try {
             const sec = Number(decodeVarint64(tsBuf, cTs));
-            if (Number.isFinite(sec) && sec >= 946_684_800) return true;
+            const maxValidSec = Math.floor(Date.now() / 1000) + 86400;
+            if (Number.isFinite(sec) && sec >= 946_684_800 && sec <= maxValidSec) return true;
           } catch {
             break;
           }

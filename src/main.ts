@@ -1699,12 +1699,14 @@ async function run() {
   periodicPricingSyncTimer.unref();
   let autoQuotaRefreshCheckInFlight = false;
   let lastAutoQuotaRefreshStartAt = 0;
+  let lastAutoQuotaRefreshIntervalMinutes = 0;
   const maybeScheduleAutoQuotaRefresh = () => {
     if (stopping || fixture || process.env.GRAVITYBOX_DISABLE_AUTO_QUOTA_REFRESH === '1') return;
     if (autoQuotaRefreshCheckInFlight) return;
     const minutes = accountsManager.getConfiguredQuotaRefreshMinutes();
     if (![5, 10, 15, 30, 60].includes(minutes)) return;
-    if (Date.now() - lastAutoQuotaRefreshStartAt < 60_000) return;
+    const cooldownMs = minutes * 60_000;
+    if (lastAutoQuotaRefreshIntervalMinutes === minutes && Date.now() - lastAutoQuotaRefreshStartAt < cooldownMs) return;
     if (tasks.list().some(t => t.state === 'running')) return;
     autoQuotaRefreshCheckInFlight = true;
     void (async () => {
@@ -1728,6 +1730,7 @@ async function run() {
         if (!hasOverdueAccount || stopping) return;
         if (tasks.list().some(t => t.state === 'running')) return;
         lastAutoQuotaRefreshStartAt = Date.now();
+        lastAutoQuotaRefreshIntervalMinutes = minutes;
         startQuotaRefreshTask();
       } catch {}
     })().finally(() => {

@@ -1127,8 +1127,15 @@ final class MenuPanelController: NSViewController {
             updateMenuTrendBuckets(report: report, summary: summary)
         }
 
-        let models = ModelUsageFold.foldThinkingVariants((report["byModel"] as? [[String: Any]]) ?? (report["models"] as? [[String: Any]]) ?? [])
-        let modelKey = "\(L10n.shared.currentLocale):\(selectedEnvironmentId):\(report["snapshotId"] ?? ""):\(periodKey):\(models.count):\(pricedCount):\(unpricedCount):\(showAllModels):\(total)"
+        let models = ModelUsageFold.sortByUsage(ModelUsageFold.foldThinkingVariants((report["byModel"] as? [[String: Any]]) ?? (report["models"] as? [[String: Any]]) ?? []))
+        let displayUnpricedCount = models.isEmpty
+            ? unpricedCount
+            : models.filter { row in
+                let usd = doubleVal(row, "estimatedUsd", fallback: doubleVal(row, "estimated_usd"))
+                let isPriced = (row["priced"] as? Bool) ?? (usd > 0)
+                return !isPriced
+            }.count
+        let modelKey = "\(L10n.shared.currentLocale):\(selectedEnvironmentId):\(report["snapshotId"] ?? ""):\(periodKey):\(models.count):\(pricedCount):\(displayUnpricedCount):\(showAllModels):\(total)"
         if modelKey != renderedUsageModelKey {
             renderedUsageModelKey = modelKey
             rebuildMenuModelList(models: models, totalTokens: total)
@@ -1144,8 +1151,8 @@ final class MenuPanelController: NSViewController {
         } else if failed > 0 {
             footerParts.append(L10n.t("menu_panel.usage.failed_dbs", ["count": failed], fallback: "\(failed) 个会话库异常"))
         }
-        if unpricedCount > 0 {
-            footerParts.append(L10n.t("menu_panel.usage.unpriced_footer", ["count": unpricedCount], fallback: "\(unpricedCount) 款模型待定价"))
+        if displayUnpricedCount > 0 {
+            footerParts.append(L10n.t("menu_panel.usage.unpriced_footer", ["count": displayUnpricedCount], fallback: "\(displayUnpricedCount) 款模型待定价"))
         }
         let expiredCount = models.filter { ($0["pricingStatus"] as? String ?? "") == "expired" }.count
         if expiredCount > 0 {

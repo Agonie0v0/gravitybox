@@ -1,4 +1,4 @@
-import { normalizeModelId, THINKING_EFFORT_OR_LATEST_SUFFIX_RE } from '../model-identity.js';
+import { normalizeModelId } from '../model-identity.js';
 import {
   getEffectiveModelPriceAlias,
   getRemoteModelSpec,
@@ -26,6 +26,9 @@ export interface ModelCapacitySpec {
 /**
  * Antigravity 标准上下文压缩阈值 (对齐 assets/model-catalog.json <=200K 标准上下文基准)
  */
+const HUD_CAPACITY_SUFFIX_RE =
+  /(?:-(?:tiered|extra-high|extra-low|xhigh|extra|high|medium|low|minimal|thinking|max|latest))+$/i;
+
 export const DEFAULT_CONTEXT_CAPACITY_TOKENS = 200_000;
 
 interface ModelFamilyRule {
@@ -364,7 +367,7 @@ export function resolveModelCapacity(rawModelInput?: string | null, depth = 0): 
     .replace(/^-+|-+$/g, '');
 
   normalizedId = normalizeModelId(normalizedId)
-    .replace(THINKING_EFFORT_OR_LATEST_SUFFIX_RE, '');
+    .replace(HUD_CAPACITY_SUFFIX_RE, '');
 
   if (depth < 3) {
     const normalizedAlias = getEffectiveModelPriceAlias(normalizedId);
@@ -373,7 +376,7 @@ export function resolveModelCapacity(rawModelInput?: string | null, depth = 0): 
     }
     const observedNorm = resolveObservedModelByIdOrAlias(normalizedId);
     if (observedNorm?.modelId && observedNorm.modelId.toLowerCase() !== normalizedId) {
-      const normTarget = normalizeModelId(observedNorm.modelId).replace(THINKING_EFFORT_OR_LATEST_SUFFIX_RE, '');
+      const normTarget = normalizeModelId(observedNorm.modelId).replace(HUD_CAPACITY_SUFFIX_RE, '');
       if (normTarget && normTarget !== normalizedId) {
         return resolveModelCapacity(normTarget, depth + 1);
       }
@@ -401,7 +404,7 @@ export function resolveModelCapacity(rawModelInput?: string | null, depth = 0): 
     cleanedRaw ||
     raw;
 
-  const explicitCap = remoteSpec?.capacityTokens ?? bundledCapacity;
+  const explicitCap = remoteSpec?.capacityTokens ?? bundledCapacity ?? observedSpec?.maxTokens;
   if (explicitCap) {
     return {
       modelId: normalizedId,

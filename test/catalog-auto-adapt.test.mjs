@@ -703,3 +703,22 @@ test('UsageStatsManager 持久化缓存校验拒绝任意 MODEL_PLACEHOLDER_M*�
     false
   );
 });
+
+test('HUD resolveModelCapacity 对未入库 -tiered-high 动态模型与 enum 归一保持一致', async (t) => {
+  const { resolveModelCapacity } = await import('../dist/hud.js');
+  registerObservedIdeModels([
+    {
+      modelId: 'gemini-4-nova-tiered-high',
+      displayName: 'Gemini 4 Nova',
+      modelOrAlias: 'MODEL_PLACEHOLDER_M901',
+      maxTokens: 256_000,
+    },
+  ]);
+  t.after(() => clearObservedIdeModelsForTest());
+
+  const byStr = resolveModelCapacity('gemini-4-nova-tiered-high');
+  const byEnum = resolveModelCapacity('MODEL_PLACEHOLDER_M901');
+  assert.equal(byStr.modelId, 'gemini-4-nova', '-tiered-high 必须剥离 -tiered 与 -high 归并到基础模型');
+  assert.equal(byStr.modelId, byEnum.modelId, '字符串解析与占位符枚举解析必须得出一致 modelId');
+  assert.equal(byStr.capacityTokens, 256_000);
+});

@@ -308,6 +308,10 @@ export class AccountSwitchService {
       await atomicJson(this.journalPath, committed ? this.completedRollback(original) : original);
       await unlink(this.rollbackPath);
       this.manager.invalidateRuntimeCaches?.();
+      if (committed) {
+        const rollbackCliPayload = await this.resolveRollbackCliPayload(original);
+        await this.syncExistingCliCredentials(rollbackCliPayload);
+      }
       return committed ? 'rolled-back' : 'restored';
     } finally { await tx?.close(); }
   }
@@ -549,8 +553,6 @@ export class AccountSwitchService {
         if (record) {
           try {
             if (await this.reconcileRollback() === 'rolled-back') {
-              const rollbackCliPayload = await this.resolveRollbackCliPayload(journal);
-              await this.syncExistingCliCredentials(rollbackCliPayload);
               return { message: bt('switch.msg.restored_previous') };
             }
           } catch {

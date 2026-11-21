@@ -1438,7 +1438,6 @@ export class UsageStatsManager {
         beforeValidLockedKeys.add(key);
       }
     }
-    const unpricedSet = new Set(unpricedKeys);
     for (const key of unpricedKeys) {
       delete this.rateLocks[key];
     }
@@ -1450,13 +1449,13 @@ export class UsageStatsManager {
     this.snapshots.clear();
 
     await this.getUsageSummary(true);
-    let newlyLockedFromUnlocked = 0;
+    let healedCount = 0;
     for (const [key, value] of Object.entries(this.rateLocks)) {
-      if (!beforeValidLockedKeys.has(key) && !unpricedSet.has(key) && !this.isUnpricedRateLock(value)) {
-        newlyLockedFromUnlocked++;
+      if (!beforeValidLockedKeys.has(key) && !this.isUnpricedRateLock(value)) {
+        healedCount++;
       }
     }
-    return unpricedSet.size + newlyLockedFromUnlocked;
+    return healedCount;
   }
 
   private discoveredStats = new Map<string, DiscoveredDbStat>();

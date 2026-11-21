@@ -272,9 +272,24 @@ enum InterfaceText {
 
 enum ModelUsageFold {
     private static let thinkingSuffixRegex = try? NSRegularExpression(
-        pattern: "(?:-(?:extra-high|extra-low|xhigh|extra|high|medium|low|minimal|thinking|max))+$",
+        pattern: "(?:-(?:tiered|extra-high|extra-low|xhigh|extra|high|medium|low|minimal|thinking|max))+$",
         options: [.caseInsensitive]
     )
+
+    static func sortByUsage(_ rows: [[String: Any]]) -> [[String: Any]] {
+        rows.enumerated().sorted { lhs, rhs in
+            let lTok = intField(lhs.element, "totalTokens", fallback: intField(lhs.element, "total_tokens"))
+            let rTok = intField(rhs.element, "totalTokens", fallback: intField(rhs.element, "total_tokens"))
+            if lTok != rTok { return lTok > rTok }
+            let lUsd = doubleField(lhs.element, "estimatedUsd", fallback: doubleField(lhs.element, "estimated_usd"))
+            let rUsd = doubleField(rhs.element, "estimatedUsd", fallback: doubleField(rhs.element, "estimated_usd"))
+            if abs(lUsd - rUsd) > 1e-12 { return lUsd > rUsd }
+            let lReq = intField(lhs.element, "requestCount", fallback: intField(lhs.element, "request_count"))
+            let rReq = intField(rhs.element, "requestCount", fallback: intField(rhs.element, "request_count"))
+            if lReq != rReq { return lReq > rReq }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+    }
 
     private static func intField(_ dict: [String: Any], _ key: String, fallback: Int = 0) -> Int {
         if let n = dict[key] as? NSNumber { return n.intValue }
@@ -346,6 +361,18 @@ enum ModelUsageFold {
                 existing.anyExpired = existing.anyExpired || itemExpired
                 if raw.caseInsensitiveCompare(folded) == .orderedSame {
                     existing.row["model"] = raw
+                }
+                if (existing.row["pricingKey"] as? String ?? "").isEmpty,
+                   let pk = item["pricingKey"] as? String, !pk.isEmpty {
+                    existing.row["pricingKey"] = pk
+                }
+                let existingPs = (existing.row["pricingStatus"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if (existingPs.isEmpty || existingPs == "unpriced"),
+                   let ps = item["pricingStatus"] as? String, !ps.isEmpty, ps != "unpriced" {
+                    existing.row["pricingStatus"] = ps
+                }
+                if existing.row["pricingProvenance"] == nil, let prov = item["pricingProvenance"] {
+                    existing.row["pricingProvenance"] = prov
                 }
                 buckets[key] = existing
             } else {

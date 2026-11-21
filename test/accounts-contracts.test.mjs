@@ -1020,6 +1020,32 @@ test('v1.1.3 Issue #20: JSON 批量导入、嵌套 token 解析、过期时间�
   assert.equal(restoredTools.token.expiry_timestamp, pastExpirySec);
   assert.equal(restoredTools.token.project_id, 'cloudaicompanion-nested-proj');
   assert.equal(restoredTools.custom_label, 'Tools Backup');
+
+  // 7. 字段类型校验、换新 refresh_token 重置旧 access_token/过期时间，以及禁止导出覆写 stateDir 内部文件
+  const invalidTypesFile = join(srcDir, 'invalid-types-and-refresh.json');
+  await writeFile(invalidTypesFile, JSON.stringify({
+    email: 'tools.user@example.test',
+    custom_label: { nested: 'bad' },
+    name: 12345,
+    project_id: ['bad-array'],
+    id_token: { bad: true },
+    refresh_token: '1//refresh-tools-rotated',
+  }));
+  const rotatedRes = await mgr.importAccountsFromJson([invalidTypesFile]);
+  assert.equal(rotatedRes.updated, 1);
+  const rotatedTools = await mgr.getAccount(toolsSummary.id);
+  assert.equal(rotatedTools.token.refresh_token, '1//refresh-tools-rotated');
+  assert.equal(rotatedTools.token.access_token, 'pending_refresh', '换新 refresh_token 且未带新 access_token 时必须重置为 pending_refresh');
+  assert.equal(rotatedTools.token.expiry_timestamp, 0, '重置为 pending_refresh 时必须归零旧 expiry_timestamp');
+  assert.equal(rotatedTools.token.project_id, 'cloudaicompanion-nested-proj', '非字符串 project_id 必须被忽略而不写入对象/数组');
+  assert.equal(rotatedTools.token.id_token, 'eyJ.nested.id.token', '非字符串 id_token 必须被忽略');
+  assert.equal(rotatedTools.custom_label, 'Tools Backup', '非字符串 custom_label 必须被忽略');
+
+  await assert.rejects(
+    mgr.exportAccountsBackup(join(stateDir, 'accounts.json'), true),
+    /有效|路径|path/i,
+    '导出绝不允许覆写 stateDir 内部受管文件'
+  );
 });
 });
 

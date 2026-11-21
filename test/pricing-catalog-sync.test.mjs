@@ -1181,3 +1181,47 @@ test('main.js 后端启动预热 remote_pricing.json、默认关闭静默外联�
     await new Promise((resolve) => feedServer.close(resolve));
   }
 });
+
+test('autoHealUnpricedHistory 仅计入实际获得有效新定价的记录，不把仍未定价的 $0 哨兵计入 healedCount', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'gb-heal-count-'));
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+
+  const convDir = join(dir, 'antigravity', 'conversations');
+  await mkdir(convDir, { recursive: true });
+  const nowSec = Math.floor(Date.now() / 1000) - 60;
+  const mkBlob = (modelId, inputTok, outputTok) => ProtobufWriter.encodeLengthDelimited(
+    1,
+    Buffer.concat([
+      ProtobufWriter.encodeString(19, modelId),
+      ProtobufWriter.encodeLengthDelimited(4, Buffer.concat([
+        ProtobufWriter.encodeVarintField(2, inputTok),
+        ProtobufWriter.encodeVarintField(3, outputTok),
+      ])),
+      ProtobufWriter.encodeLengthDelimited(9, ProtobufWriter.encodeLengthDelimited(4, ProtobufWriter.encodeVarintField(1, nowSec))),
+    ])
+  );
+  const db = new DatabaseSync(join(convDir, 'heal-mixed.db'));
+  try {
+    db.exec('CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB, status INTEGER, step_payload BLOB);');
+    db.exec('CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);');
+    db.prepare('INSERT INTO gen_metadata (idx, data) VALUES (?, ?)').run(1, mkBlob('unpriced-future-alpha', 1_000_000, 0));
+    db.prepare('INSERT INTO gen_metadata (idx, data) VALUES (?, ?)').run(2, mkBlob('unpriced-future-beta', 1_000_000, 0));
+  } finally {
+    db.close();
+  }
+
+  const mgr = new UsageStatsManager({ geminiDir: dir, stateDir: dir });
+  const before = await mgr.getUsageSummary(true);
+  assert.equal(before.all_time.unpriced_models, 2);
+
+  // 仅更新 alpha 的价格，beta 依然未定价；autoHealUnpricedHistory 应返回 1（而非 2）
+  await mgr.savePricingTable({
+    'unpriced-future-alpha': { model: 'unpriced-future-alpha', input: 2.0, output: 8.0, cached: 0.2 },
+  });
+  const healed = await mgr.autoHealUnpricedHistory();
+  assert.equal(healed, 1, '仅 1 条记录真正获得有效费率锁，不得把仍未定价的 beta $0 哨兵计入 healedCount');
+
+  // 再次执行时无新定价落锁，应精确返回 0
+  const healedAgain = await mgr.autoHealUnpricedHistory();
+  assert.equal(healedAgain, 0, '仍未定价模型不得重复虚报补齐数量');
+});

@@ -33,6 +33,7 @@ import {
   computeBundleDictionaryCoverage,
   ADAPTIVE_FULL_TRANSLATION_MIN_COVERAGE,
   ADAPTIVE_FULL_TRANSLATION_MIN_STRINGS,
+  type ExtractedString,
 } from './bundle.js';
 import {
   probeMainWorldSshRemote,
@@ -170,6 +171,8 @@ export class Controller {
   private syncWaiters: (() => void)[] = [];
   private lastInspectedSha?: string;
   private lastInspectedAppVersion?: string;
+  private lastInspectedDictVersion?: string;
+  private lastInspectedBundle?: { sha: string; extracted: ExtractedString[] };
   private inspectingBundle = false;
   private adaptiveFullTranslationByBundle = new Map<string, boolean>();
   private unverifiedWindowRetries = 0;
@@ -690,7 +693,7 @@ export class Controller {
       this.publish(defaultMode, defaultMsg);
 
       const localSession = [...this.pages.values()].find(s => s.sourceKind !== 'remote');
-      if (!this.options.fixture && this.endpoint && localSession && !this.inspectingBundle && (this.lastInspectedAppVersion !== this.endpoint.appVersion || this.lastInspectedSha!==localSession.bundleSha256)) {
+      if (!this.options.fixture && this.endpoint && localSession && !this.inspectingBundle && (this.lastInspectedAppVersion !== this.endpoint.appVersion || this.lastInspectedSha !== localSession.bundleSha256 || this.lastInspectedDictVersion !== this.options.dictionary.version)) {
         try {
           const origin = new URL(localSession.url).origin;
           void this.inspectBundleInBackground(origin, this.endpoint.appVersion,this.initialBundle);this.initialBundle=undefined;
@@ -825,10 +828,15 @@ export class Controller {
       const sha = computeBundleSha256(source);
       this.status.bundleSha256 = sha;
       this.lastInspectedAppVersion = appVersion;
-      if (this.lastInspectedSha === sha) return;
+      if (this.lastInspectedSha === sha && this.lastInspectedDictVersion === this.options.dictionary.version) return;
       this.lastInspectedSha = sha;
 
-      const extracted = extractUiStrings(source, { includeJsxRuntime: true });
+      const extracted =
+        this.lastInspectedBundle?.sha === sha
+          ? this.lastInspectedBundle.extracted
+          : extractUiStrings(source, { includeJsxRuntime: true });
+      this.lastInspectedBundle = { sha, extracted };
+      this.lastInspectedDictVersion = this.options.dictionary.version;
       const bundleCoverage = computeBundleDictionaryCoverage(extracted, this.options.dictionary);
       const missing = bundleCoverage.missing;
       const highConfidenceAdaptive =
@@ -899,6 +907,14 @@ export class Controller {
   }
   private async applyDictionary(dictionary: Dictionary) {
     this.options.dictionary = dictionary;
+    if (this.lastInspectedBundle) {
+      const bundleCoverage = computeBundleDictionaryCoverage(this.lastInspectedBundle.extracted, dictionary);
+      const highConfidenceAdaptive =
+        bundleCoverage.total >= ADAPTIVE_FULL_TRANSLATION_MIN_STRINGS &&
+        bundleCoverage.coverage >= ADAPTIVE_FULL_TRANSLATION_MIN_COVERAGE;
+      this.adaptiveFullTranslationByBundle.set(`${this.lastInspectedBundle.sha}:${dictionary.version}`, highConfidenceAdaptive);
+      this.lastInspectedDictVersion = dictionary.version;
+    }
     this.bootCache.clear();
     this.status.dictionaryVersion = dictionary.version; this.status.entries = Object.keys(dictionary.entries).length;
     this.status.errors = [];

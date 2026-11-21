@@ -3,7 +3,7 @@ import { bt } from './i18n.js';
 import { inspectBundle } from './discovery.js';
 import { readFileSync, statSync } from 'node:fs';
 import { lstat, mkdir, readFile, readdir, unlink } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -939,20 +939,41 @@ export class AccountsManager {
           skipped.push({ source, reason: bt('accounts.import.err.missing_refresh_token') });
           continue;
         }
+        const parseOptionalCleanString = (val: unknown, maxLen: number): string | null | undefined => {
+          if (val === undefined) return undefined;
+          if (val === null) return null;
+          if (typeof val !== 'string' || /[\x00]/.test(val)) return undefined;
+          const trimmed = val.trim();
+          if (!trimmed) return null;
+          return trimmed.slice(0, maxLen);
+        };
         const rawAccess = data.accessToken ?? data.access_token ?? data.token?.access_token ?? data.token?.accessToken;
-        const accessToken = typeof rawAccess === 'string' && rawAccess.trim() ? rawAccess.trim() : 'pending_refresh';
+        const cleanAccess = typeof rawAccess === 'string' && !/[\r\n\x00]/.test(rawAccess) ? rawAccess.trim().slice(0, 8192) : '';
+        const accessToken = cleanAccess || 'pending_refresh';
         const rawExpiresIn = data.expiresIn ?? data.expires_in ?? data.token?.expires_in ?? data.token?.expiresIn;
         const expiresIn = typeof rawExpiresIn === 'number' && Number.isFinite(rawExpiresIn) && rawExpiresIn >= 0 ? Math.floor(rawExpiresIn) : undefined;
         const explicitExpiryTs = AccountsManager.parseExplicitExpiryTimestamp(
           data.expiryTimestamp ?? data.expiry_timestamp ?? data.token?.expiry_timestamp ?? data.token?.expiryTimestamp,
           data.expiry ?? data.token?.expiry
         );
-        const customLabel = data.custom_label !== undefined ? data.custom_label : data.customLabel;
-        const name = typeof data.name === 'string' ? data.name.trim() || null : (data.name === null ? null : undefined);
-        const projectId = data.projectId !== undefined ? data.projectId : (data.project_id !== undefined ? data.project_id : (data.token?.project_id !== undefined ? data.token.project_id : data.token?.projectId));
-        const oauthClientKey = data.oauthClientKey !== undefined ? data.oauthClientKey : (data.oauth_client_key !== undefined ? data.oauth_client_key : (data.token?.oauth_client_key !== undefined ? data.token.oauth_client_key : data.token?.oauthClientKey));
+        const customLabel = parseOptionalCleanString(
+          data.custom_label !== undefined ? data.custom_label : data.customLabel,
+          80
+        );
+        const name = parseOptionalCleanString(data.name, 80);
+        const projectId = parseOptionalCleanString(
+          data.projectId !== undefined ? data.projectId : (data.project_id !== undefined ? data.project_id : (data.token?.project_id !== undefined ? data.token.project_id : data.token?.projectId)),
+          256
+        );
+        const oauthClientKey = parseOptionalCleanString(
+          data.oauthClientKey !== undefined ? data.oauthClientKey : (data.oauth_client_key !== undefined ? data.oauth_client_key : (data.token?.oauth_client_key !== undefined ? data.token.oauth_client_key : data.token?.oauthClientKey)),
+          128
+        );
         const isGcpTos = data.isGcpTos !== undefined ? data.isGcpTos : (data.is_gcp_tos !== undefined ? data.is_gcp_tos : (data.token?.is_gcp_tos !== undefined ? data.token.is_gcp_tos : data.token?.isGcpTos));
-        const idToken = data.idToken !== undefined ? data.idToken : (data.id_token !== undefined ? data.id_token : (data.token?.id_token !== undefined ? data.token.id_token : data.token?.idToken));
+        const idToken = parseOptionalCleanString(
+          data.idToken !== undefined ? data.idToken : (data.id_token !== undefined ? data.id_token : (data.token?.id_token !== undefined ? data.token.id_token : data.token?.idToken)),
+          16384
+        );
         const tokenType = data.token_type ?? data.tokenType ?? data.token?.token_type ?? data.token?.tokenType;
 
         const emailKey = email.toLowerCase();
@@ -963,12 +984,24 @@ export class AccountsManager {
 
         let toSave: Account;
         if (existing && existingSummary) {
-          const resolvedExpiryTs = explicitExpiryTs !== undefined
-            ? explicitExpiryTs
-            : (expiresIn !== undefined ? now + expiresIn : existing.token.expiry_timestamp);
-          const resolvedExpiresIn = explicitExpiryTs !== undefined
-            ? Math.max(0, explicitExpiryTs - now)
-            : (expiresIn ?? existing.token.expires_in);
+          const refreshTokenChanged = refreshToken !== existing.token.refresh_token;
+          const nextAccessToken = rawAccess !== undefined
+            ? accessToken
+            : (refreshTokenChanged ? 'pending_refresh' : existing.token.access_token);
+          const forceResetExpiry =
+            nextAccessToken === 'pending_refresh' &&
+            explicitExpiryTs === undefined &&
+            expiresIn === undefined;
+          const resolvedExpiryTs = forceResetExpiry
+            ? 0
+            : explicitExpiryTs !== undefined
+              ? explicitExpiryTs
+              : (expiresIn !== undefined ? now + expiresIn : existing.token.expiry_timestamp);
+          const resolvedExpiresIn = forceResetExpiry
+            ? 0
+            : explicitExpiryTs !== undefined
+              ? Math.max(0, explicitExpiryTs - now)
+              : (expiresIn ?? existing.token.expires_in);
           toSave = {
             ...existing,
             email: existing.email || email,
@@ -989,7 +1022,7 @@ export class AccountsManager {
             token: {
               ...existing.token,
               refresh_token: refreshToken,
-              access_token: rawAccess !== undefined ? accessToken : existing.token.access_token,
+              access_token: nextAccessToken,
               expires_in: resolvedExpiresIn,
               expiry_timestamp: resolvedExpiryTs,
               token_type: typeof tokenType === 'string' && tokenType ? tokenType : (existing.token.token_type || 'Bearer'),
@@ -1117,6 +1150,16 @@ export class AccountsManager {
       throw new Error(bt('accounts.export.err.invalid_path'));
     }
     const resolvedPath = resolve(cleanPath);
+    const resolvedStateDir = resolve(this.stateDir);
+    const relToState = relative(resolvedStateDir, resolvedPath).replaceAll('\\', '/');
+    if (
+      relToState === '' ||
+      (!relToState.startsWith('..') &&
+        !isAbsolute(relToState) &&
+        /^(?:accounts\.json|accounts(?:\/|\\|$)|config\.json|account-switch-|usage-|usage\.|remote[-_]|rate-locks|api_pricing\.json|pricing_sync_state\.json|live-ide-models\.json)/i.test(relToState))
+    ) {
+      throw new Error(bt('accounts.export.err.invalid_path'));
+    }
     const uid = process.getuid?.();
     const parentDir = dirname(resolvedPath);
     const parentInfo = await lstat(parentDir).catch(() => null);

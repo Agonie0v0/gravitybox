@@ -565,6 +565,11 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     func resizeMenuPanel(to newSize: NSSize, animate: Bool) {
         menuPanelResizeMotion?.cancel()
         menuPanelResizeMotion = nil
+        if let fade = menuPanelFadeMotion {
+            fade.cancel()
+            menuPanelFadeMotion = nil
+            menuPanel?.alphaValue = 1.0
+        }
         menuPanelTargetSize = newSize
         guard let panel = menuPanel else { return }
         let current = panel.frame

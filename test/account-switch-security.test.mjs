@@ -426,6 +426,87 @@ test('v1.1.3 Issue #19 & 合规切号: 同源 agy CLI 凭据非侵入同步、�
       const content = await readFile(join(backupsDir, b), 'utf8');
       assert.ok(!content.includes('1//refresh-cli-'), '归档快照严禁残留明文 refresh_token');
     }
+
+    // 6. 崩溃中断恢复路径（reconcileRollback committed=true）也必须对称回滚已存在的 agy CLI 凭据文件
+    // 读取当前真实 ItemTable 行构造合法的 interrupted rollback 状态（从 B 回滚到 A 时在 DB COMMIT 之后中断）
+    const dbPath = join(env.profile, 'User', 'globalStorage', 'state.vscdb');
+    const { DatabaseSync } = await import('node:sqlite');
+    const dbConn = new DatabaseSync(dbPath);
+    const currentDbRows = {};
+    try {
+      const rows = dbConn.prepare(
+        "SELECT key, value FROM ItemTable WHERE key IN ('antigravityUnifiedStateSync.oauthToken','antigravityUnifiedStateSync.userStatus','jetskiStateSync.agentManagerInitState','antigravityUnifiedStateSync.enterprisePreferences','antigravityOnboarding')"
+      ).all();
+      for (const row of rows) currentDbRows[row.key] = row.value;
+    } finally {
+      dbConn.close();
+    }
+    const beforeDbRows = { ...currentDbRows, 'antigravityUnifiedStateSync.oauthToken': 'old-raw-a' };
+    const indexPath = join(env.stateDir, 'accounts.json');
+    const indexNow = await readFile(indexPath, 'utf8');
+    const indexPrevObj = JSON.parse(indexNow);
+    indexPrevObj.current_account_id = accA.id;
+    const indexPrev = JSON.stringify(indexPrevObj);
+    const keychainB = await env.keychain.readPassword('gemini', 'antigravity');
+    // 构造一个带 Account A OAuth 的 go-keyring-base64 payload 放在 originalJournal.keychainBefore
+    const keychainA = 'go-keyring-base64:' + Buffer.from(JSON.stringify({
+      token: {
+        access_token: 'ya29.restored-a',
+        refresh_token: '1//refresh-cli-a',
+        token_type: 'Bearer',
+        expiry_timestamp: 1900000000,
+        email: 'cli-a@example.test',
+      },
+      id_token_email: 'cli-a@example.test',
+    })).toString('base64');
+
+    const journalPath = join(env.stateDir, 'account-switch-journal-stable.json');
+    const rollbackPath = `${journalPath}.rollback.json`;
+    const originalJournal = {
+      version: 1,
+      status: 'rolling-back',
+      at: new Date().toISOString(),
+      fromId: accA.id,
+      toId: accB.id,
+      before: beforeDbRows,
+      after: currentDbRows,
+      files: [{ path: indexPath, before: indexPrev, after: indexNow }],
+      keychainBefore: keychainA,
+      keychainAfter: keychainB ?? '',
+    };
+    // 模拟 DB/文件/Keychain 已提交为 A，但进程在删除 rollback.json 及同步 CLI 前崩溃
+    await writeFile(indexPath, indexPrev);
+    await env.keychain.writePassword('gemini', 'antigravity', keychainA);
+    const dbWriteConn = new DatabaseSync(dbPath);
+    try {
+      dbWriteConn.prepare('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)').run(
+        'antigravityUnifiedStateSync.oauthToken',
+        'old-raw-a'
+      );
+    } finally {
+      dbWriteConn.close();
+    }
+    await writeFile(journalPath, JSON.stringify(originalJournal));
+    await writeFile(rollbackPath, JSON.stringify({
+      version: 1,
+      phase: 'committed',
+      databasePath: dbPath,
+      hadDatabase: true,
+      rowsBefore: currentDbRows,
+      rowsAfter: beforeDbRows,
+      files: [{ path: indexPath, before: indexNow, after: indexPrev }],
+      keychainBefore: keychainB ?? '',
+      keychainAfter: keychainA,
+      originalJournal,
+    }));
+
+    const interruptedRes = await service.rollback();
+    assert.ok(interruptedRes.message.includes('中断') || interruptedRes.message.includes('恢复'));
+    for (const cliPath of [agyCliTokenPath, jetskiTokenPath]) {
+      const restored = JSON.parse(await readFile(cliPath, 'utf8'));
+      assert.equal(restored.token.email, 'cli-a@example.test', `中断恢复后 ${cliPath} 也必须对称还原为账号 A`);
+      assert.equal(restored.token.refresh_token, '1//refresh-cli-a');
+    }
   } finally {
     await rm(env.root, { recursive: true, force: true });
   }

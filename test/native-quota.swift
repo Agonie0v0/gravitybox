@@ -601,6 +601,14 @@ import Cocoa
         let futureChoices = QuotaPresentation.monitoredScopeChoices(for: futureStandalonePayload).filter { !$0.isSeparator }
         check(futureChoices.contains(where: { $0.key == "nova-models" && $0.title == "Nova Models" }) && futureChoices.contains(where: { $0.key == "pulse-daily" && $0.title == "Pulse Daily" }), "Dynamic future standalone groups surface in monitoredScopeChoices")
 
+        check(ModelUsageFold.baseModelKey(for: "gemini-4-nova-tiered-high") == "gemini-4-nova", "ModelUsageFold.baseModelKey must strip -tiered-high suffix")
+        let sortedFold = ModelUsageFold.sortByUsage([
+            ["model": "a", "totalTokens": 100, "estimatedUsd": 1.0, "requestCount": 1],
+            ["model": "b", "totalTokens": 500, "estimatedUsd": 0.5, "requestCount": 2],
+            ["model": "c", "totalTokens": 500, "estimatedUsd": 2.0, "requestCount": 1]
+        ])
+        check(sortedFold.map { $0["model"] as? String ?? "" } == ["c", "b", "a"], "ModelUsageFold.sortByUsage must sort by totalTokens desc then estimatedUsd desc")
+
         print("\(assertionCount) native quota assertions passed")
     }
 }

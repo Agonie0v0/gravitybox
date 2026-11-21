@@ -1485,8 +1485,8 @@ export function buildAccountQuotaOverview(
 
   const applied = applyFamilyWindows(models, familyWindows);
   const legacy = legacyFromFamilyWindows(familyWindows, nowMs);
-  const argonStatus = buildArgonStatus(applied, groups, familyWindows, nowMs, quota.subscription_tier);
-  const carbonStatus = buildCarbonStatus(applied, groups, familyWindows, nowMs, argonStatus, quota.subscription_tier);
+  const argonStatus = buildArgonStatus(applied, groups, familyWindows, nowMs, quota.subscription_tier, staleAfterSeconds);
+  const carbonStatus = buildCarbonStatus(applied, groups, familyWindows, nowMs, argonStatus, quota.subscription_tier, staleAfterSeconds);
   const standaloneModels = buildStandaloneModels(applied, groups, familyWindows, nowMs, argonStatus, carbonStatus, quota.subscription_tier, staleAfterSeconds);
   const argonConverged = argonStatus.mode === 'unified' || argonStatus.mode === 'disabled';
   const carbonConverged = carbonStatus.mode === 'unified' || carbonStatus.mode === 'disabled';

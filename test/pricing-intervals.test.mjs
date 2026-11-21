@@ -206,9 +206,9 @@ test('全自动智能补齐未计价（零按钮、用户无感）：仅补齐�
   manager.rateLocksDirty = true;
   await manager.saveRateLocks();
 
-  // 2. 模拟自动补齐自愈
+  // 2. 模拟自动补齐自愈：清理未计价旧锁，但无新定价落锁时不虚报补齐条数
   const healed = await manager.autoHealUnpricedHistory();
-  assert.equal(healed, 1, '应精准识别并清理 1 条未计价条目');
+  assert.equal(healed, 0, '未实际获得新定价落锁时不得虚报已补齐条数');
   assert.equal(manager.rateLocks[lockedKey].usd, 5.0, '原本正常锁定的记录金额绝不受影响');
   assert.equal(manager.rateLocks[unpricedKey], undefined, '未计价记录旧锁已被释放以允许重新匹配新价');
 

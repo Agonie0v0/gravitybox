@@ -1560,6 +1560,49 @@ test('上游元数据过滤：isInternal、deprecatedModelIds、非对话专用�
   assert.equal(liveModels[1].in_model_selector, false);
 });
 
+test('Argon/Carbon 独立池遵循动态 staleAfterSeconds 阈值，30 分钟刷新周期下 20 分钟采样不误判 stale', async (t) => {
+  const { manager, acc } = await createTempManager(t);
+  const nowMs = Date.now();
+  const observed20mAgoIso = new Date(nowMs - 20 * 60 * 1000).toISOString();
+  const resetIso = new Date(nowMs + 4 * 24 * 3600 * 1000).toISOString();
+
+  acc.subscription_tier = 'PRO';
+  acc.quota = manager.fuseQuota(
+    {
+      models: {
+        'gemini-3.8-flash': { displayName: 'Gemini 3.8 Flash', quotaInfo: { remainingFraction: 0.9, resetTime: resetIso } },
+        'gemini-4-argon': { displayName: 'Gemini 4 Argon', quotaInfo: { remainingFraction: 0.72, resetTime: resetIso } },
+      },
+    },
+    {
+      groups: [
+        {
+          groupId: 'gemini',
+          displayName: 'Gemini',
+          observedAt: observed20mAgoIso,
+          buckets: [{ window: 'five_hour', remainingFraction: 0.9, resetTime: resetIso }],
+        },
+        {
+          groupId: 'argon',
+          displayName: 'Gemini 4 Argon',
+          observedAt: observed20mAgoIso,
+          buckets: [{ window: 'weekly', remainingFraction: 0.72, resetTime: resetIso }],
+        },
+      ],
+    }
+  );
+  await manager.saveAccount(acc);
+
+  // staleAfterSeconds = 1920（对应 30 分钟刷新间隔 + 2 分钟）
+  const overview = buildAccountQuotaOverview(acc, nowMs, { staleAfterSeconds: 1920 });
+  assert.equal(overview.argonStatus?.quotaState, 'known', '20 分钟采样在 1920s 阈值下不得误判为 stale');
+  const argonPool = overview.standaloneModels?.find(m => m.key === 'argon');
+  assert.equal(argonPool?.quotaState, 'known');
+  assert.equal(argonPool?.windows?.[0]?.status?.stale, false);
+  assert.equal((overview.quotaWarningCodes ?? []).includes('ARGON_STALE'), false, '不得误报 ARGON_STALE 警告');
+  assert.equal(computeAccountRemaining(acc, 'argon', nowMs, 1920), 72, 'Argon 监控范围应返回有效剩余百分比 72');
+});
+
 
 
 

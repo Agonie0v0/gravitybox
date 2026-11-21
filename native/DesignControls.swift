@@ -1025,7 +1025,7 @@ final class DesignSegmentedControl: NSControl {
     }
 
     func moveSelection(by delta: Int) {
-        guard !segmentButtons.isEmpty else { return }
+        guard isEnabled, !segmentButtons.isEmpty else { return }
         let next = max(0, min(segmentButtons.count - 1, _selectedSegment + delta))
         let targetBtn = segmentButtons[next]
         window?.makeFirstResponder(targetBtn)

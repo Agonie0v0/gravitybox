@@ -685,7 +685,9 @@ function foldUnpricedLiveCandidate(
 ): { canonicalKey: string; displayName: string; variantLabel?: string; isOrchestratorVariant?: boolean } {
   const orchestratorTarget = resolveDynamicOrchestratorModel(baseId, rawDisplayName, siblingNormIds);
   if (orchestratorTarget) {
-    const isOrchLabel = /^Orchestrator\s*\(/i.test(rawDisplayName);
+    const isOrchLabel =
+      /^(?:Orchestrator\s*[(\uFF08]|Orchestrator\s+)/i.test(rawDisplayName) ||
+      /[(\uFF08]\s*Orchestrator\s*[)\uFF09]$/i.test(rawDisplayName);
     return {
       canonicalKey: orchestratorTarget,
       displayName: isOrchLabel ? '' : stripDisplayTierSuffix(rawDisplayName),

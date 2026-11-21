@@ -170,7 +170,7 @@ Hover over (or click to pin) any capsule to open its detailed breakdown card:
 | **Latest Step Output** | Tokens just generated in the latest step (listed separately; joins context on the next turn). |
 | **Session Peak Context / Model Peak Context** | Highest input context size reached so far in this chat, plus `(Xx compacted)` if auto-compaction occurred. |
 | **Active Model** | Underlying model identifier for the current context reading. |
-| **Orchestrator Context / Prior Model Context** *(multi-model chats)* | When switching models mid-chat or running **Planner + Executor** stages, lists each model's context fill and compaction count separately. |
+| **Orchestrator Context / Prior Model Context** *(multi-model chats)* | When switching models mid-chat or running **Orchestrator + Executor** stages, lists each model's context fill and compaction count separately. |
 
 ---
 

@@ -2806,3 +2806,85 @@ test('2.34.0 主对话 trajectory_metadata_blob field 6 引用自身 UUID 时不
   assert.equal(childMetrics.session.isSubagentTrajectory, true, '带外部父/根引用的子智能体仍必须判定为 true');
 });
 
+test('step_type 132 同时满足 metadata > 64KB 且 render_info > 64KB 时仍通过 Protobuf 投影保留末尾 AgentRef 子智能体关联', async (t) => {
+  const baseDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'gb-hud-renderinfo-proj-'));
+  const convDir = path.join(baseDir, 'antigravity', 'conversations');
+  await fs.promises.mkdir(convDir, { recursive: true });
+  t.after(async () => {
+    await fs.promises.rm(baseDir, { recursive: true, force: true });
+  });
+
+  const mainId = 'a1111111-1111-4111-8111-111111111111';
+  const childId = 'b2222222-2222-4222-8222-222222222222';
+  const createSchema = (db) => {
+    db.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER NOT NULL, status INTEGER NOT NULL, metadata BLOB, render_info BLOB, step_payload BLOB);
+      CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB, size INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE trajectory_meta (trajectory_id TEXT PRIMARY KEY, cascade_id TEXT, trajectory_type INTEGER);
+      CREATE TABLE trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB);
+    `);
+  };
+
+  const mainDb = new DatabaseSync(path.join(convDir, `${mainId}.db`));
+  const childDb = new DatabaseSync(path.join(convDir, `${childId}.db`));
+  t.after(() => {
+    try { mainDb.close(); } catch {}
+    try { childDb.close(); } catch {}
+  });
+  createSchema(mainDb);
+  createSchema(childDb);
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  // 构造 > 64KB metadata（前置大字段 20）与 > 64KB render_info（前置大字段 99 + 末尾 field 2.field 1 嵌套 AgentRef.trajectory_id = childId）
+  const bigMeta = Buffer.from([
+    ...seconds(1, nowSec - 20),
+    ...seconds(7, nowSec - 15),
+    ...message(4, string(2, 'run_command')),
+    ...string(20, 'M'.repeat(70_000)),
+  ]);
+  const bigRenderInfo = Buffer.from([
+    ...string(99, 'R'.repeat(70_000)),
+    ...message(10, message(4, string(1, childId))),
+  ]);
+  assert.ok(bigMeta.length > 65_536 && bigRenderInfo.length > 65_536);
+
+  mainDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?, 0)').run(mainId, mainId);
+  mainDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (0, 14, 3, ?)').run(
+    Buffer.from(seconds(1, nowSec - 25))
+  );
+  mainDb.prepare('INSERT INTO steps (idx, step_type, status, metadata, render_info) VALUES (1, 132, 3, ?, ?)').run(
+    bigMeta,
+    bigRenderInfo
+  );
+  mainDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (2, 15, 3, ?)').run(
+    Buffer.from([...seconds(1, nowSec - 10), ...seconds(6, nowSec - 9), ...seconds(7, nowSec - 5), ...message(9, usageBytes(usage({ outputTokens: 100 })))])
+  );
+
+  // 子库写入父关联元数据后关闭句柄，同时直接验证 worker 对 step_type=132 超 64KB render_info 的 Protobuf 投影结果
+  childDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?, 0)').run(childId, childId);
+  childDb.prepare('INSERT INTO trajectory_metadata_blob VALUES (?, ?)').run('main', Buffer.from(string(5, mainId)));
+  childDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (0, 15, 3, ?)').run(
+    Buffer.from([...seconds(1, nowSec - 18), ...seconds(6, nowSec - 17), ...seconds(7, nowSec - 14), ...message(9, usageBytes(usage({ outputTokens: 350 })))])
+  );
+  mainDb.close();
+  childDb.close();
+
+  const workerScan = await runHudDbScanInWorker({
+    dbPath: path.join(convDir, `${mainId}.db`),
+    inlineBlobLimitBytes: 65_536,
+  });
+  const step132 = workerScan.appendedSteps.find((s) => Number(s.idx) === 1);
+  assert.ok(step132?.render_info && step132.render_info.byteLength > 0 && step132.render_info.byteLength < 1024, 'step_type=132 超 64KB render_info 必须走投影裁剪大字段 99');
+  const parsedStep132 = parseStepMetadataBlob(1, 132, 3, step132.metadata, step132.data, [step132.render_info]);
+  assert.deepEqual(parsedStep132.childConversationIds, [childId], '投影后的 render_info 必须完整保留末尾 AgentRef UUID');
+
+  const engine = new ConversationMetricsEngine({ geminiDir: baseDir });
+  const result = await engine.getConversationMetrics({
+    conversationId: mainId,
+    isStreaming: false,
+  });
+  assert.equal(result.session.subagentCount, 1, 'step_type=132 双大字段超 64KB 必须通过投影保留 AgentRef');
+  assert.equal(result.tokens.outputTokens, 450, '主库 100 + 子库 350 = 450');
+});
+

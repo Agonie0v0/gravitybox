@@ -3121,6 +3121,7 @@ export class ConversationMetricsEngine {
   private readonly pricingCachePath: string | null;
   private cachedPricingTable: { key: string; table: Record<string, ApiPricingEntry> } | null = null;
   private pricingResolveInFlight: Promise<Record<string, ApiPricingEntry>> | null = null;
+  private hasLoadedRemotePricing = false;
   private readonly cache = new Map<string, CachedConversationState>();
   private readonly pendingReads = new Map<string, Promise<CachedConversationState | null>>();
   private readonly verifiedSniffedChildrenByDb = new Map<string, { fileId: string; stepCount: number; children: Set<string> }>();
@@ -3165,8 +3166,9 @@ export class ConversationMetricsEngine {
         ]);
         const key = `${remoteStat ? `${remoteStat.mtimeMs}:${remoteStat.size}` : 'none'}|${customStat ? `${customStat.mtimeMs}:${customStat.size}` : 'none'}`;
         if (key === 'none|none') {
-          if (this.cachedPricingTable !== null) {
+          if (this.cachedPricingTable !== null || this.hasLoadedRemotePricing) {
             this.cachedPricingTable = null;
+            this.hasLoadedRemotePricing = false;
             resetAndRegisterRemoteModelMetadata({});
           }
           return DEFAULT_API_PRICES;
@@ -3174,9 +3176,10 @@ export class ConversationMetricsEngine {
         if (this.cachedPricingTable?.key === key) {
           return this.cachedPricingTable.table;
         }
-        const { merged } = await loadRawPricingTable(this.remotePricingCachePath!, this.pricingCachePath!);
-        this.cachedPricingTable = { key, table: merged };
-        return merged;
+        const { billingPrices } = await loadRawPricingTable(this.remotePricingCachePath!, this.pricingCachePath!);
+        this.hasLoadedRemotePricing = true;
+        this.cachedPricingTable = { key, table: billingPrices };
+        return billingPrices;
       } catch {
         return DEFAULT_API_PRICES;
       } finally {

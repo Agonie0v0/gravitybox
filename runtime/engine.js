@@ -2297,7 +2297,7 @@
     if (userNamed(element)) return false;
     if (attribute === 'aria-label' && element.matches('button[data-testid="model-selector-trigger"],[role="button"][data-testid="model-selector-trigger"]')
         && /^Select model,\s*current:\s*.+$/i.test(original)) {
-      return ancestors(element).every(el => !matches(el, PROTECTED) || el === element);
+      return ancestors(element).every(el => !isProtectedElement(el, scanCount) || el === element);
     }
     const protectedParents = ancestors(element).filter(el => isProtectedElement(el, scanCount));
     if (protectedParents.some(el => el !== element || !['INPUT', 'TEXTAREA'].includes(el.tagName))) return false;

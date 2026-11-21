@@ -1549,11 +1549,13 @@ export function buildArgonStatus(
   familyWindows: FamilyWindows,
   nowMs: number,
   subscriptionTier?: string | null,
+  staleAfterSeconds?: number,
 ): ArgonStatus {
   return resolveStandaloneFamilyStatus('argon', models, groups, familyWindows, nowMs, {
     shortLabel: 'Argon',
     fullLabel: 'Gemini 4 Argon',
     subscriptionTier,
+    staleAfterSeconds,
   });
 }
 
@@ -1564,11 +1566,13 @@ export function buildCarbonStatus(
   nowMs: number,
   _argonStatus?: ArgonStatus,
   subscriptionTier?: string | null,
+  staleAfterSeconds?: number,
 ): ArgonStatus {
   return resolveStandaloneFamilyStatus('carbon', models, groups, familyWindows, nowMs, {
     shortLabel: 'Carbon',
     fullLabel: 'Gemini 4 Carbon',
     subscriptionTier,
+    staleAfterSeconds,
   });
 }
 
@@ -1609,8 +1613,8 @@ export function buildStandaloneModels(
   subscriptionTier?: string | null,
   staleAfterSeconds: number = 900,
 ): StandaloneModelStatus[] {
-  const resolvedArgon = argonStatus ?? buildArgonStatus(models, groups, familyWindows, nowMs, subscriptionTier);
-  const resolvedCarbon = carbonStatus ?? buildCarbonStatus(models, groups, familyWindows, nowMs, resolvedArgon, subscriptionTier);
+  const resolvedArgon = argonStatus ?? buildArgonStatus(models, groups, familyWindows, nowMs, subscriptionTier, staleAfterSeconds);
+  const resolvedCarbon = carbonStatus ?? buildCarbonStatus(models, groups, familyWindows, nowMs, resolvedArgon, subscriptionTier, staleAfterSeconds);
 
   const list: StandaloneModelStatus[] = [];
   const hasAuthoritativeGroups = groups.length > 0;
