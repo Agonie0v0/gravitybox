@@ -3,6 +3,7 @@ import type {
   ConversationHudMetrics,
   HudActivityPhase,
   HudClientEvent,
+  HudPaneKind,
   ICdpHudBridge,
   ParsedExecutorMetadata,
 } from './types.js';
@@ -66,6 +67,7 @@ export const HUD_BRIDGE_BINDING_NAME = '__gravityboxHudBridge';
 export interface ActivePaneSession {
   targetId: string;
   paneSlotId: string;
+  paneKind?: HudPaneKind;
   cascadeId: string;
   conversationId: string;
   sessionRevision: number;
@@ -317,9 +319,14 @@ export class CdpHudBridge implements ICdpHudBridge {
         : modelChanged
         ? undefined
         : sameConv?.modelCapacity;
+    const parsedPaneKind: HudPaneKind | undefined =
+      parsed.paneKind === 'main' || parsed.paneKind === 'subagent' || parsed.paneKind === 'btw'
+        ? parsed.paneKind
+        : sameConv?.paneKind;
     const session: ActivePaneSession = {
       targetId,
       paneSlotId,
+      ...(parsedPaneKind ? { paneKind: parsedPaneKind } : {}),
       cascadeId,
       conversationId,
       sessionRevision: nextRevision,

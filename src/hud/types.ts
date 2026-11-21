@@ -3,6 +3,7 @@
  * 指标来源、统计范围与缺失值遵循 CONVERSATION_STATUS_HUD_ARCHITECTURE.md。
  */
 
+export type HudPaneKind = 'main' | 'subagent' | 'btw';
 export type HudActivityPhase = 'idle' | 'generating' | 'executing';
 export type HudDataAvailability =
   | 'loading'
@@ -95,6 +96,8 @@ export interface ConversationHudMetrics {
     hasSubagentInTurn?: boolean;
     /** 当前会话是否为独立子智能体轨迹 */
     isSubagentTrajectory?: boolean;
+    /** 当前会话是否为 BTW (Side Question) 独立轨迹 */
+    isBtwTrajectory?: boolean;
     /** 前台流式轮次是否处于等待下一步落库的衔接阶段（非工具审批暂停） */
     awaitingFirstTurnStep?: boolean;
     /** 当前轮次末步是否因用户停止或异常而终止 */
@@ -392,6 +395,7 @@ export type HudClientEvent =
       conversationId: string;
       cascadeId: string;
       paneSlotId?: string;
+      paneKind?: HudPaneKind;
       sessionRevision?: number;
       modelId?: string;
       modelCapacity?: number;
@@ -407,6 +411,7 @@ export type HudClientEvent =
       conversationId: string;
       cascadeId: string;
       paneSlotId?: string;
+      paneKind?: HudPaneKind;
       sessionRevision?: number;
       timestamp: number;
     }
@@ -415,6 +420,7 @@ export type HudClientEvent =
       conversationId: string;
       cascadeId: string;
       paneSlotId?: string;
+      paneKind?: HudPaneKind;
       sessionRevision?: number;
       modelId?: string;
       modelCapacity?: number;
@@ -430,6 +436,7 @@ export type HudClientEvent =
       conversationId: string;
       cascadeId: string;
       paneSlotId?: string;
+      paneKind?: HudPaneKind;
       sessionRevision?: number;
       modelId: string;
       modelCapacity?: number;
@@ -445,6 +452,7 @@ export type HudClientEvent =
       conversationId: string;
       cascadeId: string;
       paneSlotId?: string;
+      paneKind?: HudPaneKind;
       sessionRevision?: number;
       modelId?: string;
       modelCapacity?: number;

@@ -958,6 +958,9 @@ export interface ComputeHudMetricsInput {
   totalStepsOverride?: number;
   allowDbActiveStepInference?: boolean;
   isSubagentTrajectory?: boolean;
+  isBtwTrajectory?: boolean;
+  inheritedContextStep?: ComputeHudMetricsInput['steps'][number];
+  inheritedGenMetadata?: ParsedGenMetadata;
   modelId?: string;
   modelCapacity?: number;
   pricingTable?: Record<string, ApiPricingEntry>;
@@ -2403,6 +2406,30 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
       usageContextEntries.push({ step, prompt: effectivePrompt, turnIndex: turns });
     }
   }
+  let effectiveUsageContextEntries = usageContextEntries;
+  let effectiveContextInput = input;
+  if (usageContextEntries.length === 0 && input.inheritedContextStep) {
+    const inh = input.inheritedContextStep;
+    const inhWithGen =
+      inh.generation || !input.inheritedGenMetadata
+        ? inh
+        : { ...inh, generation: input.inheritedGenMetadata };
+    const inhPrompt =
+      safeTokens(inhWithGen.rawInput ?? inhWithGen.rawInputTokens) +
+      safeTokens(inhWithGen.cachedTokens ?? inhWithGen.cachedReadTokens) +
+      safeTokens(inhWithGen.cacheWriteTokens);
+    const inhEstCtx = safeTokens(
+      inhWithGen.generation?.estimatedTokensUsed ?? input.inheritedGenMetadata?.estimatedTokensUsed
+    );
+    const inhEffectivePrompt = inhPrompt > 0 ? inhPrompt : inhEstCtx;
+    const inhOutputTok = safeTokens(inhWithGen.outputTokens);
+    if (inhEffectivePrompt > 0 || (inhWithGen.hasUsage === true && inhOutputTok > 0)) {
+      effectiveUsageContextEntries = [{ step: inhWithGen, prompt: inhEffectivePrompt, turnIndex: 0 }];
+    }
+    if (!input.genMetadata && input.inheritedGenMetadata) {
+      effectiveContextInput = { ...input, genMetadata: input.inheritedGenMetadata };
+    }
+  }
   const {
     latestStep,
     sessionPeakContextTokens,
@@ -2412,7 +2439,11 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
     isOrchestrator,
     modelStages,
     defaultFallbackModel: stageFallbackModel,
-  } = resolveContextStagesAndActiveSlot(usageContextEntries, input, compactionContextEntries);
+  } = resolveContextStagesAndActiveSlot(
+    effectiveUsageContextEntries,
+    effectiveContextInput,
+    compactionContextEntries
+  );
   const activeModelCompactionCount = activeStage.compactionCount ?? 0;
   const peakContextTokens = activeStage.peakContextTokens;
   const capacityTokens = activeStage.capacityTokens;
@@ -2992,6 +3023,7 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
       ...(lastTurnStepAborted ? { turnAborted: true } : {}),
       ...(lastTurnStepAbortedMissingEnd ? { turnAbortedMissingEnd: true } : {}),
       ...(input.isSubagentTrajectory ? { isSubagentTrajectory: true } : {}),
+      ...(input.isBtwTrajectory ? { isBtwTrajectory: true } : {}),
       ...(awaitingFirstTurnStep ? { awaitingFirstTurnStep: true } : {}),
       modelDurationSeconds,
       modelDurationFormatted: formatDurationSeconds(modelDurationSeconds, 'zh'),
@@ -3139,6 +3171,9 @@ interface CachedConversationState {
   hasTrajectoryMeta?: boolean;
   hasParentMetadataBlob?: boolean;
   trajectoryId?: string;
+  trajectoryType?: number;
+  forkStepIndex?: number;
+  forkParentCascadeId?: string;
   referencedUuidsInMetaBlob: Set<string>;
   rawSteps: ParsedConversationStep[];
   steps: ParsedConversationStep[];
@@ -3372,6 +3407,9 @@ export class ConversationMetricsEngine {
     const scanParams = {
       dbPath,
       inlineBlobLimitBytes: INLINE_BLOB_LIMIT_BYTES,
+      selfCascadeIdHint: EXACT_UUID_RE.test(selfConversationId)
+        ? selfConversationId.toLowerCase()
+        : undefined,
       knownColumns:
         existing &&
         existing.hasDataColumn !== undefined &&
@@ -3427,6 +3465,9 @@ export class ConversationMetricsEngine {
         executorMetaDigest,
         executorMetaBlob,
         trajectoryId,
+        trajectoryType,
+        forkStepIndex,
+        forkParentCascadeId,
         metaBlobProjectedSlices,
         maxIdx,
         stepsMode,
@@ -3776,6 +3817,9 @@ export class ConversationMetricsEngine {
         hasTrajectoryMeta,
         hasParentMetadataBlob,
         trajectoryId,
+        trajectoryType,
+        forkStepIndex,
+        forkParentCascadeId,
         referencedUuidsInMetaBlob,
         rawSteps,
         steps: baseSteps,
@@ -3849,6 +3893,22 @@ export class ConversationMetricsEngine {
     const mainIsRecent = nowMs - Math.max(mainState.mtimeMs, mainState.walMtimeMs) <= ACTIVE_DB_RECENCY_MS;
     const mainIdLower = conversationId.toLowerCase();
     const mainTrajLower = mainState.trajectoryId?.toLowerCase() ?? '';
+    const forkParentLower = mainState.forkParentCascadeId?.toLowerCase();
+    const forkStepCutoff = mainState.forkStepIndex;
+    const isBtwTrajectory = mainState.trajectoryType === 22;
+    const hasForkSlice = Boolean(
+      forkParentLower &&
+        EXACT_UUID_RE.test(forkParentLower) &&
+        forkParentLower !== mainIdLower &&
+        (!mainTrajLower || forkParentLower !== mainTrajLower) &&
+        typeof forkStepCutoff === 'number' &&
+        Number.isSafeInteger(forkStepCutoff) &&
+        forkStepCutoff >= 0 &&
+        forkStepCutoff < 10_000_000
+    );
+    const ownSteps = hasForkSlice
+      ? mainState.steps.filter(s => s.idx > forkStepCutoff!)
+      : mainState.steps;
 
     let descendants: ParsedConversationStep[] = [];
     const childUnmatchedGenerations: Array<{ generation: ParsedGenMetadata; isChildStep: true; timestampSeconds: number | null }> = [];
@@ -3859,7 +3919,20 @@ export class ConversationMetricsEngine {
     const activeVerifiedChildIds = new Set<string>();
 
     const persistedSniffEntry = this.verifiedSniffedChildrenByDb.get(dbPath);
-    const candidateChildIds = new Set<string>(mainState.childConversationIds);
+    const candidateChildIds = new Set<string>();
+    if (hasForkSlice) {
+      for (const s of ownSteps) {
+        for (const cid of s.childConversationIds ?? []) {
+          if (cid !== mainIdLower && cid !== mainTrajLower) {
+            candidateChildIds.add(cid);
+          }
+        }
+      }
+    } else {
+      for (const cid of mainState.childConversationIds) {
+        candidateChildIds.add(cid);
+      }
+    }
     for (const persistedChild of mainState.verifiedSniffedChildren) {
       candidateChildIds.add(persistedChild);
     }
@@ -3878,13 +3951,13 @@ export class ConversationMetricsEngine {
       }
     }
 
-    const hasActiveSubagentStep = mainIsRecent && mainState.steps.some(
+    const hasActiveSubagentStep = mainIsRecent && ownSteps.some(
       (s) =>
         !isWaitingSubagentToolName(s.toolCallName) &&
         (s.isSubagentStep || (s.toolCallName && SUBAGENT_TOOL_NAMES.has(s.toolCallName))) &&
         RUNNING_SUBAGENT_STEP_STATUSES.has(s.status)
     );
-    const hasSubagentEvidenceInMain = mainState.steps.some(
+    const hasSubagentEvidenceInMain = ownSteps.some(
       (s) =>
         s.isSubagentStep ||
         s.stepType === 132 ||
@@ -3898,9 +3971,10 @@ export class ConversationMetricsEngine {
         break;
       }
     }
-    const isSubagentTrajectory = Boolean(
-      dbPathOverride || (mainState.hasParentMetadataBlob && hasExternalParentRef)
-    );
+    const isSubagentTrajectory =
+      !isBtwTrajectory &&
+      !hasForkSlice &&
+      Boolean(dbPathOverride || (mainState.hasParentMetadataBlob && hasExternalParentRef));
     // 优先通过官方 conversation_summaries.db 索引表 O(log N) 精确检索全量子会话与分屏子智能体自身运行态
     const indexedSummaryChildren = new Set<string>();
     const terminalSummaryChildren = new Set<string>();
@@ -4111,6 +4185,26 @@ export class ConversationMetricsEngine {
           }
           const { edge, childId } = item;
           if (verifiedChildIds.has(childId)) continue;
+          const childForkParent = childState.forkParentCascadeId?.toLowerCase();
+          const childTrajLower = childState.trajectoryId?.toLowerCase() ?? '';
+          const childHasExternalForkParent = Boolean(
+            childForkParent &&
+              EXACT_UUID_RE.test(childForkParent) &&
+              childForkParent !== childId &&
+              (!childTrajLower || childForkParent !== childTrajLower)
+          );
+          if (childState.trajectoryType === 22 || childHasExternalForkParent) {
+            if (edge.sniffed) {
+              const rejectKey = `${mainIdLower}::${mainTrajLower}::${childId}`;
+              const latestChildMtime = Math.max(childState.mtimeMs, childState.walMtimeMs);
+              if (this.rejectedSniffMtimeByKey.size >= 1024 && !this.rejectedSniffMtimeByKey.has(rejectKey)) {
+                const oldestReject = this.rejectedSniffMtimeByKey.keys().next().value;
+                if (oldestReject !== undefined) this.rejectedSniffMtimeByKey.delete(oldestReject);
+              }
+              this.rejectedSniffMtimeByKey.set(rejectKey, latestChildMtime);
+            }
+            continue;
+          }
           if (childState.fromErrorFallback) {
             failedChildCount++;
           }
@@ -4320,15 +4414,15 @@ export class ConversationMetricsEngine {
     }
 
     let latestMainModelStepPos = -1;
-    for (let i = mainState.steps.length - 1; i >= 0; i--) {
-      if (mainState.steps[i]!.stepType === 15) {
+    for (let i = ownSteps.length - 1; i >= 0; i--) {
+      if (ownSteps[i]!.stepType === 15) {
         latestMainModelStepPos = i;
         break;
       }
     }
     const normalizedContextSteps =
       verifiedChildIds.size > 0
-        ? mainState.steps.map((step, idx) => {
+        ? ownSteps.map((step, idx) => {
             if (!RUNNING_SUBAGENT_STEP_STATUSES.has(step.status)) return step;
             const isSubStep =
               !isWaitingSubagentToolName(step.toolCallName) &&
@@ -4350,8 +4444,64 @@ export class ConversationMetricsEngine {
             }
             return step;
           })
-        : mainState.steps;
+        : ownSteps;
     const combinedSteps = dbPathOverride ? normalizedContextSteps : [...normalizedContextSteps, ...descendants];
+
+    let ownUnmatchedGens = mainState.unmatchedUsageGenerations;
+    if (hasForkSlice) {
+      let hasPreForkSteps = false;
+      let maxPreForkTs: number | null = null;
+      for (const s of mainState.steps) {
+        if (s.idx > forkStepCutoff!) continue;
+        hasPreForkSteps = true;
+        for (const ts of [
+          s.startTimeSeconds,
+          s.createdAtSeconds,
+          s.endTimeSeconds,
+          s.completedAtSeconds,
+          s.finishedGeneratingSeconds,
+          s.generation?.startedAtSeconds,
+        ]) {
+          if (typeof ts === 'number' && Number.isFinite(ts) && ts > 0) {
+            maxPreForkTs = maxPreForkTs === null ? ts : Math.max(maxPreForkTs, ts);
+          }
+        }
+      }
+      ownUnmatchedGens = mainState.unmatchedUsageGenerations.filter((item) => {
+        const indices = item.generation.stepIndices;
+        if (indices && indices.length > 0) {
+          return indices.every((idx) => idx > forkStepCutoff!);
+        }
+        if (!hasPreForkSteps) {
+          return item.timestampSeconds !== null && item.timestampSeconds > 0;
+        }
+        if (maxPreForkTs === null) return false;
+        return item.timestampSeconds !== null && item.timestampSeconds > maxPreForkTs;
+      });
+    }
+
+    const latestOwnModelStep = [...normalizedContextSteps]
+      .reverse()
+      .find(step => step.stepType === 15 && step.hasUsage);
+    let effectiveGenMetadata = latestOwnModelStep?.generation;
+    let inheritedContextStep: ParsedConversationStep | undefined;
+    let inheritedGenMetadata: ParsedGenMetadata | undefined;
+    if (hasForkSlice) {
+      if (!effectiveGenMetadata) {
+        const ownGens = [...mainState.generations.entries()]
+          .filter(([, g]) => g.stepIndices && g.stepIndices.length > 0 && g.stepIndices.every(idx => idx > forkStepCutoff!))
+          .sort((a, b) => a[0] - b[0]);
+        effectiveGenMetadata = ownGens[ownGens.length - 1]?.[1];
+      }
+      if (!latestOwnModelStep) {
+        inheritedContextStep = [...mainState.steps]
+          .reverse()
+          .find(s => s.idx <= forkStepCutoff! && s.stepType === 15 && s.hasUsage);
+        inheritedGenMetadata = inheritedContextStep?.generation ?? mainState.genMetadata;
+      }
+    } else if (!effectiveGenMetadata) {
+      effectiveGenMetadata = mainState.genMetadata;
+    }
 
     const effectiveRunningSubagents = Math.max(runningSubagentCount, activeChildSubagents);
     const effectiveSubagentRunning = Boolean(isSubagentRunning || effectiveRunningSubagents > 0);
@@ -4388,16 +4538,19 @@ export class ConversationMetricsEngine {
       runningSubagentCount: effectiveRunningSubagents,
       subagentCount: dbPathOverride ? undefined : verifiedChildIds.size,
       subagentSteps: totalSubagentSteps,
-      totalStepsOverride: mainState.steps.length + totalSubagentSteps,
+      totalStepsOverride: ownSteps.length + totalSubagentSteps,
       allowDbActiveStepInference: mainIsRecent || isStreaming || effectiveSubagentRunning || selfSummaryRunning,
       isSubagentTrajectory,
+      isBtwTrajectory,
+      inheritedContextStep,
+      inheritedGenMetadata,
       modelId,
       modelCapacity,
       pricingTable,
-      genMetadata: mainState.genMetadata,
+      genMetadata: effectiveGenMetadata,
       executorMetadata: mainState.executorMetadata,
       extraUsageGenerations: [
-        ...mainState.unmatchedUsageGenerations.map(item => ({
+        ...ownUnmatchedGens.map(item => ({
           generation: item.generation,
           isChildStep: false,
           timestampSeconds: item.timestampSeconds,
