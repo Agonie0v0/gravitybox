@@ -273,10 +273,12 @@ export class HudInstance {
     this.cascadeId = cascadeId || 'default-pane';
     this.paneSlotId = options.paneSlotId || this.cascadeId;
     this.isPrimaryPane = Boolean(options.isPrimaryPane);
-    this.isSubpane = Boolean(options.isSubpane);
+    this.paneKind = options.paneKind || (options.isSubpane ? 'subagent' : 'main');
+    this.isSubpane = Boolean(options.isSubpane || this.paneKind !== 'main');
     this.locale = normalizeHudLocale(options.locale || options.languageMode || 'zh-Hans');
     this.languageMode = this.locale === 'zh-Hans' ? 'zh' : this.locale;
     this.onBridgeEvent = typeof options.onBridgeEvent === 'function' ? options.onBridgeEvent : null;
+    this.onPopoverOpen = typeof options.onPopoverOpen === 'function' ? options.onPopoverOpen : null;
     this.allocateRevision = typeof options.allocateRevision === 'function' ? options.allocateRevision : null;
     this.onVisibilityResume = typeof options.onVisibilityResume === 'function' ? options.onVisibilityResume : null;
     this.currentConvId = null;
@@ -470,13 +472,19 @@ export class HudInstance {
   computeMergedActivityPhase(metricsOverride = null) {
     const refMetrics = metricsOverride || this.lastMetrics;
     const subpaneDbActive =
-      Boolean(this.isSubpane || refMetrics?.session?.isSubagentTrajectory) &&
+      Boolean(
+        this.isSubpane ||
+          this.paneKind === 'btw' ||
+          this.paneKind === 'subagent' ||
+          refMetrics?.session?.isSubagentTrajectory
+      ) &&
       ((refMetrics?.session?.activeModelStepCount || 0) > 0 ||
         (refMetrics?.session?.activeToolStepCount || 0) > 0);
     const subagentTrajectoryStreaming = this.isSubagentBackendStreaming(refMetrics);
-    // 当前分栏前台模型未处于流式轮次时（除非是独立子智能体分栏且底层数据库实锤存在活跃步或后端判定子轨迹流式中），小圆点保持灰色 idle
+    // 当前分栏前台模型未处于流式轮次时（除非是独立子智能体/BTW 分栏且底层数据库实锤存在活跃步或后端判定子轨迹流式中），小圆点保持灰色 idle
     if (!this.domIsStreaming && !subpaneDbActive && !subagentTrajectoryStreaming) return 'idle';
-    if (this.domActivityPhase === 'executing' || this.backendActivityPhase === 'executing') {
+    const refBackendPhase = metricsOverride?.activityPhase ?? this.backendActivityPhase;
+    if (this.domActivityPhase === 'executing' || refBackendPhase === 'executing') {
       return 'executing';
     }
     return 'generating';
@@ -683,6 +691,7 @@ export class HudInstance {
       conversationId: this.currentConvId,
       cascadeId: this.cascadeId,
       paneSlotId: this.paneSlotId,
+      paneKind: this.paneKind,
       sessionRevision: this.sessionRevision,
       modelId: this.currentModelId,
       ...(typeof this.currentModelCapacity === 'number' && this.currentModelCapacity > 0
@@ -2149,7 +2158,7 @@ export class HudInstance {
       ? this.t('tpsMeasuring')
       : formatRateMetric(s.outputTps, s.outputTpsFormatted, ' tok/s');
 
-    const isSubagentSession = Boolean(this.isSubpane || s.isSubagentTrajectory);
+    const isSubagentSession = Boolean(this.paneKind === 'subagent' || s.isSubagentTrajectory === true);
     if (turnsEl) {
       turnsEl.textContent =
         isSubagentSession && rawTurns === 0 && rawSteps > 0
@@ -3182,6 +3191,11 @@ export class HudInstance {
 
   showPopover(id) {
     if (!this.shadow) return;
+    if (this.onPopoverOpen) {
+      try {
+        this.onPopoverOpen(this.paneSlotId);
+      } catch {}
+    }
     this.activePopoverId = id;
     const capsules = this.getShadowCapsules();
     capsules.forEach((cap) => {

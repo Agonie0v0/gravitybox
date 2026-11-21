@@ -27,6 +27,15 @@ const NON_RUNNING_AGENT_STATUS_SELECTOR = [...NON_RUNNING_AGENT_STATUS_TESTIDS]
 const NON_RUNNING_AGENT_DOT_STATE_RE =
   /^(?:idle|done|completed|paused|stopped|error|failed|canceled|cancelled|killed|inactive|none|false|0|waiting|standing[\s_-]*by|blocked|needs[\s_-]*(?:you|attention|approval|input))$/i;
 
+const NESTED_SUBPANE_SELECTOR =
+  '[data-media-drop-scope="subpane"], [data-testid="subagent-tab-conversation"], [data-testid="side-question-tab-conversation"], [data-testid="side-question-tab-content"]';
+
+const SIDE_QUESTION_HEADER_BUTTON_TESTIDS = new Set([
+  'side-question-tab-stop',
+  'side-question-tab-promote',
+  'side-question-tab-delete',
+]);
+
 export class AntigravityHudManager {
   constructor(options = {}) {
     this.instances = new Map();
@@ -285,6 +294,14 @@ export class AntigravityHudManager {
     }
   }
 
+  handleInstancePopoverOpen(originSlotId) {
+    for (const [slotId, inst] of this.instances.entries()) {
+      if (slotId !== originSlotId && typeof inst?.hideAllPopovers === 'function') {
+        inst.hideAllPopovers();
+      }
+    }
+  }
+
   /**
    * 扫描并协调所有活跃会话分栏 (支持传入模拟 views 列表或自动从 document 查询)
    */
@@ -299,7 +316,11 @@ export class AntigravityHudManager {
     let views = explicitViews;
     if (!views && typeof document !== 'undefined') {
       const found = [...document.querySelectorAll('[data-testid="conversation-view"]')];
-      const subConvs = [...document.querySelectorAll('[data-testid="subagent-tab-conversation"][data-cascade-id]')];
+      const subConvs = [
+        ...document.querySelectorAll(
+          '[data-testid="subagent-tab-conversation"][data-cascade-id], [data-testid="side-question-tab-conversation"][data-cascade-id]'
+        ),
+      ];
       for (const subConv of subConvs) {
         const subpane = subConv.closest?.('[data-media-drop-scope="subpane"]') || subConv.parentElement;
         if (!subpane || found.includes(subpane)) continue;
@@ -324,28 +345,82 @@ export class AntigravityHudManager {
       return;
     }
 
-    const panes = views.filter(Boolean).map((view, index) => {
-      const isMainConvView = view?.getAttribute?.('data-testid') === 'conversation-view';
-      const subConvNode = view?.getAttribute?.('data-testid') === 'subagent-tab-conversation'
-        ? view
-        : !isMainConvView
-        ? view?.querySelector?.('[data-testid="subagent-tab-conversation"][data-cascade-id]') || null
-        : null;
-      const rawCascadeId = view.getAttribute?.('data-cascade-id') || subConvNode?.getAttribute?.('data-cascade-id');
-      let slotId = this.viewToSlotId.get(view);
-      if (!slotId) { slotId = `slot-${this.nextSlotSeq++}`; this.viewToSlotId.set(view, slotId); }
-      return { view, index, subConvNode, rawCascadeId, slotId, composer: this.resolveComposerElement(view) };
-    }).filter(p => p.composer);
-    const activeSlots = new Set(panes.map(p => p.slotId));
+    const isNodeVisibleInDom = (el) => {
+      if (!el) return false;
+      if (el.hasAttribute?.('hidden')) return false;
+      const win = typeof window !== 'undefined' ? window : globalThis.window;
+      if (win && typeof win.getComputedStyle === 'function') {
+        try {
+          const cs = win.getComputedStyle(el);
+          if (cs?.display === 'none' || cs?.visibility === 'hidden') return false;
+        } catch {}
+      }
+      return true;
+    };
+
+    const panes = views
+      .filter(Boolean)
+      .map((view, index) => {
+        const viewTestId = view?.getAttribute?.('data-testid');
+        const isMainConvView = viewTestId === 'conversation-view';
+        const subagentConvNode =
+          viewTestId === 'subagent-tab-conversation'
+            ? view
+            : !isMainConvView
+            ? view?.querySelector?.('[data-testid="subagent-tab-conversation"][data-cascade-id]') || null
+            : null;
+        const btwConvNode =
+          viewTestId === 'side-question-tab-conversation'
+            ? view
+            : !isMainConvView
+            ? view?.querySelector?.('[data-testid="side-question-tab-conversation"][data-cascade-id]') || null
+            : null;
+        const activeBtw = btwConvNode && isNodeVisibleInDom(btwConvNode) ? btwConvNode : null;
+        const activeSub =
+          subagentConvNode && isNodeVisibleInDom(subagentConvNode) ? subagentConvNode : null;
+        const subConvNode = activeBtw || activeSub || btwConvNode || subagentConvNode;
+        const resolvedSubTestId = subConvNode?.getAttribute?.('data-testid');
+        const paneKind = isMainConvView
+          ? 'main'
+          : resolvedSubTestId === 'side-question-tab-conversation'
+          ? 'btw'
+          : resolvedSubTestId === 'subagent-tab-conversation'
+          ? 'subagent'
+          : viewTestId === 'side-question-tab-content'
+          ? 'btw'
+          : view?.getAttribute?.('data-media-drop-scope') === 'subpane'
+          ? 'subagent'
+          : 'main';
+        const isSubpane = paneKind !== 'main';
+        const rawCascadeId =
+          subConvNode?.getAttribute?.('data-cascade-id') || view.getAttribute?.('data-cascade-id');
+        let slotId = this.viewToSlotId.get(view);
+        if (!slotId) {
+          slotId = `slot-${this.nextSlotSeq++}`;
+          this.viewToSlotId.set(view, slotId);
+        }
+        return {
+          view,
+          index,
+          paneKind,
+          isSubpane,
+          subConvNode,
+          rawCascadeId,
+          slotId,
+          composer: this.resolveComposerElement(view),
+        };
+      })
+      .filter((p) => p.composer);
+    const activeSlots = new Set(panes.map((p) => p.slotId));
     for (const [slot, instance] of this.instances) {
-      if (!activeSlots.has(slot)) { instance.dispose(); this.instances.delete(slot); }
+      if (!activeSlots.has(slot)) {
+        instance.dispose();
+        this.instances.delete(slot);
+      }
     }
-    const mainPaneCount = panes.filter(
-      (p) => !(p.subConvNode || p.view.getAttribute?.('data-media-drop-scope') === 'subpane')
-    ).length;
+    const mainPaneCount = panes.filter((p) => !p.isSubpane).length;
     const sharedGlobalSubagentIds = mainPaneCount <= 1 ? this.collectDomSubagentIds() : null;
-    for (const { view, index, subConvNode, rawCascadeId, slotId, composer } of panes) {
-      const isSubpane = Boolean(subConvNode || view.getAttribute?.('data-media-drop-scope') === 'subpane');
+    for (const { view, index, paneKind, isSubpane, rawCascadeId, slotId, composer } of panes) {
       const domSubagentIds = isSubpane
         ? []
         : sharedGlobalSubagentIds ?? this.collectDomSubagentIds(view, mainPaneCount);
@@ -353,28 +428,70 @@ export class AntigravityHudManager {
       const convId = this.resolveConversationId(view, rawCascadeId, effectiveViewCount, isSubpane);
       const modelId = this.resolveActiveModel(view, effectiveViewCount);
       const modelCapacity = this.resolveActiveModelCapacity(view, effectiveViewCount);
-      const sharedButtons = typeof view.querySelectorAll === 'function' ? view.querySelectorAll('button, [role="button"]') : null;
-      const subagentState = this.resolveSubagentState(view, { isSubpane, buttons: sharedButtons });
-      const activityPhase = this.resolveActivityPhase(view, subagentState, { isSubpane, buttons: sharedButtons });
+      const sharedButtons =
+        typeof view.querySelectorAll === 'function' ? view.querySelectorAll('button, [role="button"]') : null;
+      const subagentState = this.resolveSubagentState(view, {
+        isSubpane,
+        paneKind,
+        buttons: sharedButtons,
+      });
+      const activityPhase = this.resolveActivityPhase(view, subagentState, {
+        isSubpane,
+        paneKind,
+        buttons: sharedButtons,
+      });
       const isStreaming = activityPhase !== 'idle';
       let instance = this.instances.get(slotId);
       if (!instance) {
-        instance = new InstanceCtor(slotId, { paneSlotId: slotId, isPrimaryPane: index === 0 && !isSubpane,
-          isSubpane, locale: this.locale, languageMode: this.languageMode, onBridgeEvent: this.onBridgeEvent,
-          allocateRevision: () => this.allocateSessionRevision() });
-        this.instances.set(slotId, instance); instance.mount(composer);
-      } else instance.reconcile(composer);
+        instance = new InstanceCtor(slotId, {
+          paneSlotId: slotId,
+          isPrimaryPane: index === 0 && !isSubpane,
+          isSubpane,
+          paneKind,
+          locale: this.locale,
+          languageMode: this.languageMode,
+          onBridgeEvent: this.onBridgeEvent,
+          onPopoverOpen: (origin) => this.handleInstancePopoverOpen(origin),
+          allocateRevision: () => this.allocateSessionRevision(),
+        });
+        this.instances.set(slotId, instance);
+        instance.mount(composer);
+      } else {
+        instance.reconcile(composer);
+      }
       instance.isSubpane = isSubpane;
+      instance.paneKind = paneKind;
       if (!convId) {
-        if (instance.currentConvId) { instance.emitBridgeEvent('SESSION_DETACHED'); }
-        instance.resetToEmptyState ? instance.resetToEmptyState() : (instance.currentConvId = null, instance.renderSkeleton());
+        if (instance.currentConvId) {
+          instance.emitBridgeEvent('SESSION_DETACHED');
+        }
+        instance.resetToEmptyState
+          ? instance.resetToEmptyState()
+          : ((instance.currentConvId = null), instance.renderSkeleton());
         continue;
       }
       if (instance.getCurrentConvId() !== convId) {
-        instance.switchConversation(convId, modelId, isStreaming, subagentState.isSubagentRunning,
-          subagentState.runningSubagentCount, domSubagentIds, activityPhase, modelCapacity);
-      } else instance.notifyModelOrStreamingChange(modelId, isStreaming, subagentState.isSubagentRunning,
-        subagentState.runningSubagentCount, domSubagentIds, activityPhase, modelCapacity);
+        instance.switchConversation(
+          convId,
+          modelId,
+          isStreaming,
+          subagentState.isSubagentRunning,
+          subagentState.runningSubagentCount,
+          domSubagentIds,
+          activityPhase,
+          modelCapacity
+        );
+      } else {
+        instance.notifyModelOrStreamingChange(
+          modelId,
+          isStreaming,
+          subagentState.isSubagentRunning,
+          subagentState.runningSubagentCount,
+          domSubagentIds,
+          activityPhase,
+          modelCapacity
+        );
+      }
     }
   }
 
@@ -394,6 +511,55 @@ export class AntigravityHudManager {
     if (!rect || rect.width < 120 || rect.height < 120) return false;
     if (vw > 0 && (rect.left >= vw - 8 || rect.right <= 8)) return false;
     return true;
+  }
+
+  isInsideNestedSubpane(view, node) {
+    if (!node || typeof node.closest !== 'function') return false;
+    const nested = node.closest(NESTED_SUBPANE_SELECTOR);
+    return Boolean(nested && nested !== view);
+  }
+
+  inferPaneContext(view, options = {}) {
+    const viewTestId = view?.getAttribute?.('data-testid');
+    const inferredPaneKind =
+      options?.paneKind ||
+      (options?.isSubpane === false
+        ? 'main'
+        : viewTestId === 'conversation-view'
+        ? 'main'
+        : viewTestId === 'side-question-tab-conversation' ||
+          Boolean(view?.querySelector?.('[data-testid="side-question-tab-conversation"]'))
+        ? 'btw'
+        : viewTestId === 'subagent-tab-conversation' ||
+          Boolean(view?.querySelector?.('[data-testid="subagent-tab-conversation"]'))
+        ? 'subagent'
+        : viewTestId === 'side-question-tab-content'
+        ? 'btw'
+        : view?.getAttribute?.('data-media-drop-scope') === 'subpane'
+        ? 'subagent'
+        : options?.isSubpane
+        ? 'subagent'
+        : 'main');
+    const isSubpane =
+      typeof options?.isSubpane === 'boolean' ? options.isSubpane : inferredPaneKind !== 'main';
+    const isBtwPane = inferredPaneKind === 'btw';
+    const isSubagentPane = isSubpane && !isBtwPane;
+    return { paneKind: inferredPaneKind, isSubpane, isBtwPane, isSubagentPane };
+  }
+
+  pickNonNested(view, selector) {
+    if (!view || typeof view.querySelector !== 'function') return null;
+    const isMainConv = view.getAttribute?.('data-testid') === 'conversation-view';
+    if (!isMainConv || typeof view.querySelectorAll !== 'function') {
+      return view.querySelector(selector);
+    }
+    const matches = view.querySelectorAll(selector);
+    if (!matches) return null;
+    const list = typeof matches[Symbol.iterator] === 'function' ? [...matches] : [];
+    for (const el of list) {
+      if (!this.isInsideNestedSubpane(view, el)) return el;
+    }
+    return null;
   }
 
   collectDomSubagentIds(scopedView = null, mainPaneCount = 1) {
@@ -424,6 +590,12 @@ export class AntigravityHudManager {
       );
       if (nodes && typeof nodes.forEach === 'function') {
         nodes.forEach((n) => {
+          if (typeof n?.closest === 'function') {
+            const btwAncestor = n.closest(
+              '[data-testid="side-question-tab-content"], [data-testid="side-question-tab-conversation"]'
+            );
+            if (btwAncestor && btwAncestor !== scopedView) return;
+          }
           const cid = n.getAttribute?.('data-cascade-id') || '';
           if (uuidRe.test(cid)) ids.add(cid.toLowerCase());
           const rawId = n.getAttribute?.('id') || '';
@@ -440,10 +612,10 @@ export class AntigravityHudManager {
   resolveComposerElement(view) {
     if (!view || typeof view.querySelector !== 'function') return null;
     return (
-      view.querySelector('[data-testid="agent-input-box"] > .surface-composer') ||
-      view.querySelector('[data-testid="agent-input-box"] .surface-composer') ||
-      view.querySelector('.surface-composer') ||
-      view.querySelector('[data-testid="agent-input-box"]') ||
+      this.pickNonNested(view, '[data-testid="agent-input-box"] > .surface-composer') ||
+      this.pickNonNested(view, '[data-testid="agent-input-box"] .surface-composer') ||
+      this.pickNonNested(view, '.surface-composer') ||
+      this.pickNonNested(view, '[data-testid="agent-input-box"]') ||
       (view.matches?.('[data-testid="agent-input-box"]') ? view : null)
     );
   }
@@ -456,25 +628,41 @@ export class AntigravityHudManager {
    * 4. 单栏模式下回退至 window.location.pathname 中的 /c/<uuid>
    */
   resolveConversationId(view, rawCascadeId, totalViews = 1, isSubpane = null) {
+    const viewTestId = view?.getAttribute?.('data-testid');
     const subpaneDetected = isSubpane !== null
       ? Boolean(isSubpane)
       : Boolean(
           view?.getAttribute?.('data-media-drop-scope') === 'subpane' ||
-          view?.getAttribute?.('data-testid') === 'subagent-tab-conversation' ||
-          (view?.getAttribute?.('data-testid') !== 'conversation-view' &&
-            view?.querySelector?.('[data-testid="subagent-tab-conversation"][data-cascade-id]'))
+          viewTestId === 'subagent-tab-conversation' ||
+          viewTestId === 'side-question-tab-conversation' ||
+          viewTestId === 'side-question-tab-content' ||
+          (viewTestId !== 'conversation-view' &&
+            view?.querySelector?.(
+              '[data-testid="subagent-tab-conversation"][data-cascade-id], [data-testid="side-question-tab-conversation"][data-cascade-id]'
+            ))
         );
     const allowUrl = totalViews === 1 && !subpaneDetected;
     if (view && typeof view.getAttribute === 'function') {
       const directId = view.getAttribute('data-conversation-id');
       if (directId && directId !== 'conversation') return directId;
     }
+    const effectiveCascadeId =
+      rawCascadeId ||
+      view?.getAttribute?.('data-cascade-id') ||
+      (viewTestId !== 'conversation-view'
+        ? view
+            ?.querySelector?.(
+              '[data-testid="side-question-tab-conversation"][data-cascade-id], [data-testid="subagent-tab-conversation"][data-cascade-id]'
+            )
+            ?.getAttribute?.('data-cascade-id')
+        : null) ||
+      null;
     if (
-      rawCascadeId &&
-      rawCascadeId !== 'conversation' &&
-      rawCascadeId !== 'default' &&
-      !rawCascadeId.startsWith('fallback-pane-') &&
-      !rawCascadeId.startsWith('pane-')
+      effectiveCascadeId &&
+      effectiveCascadeId !== 'conversation' &&
+      effectiveCascadeId !== 'default' &&
+      !effectiveCascadeId.startsWith('fallback-pane-') &&
+      !effectiveCascadeId.startsWith('pane-')
     ) {
       const loc =
         typeof window !== 'undefined' && window.location
@@ -484,13 +672,16 @@ export class AntigravityHudManager {
         allowUrl && loc && typeof loc.pathname === 'string'
           ? loc.pathname.match(/\/c\/([a-zA-Z0-9_-]+)/)
           : null;
-      if (urlMatch && urlMatch[1] && urlMatch[1] !== '_new' && !/^[0-9a-f-]{36}$/i.test(rawCascadeId)) {
+      if (urlMatch && urlMatch[1] && urlMatch[1] !== '_new' && !/^[0-9a-f-]{36}$/i.test(effectiveCascadeId)) {
         return urlMatch[1];
       }
-      return rawCascadeId;
+      return effectiveCascadeId;
     }
     if (view && typeof view.querySelector === 'function') {
-      const anchor = view.querySelector('[data-testid="conversation-header"] a[href*="/c/"], a[data-conversation-link][href*="/c/"]');
+      const anchor = this.pickNonNested(
+        view,
+        '[data-testid="conversation-header"] a[href*="/c/"], a[data-conversation-link][href*="/c/"]'
+      );
       if (anchor) {
         const href = anchor.getAttribute?.('href') || anchor.href || '';
         const match = String(href).match(/\/c\/([a-zA-Z0-9_-]+)/);
@@ -531,9 +722,10 @@ export class AntigravityHudManager {
   findModelSelectorTrigger(view, totalViews = 1) {
     if (!view || typeof view.querySelector !== 'function') return null;
     const localTrigger =
-      view.querySelector('[data-testid="model-selector-trigger"]') ||
-      view.querySelector('.model-selector') ||
-      view.querySelector(
+      this.pickNonNested(view, '[data-testid="model-selector-trigger"]') ||
+      this.pickNonNested(view, '.model-selector') ||
+      this.pickNonNested(
+        view,
         'button[data-context-window], button[data-model-id], button[aria-label*="Select model"], button[aria-label*="选择模型"]'
       );
     if (localTrigger) return localTrigger;
@@ -554,10 +746,12 @@ export class AntigravityHudManager {
 
   resolveActiveModel(view, totalViews = 1) {
     if (!view || typeof view.querySelector !== 'function') return '';
+    const isMainConv = view.getAttribute?.('data-testid') === 'conversation-view';
     const localTrigger =
-      view.querySelector('[data-testid="model-selector-trigger"]') ||
-      view.querySelector('.model-selector') ||
-      view.querySelector(
+      this.pickNonNested(view, '[data-testid="model-selector-trigger"]') ||
+      this.pickNonNested(view, '.model-selector') ||
+      this.pickNonNested(
+        view,
         'button[data-context-window], button[data-model-id], button[aria-label*="Select model"], button[aria-label*="选择模型"]'
       );
 
@@ -588,6 +782,7 @@ export class AntigravityHudManager {
         let matchedModel = null;
         buttons.forEach((btn) => {
           if (matchedModel) return;
+          if (isMainConv && this.isInsideNestedSubpane(view, btn)) return;
           if (
             typeof btn?.closest === 'function' &&
             btn.closest('[data-testid*="attachment"], [data-testid*="file-chip"], [data-testid*="context-chip"]')
@@ -635,13 +830,7 @@ export class AntigravityHudManager {
     const fallback = { isSubagentRunning: false, runningSubagentCount: 0 };
     if (!view || typeof view.querySelectorAll !== 'function') return fallback;
 
-    const isSubpane =
-      typeof options?.isSubpane === 'boolean'
-        ? options.isSubpane
-        : Boolean(
-            view.getAttribute?.('data-testid') === 'subagent-tab-conversation' ||
-              view.getAttribute?.('data-media-drop-scope') === 'subpane'
-          );
+    const { isSubpane, isSubagentPane } = this.inferPaneContext(view, options);
 
     let runningCount = 0;
     let exactIdleSubagentCount = 0;
@@ -650,10 +839,7 @@ export class AntigravityHudManager {
     const idleStatusNodes = view.querySelectorAll('[data-testid="idle-status-text"]');
     if (idleStatusNodes && typeof idleStatusNodes.forEach === 'function') {
       idleStatusNodes.forEach((node) => {
-        if (!isSubpane && typeof node?.closest === 'function') {
-          const nestedSubpane = node.closest('[data-media-drop-scope="subpane"], [data-testid="subagent-tab-conversation"]');
-          if (nestedSubpane && nestedSubpane !== view) return;
-        }
+        if (!isSubpane && this.isInsideNestedSubpane(view, node)) return;
         const txt = (node.textContent || '').replace(/\s+/g, ' ').trim();
         if (!txt) return;
         const segments = txt
@@ -695,23 +881,26 @@ export class AntigravityHudManager {
     }
 
     // 子智能体自身分栏内的 running-subagent / browser-subagent-thinking 与 Stop subagent 属于本栏自身运行态，不作为嵌套子智能体计数
-    if (!isSubpane) {
+    if (!isSubagentPane) {
       const activeSubagentMarkers = view.querySelectorAll(
         '[data-testid="running-subagent-steps-toggle"], [data-testid="running-subagent-browser-steps"], [data-testid="browser-subagent-thinking"]'
       );
       if (activeSubagentMarkers && activeSubagentMarkers.length > 0) {
-        detected = true;
         const markerContainers = new Set();
         if (typeof activeSubagentMarkers.forEach === 'function') {
           activeSubagentMarkers.forEach((m) => {
+            if (!isSubpane && this.isInsideNestedSubpane(view, m)) return;
             const container =
               m.closest?.('[data-testid="browser-subagent-row"], [id^="subagentView-"], [data-cascade-id]') || m;
             markerContainers.add(container);
           });
         }
-        const markerCount = Math.max(1, markerContainers.size);
-        if (exactIdleSubagentCount === 0 && runningCount < markerCount) {
-          runningCount = markerCount;
+        if (markerContainers.size > 0) {
+          detected = true;
+          const markerCount = Math.max(1, markerContainers.size);
+          if (exactIdleSubagentCount === 0 && runningCount < markerCount) {
+            runningCount = markerCount;
+          }
         }
       }
     }
@@ -723,6 +912,7 @@ export class AntigravityHudManager {
     if (agentRefs && typeof agentRefs.forEach === 'function') {
       const activeRefOwners = new Set();
       agentRefs.forEach((ref) => {
+        if (!isSubpane && this.isInsideNestedSubpane(view, ref)) return;
         if (typeof ref.querySelector !== 'function') return;
         const refTestId = (ref.getAttribute?.('data-testid') || '').toLowerCase();
         if (
@@ -770,13 +960,16 @@ export class AntigravityHudManager {
     const buttons = options?.buttons ?? view.querySelectorAll('button, [role="button"]');
     if (buttons && typeof buttons.forEach === 'function') {
       buttons.forEach((btn) => {
+        if (!isSubpane && this.isInsideNestedSubpane(view, btn)) return;
+        const btnTestId = (btn.getAttribute?.('data-testid') || '').toLowerCase();
+        if (SIDE_QUESTION_HEADER_BUTTON_TESTIDS.has(btnTestId)) return;
         const label = (
           btn.getAttribute?.('aria-label') ||
           btn.getAttribute?.('title') ||
           btn.textContent ||
           ''
         ).trim();
-        const isSubagentStopBtn = isSubpane
+        const isSubagentStopBtn = isSubagentPane
           ? /^(?:Stop All Subagents|停止所有子智能体)$/i.test(label)
           : /^(?:Stop All Subagents|Stop subagent|停止所有子智能体|停止子智能体)$/i.test(label);
         if (isSubagentStopBtn) {
@@ -793,6 +986,7 @@ export class AntigravityHudManager {
     if (activeToolNodes && typeof activeToolNodes.forEach === 'function') {
       activeToolNodes.forEach((node) => {
         if (isSubpane && node === view) return;
+        if (!isSubpane && this.isInsideNestedSubpane(view, node)) return;
         if (
           node.getAttribute?.('data-testid') === 'subagent-permission-source' ||
           node.closest?.('[data-testid="subagent-permission-source"]')
@@ -834,13 +1028,7 @@ export class AntigravityHudManager {
 
   resolveActivityPhase(view, precomputedSubagentState = null, options = {}) {
     if (!view || typeof view.querySelectorAll !== 'function') return 'idle';
-    const isSubpane =
-      typeof options?.isSubpane === 'boolean'
-        ? options.isSubpane
-        : Boolean(
-            view.getAttribute?.('data-testid') === 'subagent-tab-conversation' ||
-              view.getAttribute?.('data-media-drop-scope') === 'subpane'
-          );
+    const { isSubpane, isSubagentPane } = this.inferPaneContext(view, options);
     void precomputedSubagentState;
 
     let hasIdleStatusBanner = false;
@@ -849,10 +1037,7 @@ export class AntigravityHudManager {
       if (idleBannerNodes && typeof idleBannerNodes.forEach === 'function') {
         idleBannerNodes.forEach((node) => {
           if (hasIdleStatusBanner) return;
-          if (typeof node?.closest === 'function') {
-            const nestedSubpane = node.closest('[data-media-drop-scope="subpane"], [data-testid="subagent-tab-conversation"]');
-            if (nestedSubpane && nestedSubpane !== view) return;
-          }
+          if (this.isInsideNestedSubpane(view, node)) return;
           if ((node.textContent || '').trim()) hasIdleStatusBanner = true;
         });
       }
@@ -871,10 +1056,9 @@ export class AntigravityHudManager {
       nodeList.forEach((node) => {
         if (hasForegroundTurn) return;
         const nodeTestId = node.getAttribute?.('data-testid') || '';
-        if (!isSubpane && typeof node?.closest === 'function') {
-          const nestedSubpane = node.closest('[data-media-drop-scope="subpane"], [data-testid="subagent-tab-conversation"]');
-          if (nestedSubpane && nestedSubpane !== view) return;
-          if (nodeTestId !== 'input-cancel-button') {
+        if (!isSubpane) {
+          if (this.isInsideNestedSubpane(view, node)) return;
+          if (nodeTestId !== 'input-cancel-button' && typeof node?.closest === 'function') {
             const nestedCard = node.closest(
               '[data-testid*="subagent-card"], [data-testid="browser-subagent-row"], [data-testid="tool-call"], [data-testid="tool-invocation"], [data-testid="running-items-card"], [data-testid="idle-status-text"]'
             );
@@ -891,7 +1075,7 @@ export class AntigravityHudManager {
     void onlyAgentLoadingSeen;
     let hasSubpaneThinkingMarker = false;
 
-    if (isSubpane) {
+    if (isSubagentPane) {
       const subpaneThinking = view.querySelectorAll?.('[data-testid="browser-subagent-thinking"]');
       if (subpaneThinking && subpaneThinking.length > 0) {
         hasForegroundTurn = true;
@@ -913,10 +1097,12 @@ export class AntigravityHudManager {
       if (buttons && typeof buttons.forEach === 'function') {
         buttons.forEach((btn) => {
           if (hasForegroundTurn) return;
+          if (!isSubpane && this.isInsideNestedSubpane(view, btn)) return;
           if (typeof btn?.closest === 'function') {
             if (btn.closest('[role="menu"], [role="listbox"], [role="dialog"], [data-select-popup]')) return;
           }
           const btnTestId = (btn.getAttribute?.('data-testid') || '').toLowerCase();
+          if (SIDE_QUESTION_HEADER_BUTTON_TESTIDS.has(btnTestId)) return;
           const btnClass = typeof btn.className === 'string' ? btn.className.toLowerCase() : '';
           if (/(?:voice|dictat|microphone|audio-record|speech|record-audio)/i.test(`${btnTestId} ${btnClass}`)) {
             return;
@@ -934,13 +1120,14 @@ export class AntigravityHudManager {
             /^(?:Stop generating|Stop|Cancel generation|Cancel\s*[（(][^）)]+[）)]|停止生成|停止|中断|取消\s*[（(][^）)]+[）)])$/i.test(
               label
             ) ||
-            (isSubpane && /^(?:Stop subagent|停止子智能体)$/i.test(label))
+            (/(?:cancel|stop)/i.test(btnTestId) && /^(?:Cancel|取消)$/i.test(label)) ||
+            (isSubagentPane && /^(?:Stop subagent|停止子智能体)$/i.test(label))
           ) {
             hasForegroundTurn = true;
           }
         });
       }
-      if (!hasForegroundTurn && isSubpane) {
+      if (!hasForegroundTurn && isSubagentPane) {
         const viewButtons = options?.buttons ?? view.querySelectorAll('button, [role="button"]');
         if (viewButtons && typeof viewButtons.forEach === 'function') {
           viewButtons.forEach((btn) => {
@@ -964,6 +1151,7 @@ export class AntigravityHudManager {
     let hasEphemeralThinking = hasSubpaneThinkingMarker;
     if (toolStatusNodes && typeof toolStatusNodes.forEach === 'function') {
       toolStatusNodes.forEach((node) => {
+        if (!isSubpane && this.isInsideNestedSubpane(view, node)) return;
         const statusText = (node.textContent || '').replace(/\s+/g, ' ').trim();
         if (!statusText) return;
         if (/(?:Waiting for your approval|等待您的批准)/i.test(statusText)) {
@@ -978,13 +1166,26 @@ export class AntigravityHudManager {
 
     // 注意：status-task-running 为后台终端任务图标 (>_) 而非前台工具 Spinner，此处仅匹配 status-loading-spinner
     const taskRunningNodes = view.querySelectorAll('[data-testid="status-loading-spinner"]');
-    const hasTaskSpinner = Boolean(taskRunningNodes && taskRunningNodes.length > 0);
+    let hasTaskSpinner = false;
+    if (taskRunningNodes && taskRunningNodes.length > 0) {
+      if (isSubpane) {
+        hasTaskSpinner = true;
+      } else {
+        const list = typeof taskRunningNodes.forEach === 'function' ? taskRunningNodes : Array.from(taskRunningNodes);
+        list.forEach((n) => {
+          if (!hasTaskSpinner && !this.isInsideNestedSubpane(view, n)) {
+            hasTaskSpinner = true;
+          }
+        });
+      }
+    }
 
     let hasToolCardShimmer = false;
     let hasModelThinkingShimmer = false;
     const shimmerNodes = view.querySelectorAll('.animate-shimmer-text');
     if (shimmerNodes && typeof shimmerNodes.forEach === 'function') {
       shimmerNodes.forEach((node) => {
+        if (!isSubpane && this.isInsideNestedSubpane(view, node)) return;
         const parentTestId = node.closest?.('[data-testid]')?.getAttribute?.('data-testid') || '';
         if (parentTestId === 'idle-status-text') return;
         const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
