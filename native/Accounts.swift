@@ -611,8 +611,20 @@ final class AccountsPage: NSObject {
             card.quotaWarningLabel.isHidden = true
         }
 
+        let singleNotice = (app.singleAccountRefreshNotices[id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if let error = refreshError {
             card.refreshErrorLabel.stringValue = InterfaceText.quotaMessage(error)
+            card.refreshErrorLabel.textColor = accessibleWarningColor()
+            card.refreshErrorLabel.toolTip = nil
+            card.refreshErrorLabel.isHidden = false
+        } else if let singleErr = app.singleAccountRefreshErrors[id]?.trimmingCharacters(in: .whitespacesAndNewlines), !singleErr.isEmpty {
+            card.refreshErrorLabel.stringValue = InterfaceText.quotaMessage(singleErr)
+            card.refreshErrorLabel.textColor = accessibleWarningColor()
+            card.refreshErrorLabel.toolTip = nil
+            card.refreshErrorLabel.isHidden = false
+        } else if !singleNotice.isEmpty {
+            card.refreshErrorLabel.stringValue = singleNotice
+            card.refreshErrorLabel.textColor = .secondaryLabelColor
             card.refreshErrorLabel.toolTip = nil
             card.refreshErrorLabel.isHidden = false
         } else {
@@ -644,14 +656,27 @@ final class AccountsPage: NSObject {
             card.staleLabel.isHidden = true
         }
 
-        if !isCollapsed,
-           let quota = item["quota"] as? [String: Any], let stamp = quota["last_updated"] as? Double, stamp > 0 {
+        let standbyMode = app.standbyRefreshMode(item)
+        let quota = item["quota"] as? [String: Any]
+        let stamp = QuotaPresentation.number(quota?["last_updated"]) ?? QuotaPresentation.number(item["quota_last_updated"]) ?? 0
+        if !isCollapsed, standbyMode == "snapshot_cooldown_elapsed" {
+            card.updateLabel.stringValue = L10n.t("accounts.standby.reset_passed", fallback: "已到重置时间 · 切换后更新")
+            card.updateLabel.textColor = Design.blue
+            card.updateLabel.toolTip = L10n.t("accounts.standby.multi_device_hint")
+            card.updateLabel.isHidden = false
+        } else if !isCollapsed, stamp > 0 {
             let dateStr = Self.dateFormatter.string(from: Date(timeIntervalSince1970: stamp))
-            let isStale = (Date().timeIntervalSince1970 - stamp) > app.quotaStaleThresholdSeconds
-            let updateText = isStale ? L10n.t("accounts.updated_at_stale", ["time": dateStr]) : L10n.t("accounts.updated_at", ["time": dateStr])
-            card.updateLabel.stringValue = updateText
-            card.updateLabel.textColor = isStale ? accessibleWarningColor() : .secondaryLabelColor
-            card.updateLabel.toolTip = nil
+            if standbyMode == "snapshot_cooling" {
+                card.updateLabel.stringValue = L10n.t("accounts.standby.recorded_at", ["time": dateStr], fallback: "记录于 \(dateStr) · 切换后同步")
+                card.updateLabel.textColor = .secondaryLabelColor
+                card.updateLabel.toolTip = L10n.t("accounts.standby.multi_device_hint")
+            } else {
+                let isStale = (Date().timeIntervalSince1970 - stamp) > app.quotaStaleThresholdSeconds
+                let updateText = isStale ? L10n.t("accounts.updated_at_stale", ["time": dateStr]) : L10n.t("accounts.updated_at", ["time": dateStr])
+                card.updateLabel.stringValue = updateText
+                card.updateLabel.textColor = isStale ? accessibleWarningColor() : .secondaryLabelColor
+                card.updateLabel.toolTip = nil
+            }
             card.updateLabel.isHidden = false
         } else {
             card.updateLabel.stringValue = ""
@@ -826,8 +851,11 @@ final class AccountsPage: NSObject {
                     let dis = (item["disabled"] as? Bool == true) ? "1" : "0"
                     let vblk = (item["validation_blocked"] as? Bool == true) ? "1" : "0"
                     let credState = (item["credentialReadiness"] as? [String: Any])?["state"] as? String ?? ""
+                    let standbyMode = self.app.standbyRefreshMode(item) ?? ""
+                    let singleNotice = self.app.singleAccountRefreshNotices[id] ?? ""
+                    let singleErr = self.app.singleAccountRefreshErrors[id] ?? ""
                     if !rev.isEmpty {
-                        return "\(id):\(item["name"] as? String ?? ""):\(rev):\(dis):\(vblk):\(credState):\(g5Cd):\(gWCd):\(cWCd):\(aWCd):\(modelsCd):\(QuotaPresentation.fingerprint(item))"
+                        return "\(id):\(item["name"] as? String ?? ""):\(rev):\(dis):\(vblk):\(credState):\(standbyMode):\(singleNotice):\(singleErr):\(g5Cd):\(gWCd):\(cWCd):\(aWCd):\(modelsCd):\(QuotaPresentation.fingerprint(item))"
                     }
                     let g5h = item["geminiFiveHourRemaining"] as? Int ?? -1
                     let gWk = item["geminiWeeklyRemaining"] as? Int ?? -1
@@ -845,7 +873,7 @@ final class AccountsPage: NSObject {
                         let mCd = m["reset_countdown"] as? String ?? (m["resetCountdown"] as? String ?? "")
                         return "\(mName)=\(mPct)=\(mCd)"
                     }.joined(separator: ",")
-                    return "\(id):\(g5h):\(gWk):\(c5h):\(cWk):\(aWk):\(label):\(tier):\(dis):\(err):\(lastUp):\(modelsKey):\(QuotaPresentation.fingerprint(item))"
+                    return "\(id):\(g5h):\(gWk):\(c5h):\(cWk):\(aWk):\(label):\(tier):\(dis):\(standbyMode):\(singleNotice):\(singleErr):\(err):\(lastUp):\(modelsKey):\(QuotaPresentation.fingerprint(item))"
                 }.joined(separator: "|")
                 if newFingerprint != self.renderedFingerprint {
                     self.renderedFingerprint = newFingerprint
@@ -1060,7 +1088,10 @@ final class AccountsPage: NSObject {
             case .success(let value):
                 self.accountRefreshErrors[id] = nil
                 self.accountRefreshErrorStamps[id] = nil
-                self.app.showMessage(value["message"] as? String ?? L10n.t("accounts.refresh.single_success", ["email": email]))
+                let msg = (value["standbyDeferred"] as? Bool == true)
+                    ? (value["notice"] as? String ?? value["message"] as? String ?? L10n.t("accounts.refresh.single_success", ["email": email]))
+                    : (value["message"] as? String ?? L10n.t("accounts.refresh.single_success", ["email": email]))
+                self.app.showMessage(msg)
                 self.app.refresh()
             }
             self.applyCardRefreshState()

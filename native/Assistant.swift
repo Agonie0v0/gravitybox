@@ -116,6 +116,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     var usageAutoHealAttemptsByPeriod: [String: Int] = [:]
     var usageAutoHealPendingPeriods = Set<String>()
     var singleAccountRefreshErrors: [String: String] = [:]
+    var singleAccountRefreshNotices: [String: String] = [:]
     private var popoverGlobalClickMonitor: Any?
     private var popoverLocalClickMonitor: Any?
     private var popoverLocalKeyMonitor: Any?
@@ -1446,11 +1447,24 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
             content.layer?.transform = CATransform3DIdentity
         }
     }
+    func standbyRefreshMode(_ acc: [String: Any]) -> String? {
+        guard let status = acc["standbyRefreshStatus"] as? [String: Any],
+              let mode = status["mode"] as? String else { return nil }
+        let trimmed = mode.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    func isStandbySnapshotOnly(_ acc: [String: Any]) -> Bool {
+        let mode = standbyRefreshMode(acc)
+        return mode == "snapshot_cooling" || mode == "snapshot_cooldown_elapsed"
+    }
+
     func isEligibleForAutoQuotaRefresh(_ acc: [String: Any]) -> Bool {
         if acc["disabled"] as? Bool == true { return false }
         if acc["validation_blocked"] as? Bool == true { return false }
         if let readiness = acc["credentialReadiness"] as? [String: Any],
            readiness["state"] as? String == "needs_authorization" { return false }
+        if isStandbySnapshotOnly(acc) { return false }
         return true
     }
 

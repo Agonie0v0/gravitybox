@@ -3505,6 +3505,100 @@ import Cocoa
             check(designSeg.selectedSegment == 2, "OPT-16: DesignSegmentedControl right arrow moves selection to index 2")
         }
 
+        // Standby cooling UX: auto-refresh eligibility, plain-language reset labels, and deferred single-account notices
+        do {
+            L10n.shared.setLanguage("zh-Hans", notify: false)
+            let standbyHost = Assistant(state: state.appendingPathComponent("standby-cooling-ux"))
+            standbyHost.configuration = try ConfigurationStore(state: standbyHost.state)
+            standbyHost.bridge = BackendBridge(resources: state, state: standbyHost.state)
+            standbyHost.reachable = true
+            standbyHost.menuTracking = true
+
+            check(!standbyHost.isEligibleForAutoQuotaRefresh(["id": "a", "standbyRefreshStatus": ["mode": "snapshot_cooling"]]), "isEligibleForAutoQuotaRefresh must return false for snapshot_cooling")
+            check(!standbyHost.isEligibleForAutoQuotaRefresh(["id": "b", "standbyRefreshStatus": ["mode": "snapshot_cooldown_elapsed"]]), "isEligibleForAutoQuotaRefresh must return false for snapshot_cooldown_elapsed")
+            check(standbyHost.isEligibleForAutoQuotaRefresh(["id": "c", "standbyRefreshStatus": ["mode": "live_active"]]), "isEligibleForAutoQuotaRefresh must return true for live_active")
+            check(standbyHost.isEligibleForAutoQuotaRefresh(["id": "d", "standbyRefreshStatus": ["mode": "cloud_auto"]]), "isEligibleForAutoQuotaRefresh must return true for cloud_auto")
+
+            let overdueIso = ISO8601DateFormatter().string(from: Date(timeIntervalSinceNow: -3600))
+            let futureIso = ISO8601DateFormatter().string(from: Date(timeIntervalSinceNow: 4 * 3600))
+            let sampleTs = Date().timeIntervalSince1970 - 1800
+            let standbyAccountsList: [[String: Any]] = [
+                [
+                    "id": "sb-active", "email": "active@example.invalid", "subscription_tier": "PRO",
+                    "standbyRefreshStatus": ["mode": "live_active", "hasLocalOAuthClient": false, "canBackgroundRefresh": true],
+                    "quota": ["last_updated": Date().timeIntervalSince1970],
+                    "quotaGroups": [[
+                        "key": "gemini", "displayName": "Gemini", "brands": ["gemini"], "isStandalone": false, "availability": "available", "quotaState": "known",
+                        "windows": [["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.85, "stale": false, "resetTime": futureIso]]
+                    ]]
+                ],
+                [
+                    "id": "sb-cooling", "email": "cooling@example.invalid", "subscription_tier": "PRO",
+                    "standbyRefreshStatus": ["mode": "snapshot_cooling", "hasLocalOAuthClient": false, "canBackgroundRefresh": false],
+                    "quota": ["last_updated": sampleTs],
+                    "quotaGroups": [[
+                        "key": "gemini", "displayName": "Gemini", "brands": ["gemini"], "isStandalone": false, "availability": "available", "quotaState": "known",
+                        "windows": [["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.72, "stale": true, "resetTime": futureIso]]
+                    ]]
+                ],
+                [
+                    "id": "sb-elapsed", "email": "elapsed@example.invalid", "subscription_tier": "PRO",
+                    "standbyRefreshStatus": ["mode": "snapshot_cooldown_elapsed", "hasLocalOAuthClient": false, "canBackgroundRefresh": false, "cooldownElapsedFamilies": ["gemini"]],
+                    "quota": ["last_updated": sampleTs],
+                    "quotaGroups": [[
+                        "key": "gemini", "displayName": "Gemini", "brands": ["gemini"], "isStandalone": false, "availability": "available", "quotaState": "known",
+                        "windows": [["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.20, "stale": true, "resetTime": overdueIso]]
+                    ]]
+                ]
+            ]
+            let deferredNotice = L10n.t("account_cloud.err.missing_oauth_client")
+            standbyHost.bridge.fixtureReply = { req in
+                let cmd = req["command"] as? String ?? ""
+                if cmd == "account_list" {
+                    return ["ok": true, "accounts": standbyAccountsList, "activeId": "sb-active", "currentAccountId": "sb-active"]
+                }
+                if cmd == "quota_refresh" {
+                    return ["ok": true, "standbyDeferred": true, "notice": deferredNotice]
+                }
+                if cmd == "auto_switch_best" {
+                    return ["ok": true, "shouldSwitch": false]
+                }
+                return ["ok": true]
+            }
+            standbyHost.cachedAccounts = standbyAccountsList
+            standbyHost.activeAccountId = "sb-active"
+            let standbyMenu = standbyHost.ensureMenuPanelController()
+            standbyMenu.selectTab(2, persist: false); pump()
+            standbyHost.refreshSingleAccountQuota(id: "sb-elapsed")
+            waitUntil(step: 0.01, description: "standby deferred single-account refresh notice") {
+                !standbyHost.refreshingAccountIds.contains("sb-elapsed")
+                    && !standbyHost.accountListInFlight
+            }
+            pump()
+            check(standbyHost.singleAccountRefreshErrors["sb-elapsed"] == nil, "standbyDeferred must not populate singleAccountRefreshErrors")
+            check(standbyHost.singleAccountRefreshNotices["sb-elapsed"] == deferredNotice, "standbyDeferred must store notice in singleAccountRefreshNotices")
+            let coolingMenuCard = standbyMenu.accountsCardsStack.arrangedSubviews.compactMap { $0 as? MenuExpandableAccountCardView }.first { $0.accountId == "sb-cooling" }
+            let elapsedMenuCard = standbyMenu.accountsCardsStack.arrangedSubviews.compactMap { $0 as? MenuExpandableAccountCardView }.first { $0.accountId == "sb-elapsed" }
+            check(coolingMenuCard?.timestampLabel.stringValue.contains("切换后同步") == true && coolingMenuCard?.timestampLabel.textColor == .secondaryLabelColor, "Menu cooling card footer shows plain recorded timestamp in secondaryLabelColor")
+            check(elapsedMenuCard?.timestampLabel.stringValue == L10n.t("accounts.standby.reset_passed") && elapsedMenuCard?.timestampLabel.textColor == Design.blue, "Menu elapsed card footer shows reset_passed in Design.blue")
+            check(elapsedMenuCard?.quotaRowViews.first?.resetLabel.stringValue == L10n.t("accounts.standby.likely_reset"), "Menu elapsed card window shows compact 预计已重置 instead of 已过期")
+            check(elapsedMenuCard?.warningLabel.isHidden == false && elapsedMenuCard?.warningLabel.stringValue == deferredNotice && elapsedMenuCard?.warningLabel.textColor == .secondaryLabelColor, "Menu elapsed card displays deferred notice in neutral secondaryLabelColor")
+
+            let standbyAccountsPage = AccountsPage(app: standbyHost)
+            standbyAccountsPage.fetch(["accounts": standbyAccountsList, "activeId": "sb-active", "pendingSwitch": false]); pump()
+            let standbyPageTexts = allTextValues(standbyAccountsPage.cardsStack)
+            check(standbyPageTexts.contains { $0.contains(L10n.t("accounts.standby.likely_reset_sync")) }, "AccountsPage wide card shows 预计已重置 · 切换后更新 for overdue standby window: \(standbyPageTexts)")
+            check(standbyPageTexts.contains { $0 == L10n.t("accounts.standby.reset_passed") }, "AccountsPage wide card shows reset_passed footer")
+            check(standbyPageTexts.contains { $0 == deferredNotice }, "AccountsPage wide card displays deferred notice")
+
+            standbyHost.confirmSwitchForTesting = { _, cb in cb(true) }
+            standbyHost.requestInteractiveAccountSwitch(id: "sb-elapsed", email: "elapsed@example.invalid", name: "")
+            waitUntil(step: 0.01, description: "standby switch clears singleAccountRefreshNotices") {
+                !standbyHost.accountSwitchInFlight && standbyHost.singleAccountRefreshNotices["sb-elapsed"] == nil
+            }
+            check(standbyHost.singleAccountRefreshNotices["sb-elapsed"] == nil, "Successful switch must clear singleAccountRefreshNotices for target account")
+        }
+
         // Milestone 1 SSH: 隔离验证 Overview / MenuPanel 远程只读上下文切换、降级态与清空自动回退
         do {
             L10n.shared.setLanguage("zh-Hans", notify: false)

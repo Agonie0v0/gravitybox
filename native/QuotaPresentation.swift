@@ -116,6 +116,7 @@ enum QuotaPresentation {
         var observedAt: Double?
         var source: String
         var unknownReason: String
+        var standbyMode: String? = nil
 
         var resetDate: Date? { QuotaPresentation.parseResetDate(resetTime) }
         func isResetOverdue(at now: Date = Date()) -> Bool {
@@ -124,6 +125,27 @@ enum QuotaPresentation {
             return trimmed == "重置时间已过" || trimmed == "已过" || trimmed.localizedCaseInsensitiveContains("overdue")
         }
         var staleText: String { staleResetText }
+        func effectiveResetText(at now: Date = Date(), standbyMode: String? = nil, compact: Bool = false) -> String {
+            guard known else { return "" }
+            let resolvedMode = standbyMode ?? self.standbyMode
+            if resolvedMode == "snapshot_cooling" || resolvedMode == "snapshot_cooldown_elapsed" {
+                if isResetOverdue(at: now) {
+                    return compact
+                        ? L10n.t("accounts.standby.likely_reset", fallback: L10n.shared.isEnglish ? "Likely reset" : "预计已重置")
+                        : L10n.t("accounts.standby.likely_reset_sync", fallback: L10n.shared.isEnglish ? "Likely reset · Syncs on switch" : "预计已重置 · 切换后更新")
+                }
+                if let resetDate {
+                    return QuotaPresentation.formatLocalCountdown(to: resetDate, now: now)
+                }
+                return resetCountdown
+            }
+            let isStale = stale || (resetDate.map { $0 <= now } ?? false)
+            let countdown = resetDate.map { QuotaPresentation.formatLocalCountdown(to: $0, now: now) } ?? resetCountdown
+            if isStale {
+                return countdown.isEmpty ? staleResetText : "\(countdown) · \(staleResetText)"
+            }
+            return countdown
+        }
         var resetText: String {
             if known && stale { return resetCountdown.isEmpty ? staleResetText : "\(resetCountdown) · \(staleResetText)" }
             if known { return resetCountdown }
@@ -150,6 +172,7 @@ enum QuotaPresentation {
         var observedAt: Double?
         var source: String
         var unknownReason: String = ""
+        var standbyMode: String? = nil
 
         var resetDate: Date? { QuotaPresentation.parseResetDate(resetTime) }
         func isResetOverdue(at now: Date = Date()) -> Bool {
@@ -162,8 +185,20 @@ enum QuotaPresentation {
             if let resetDate, resetDate <= now { return true }
             return false
         }
-        func effectiveResetText(at now: Date = Date()) -> String {
+        func effectiveResetText(at now: Date = Date(), standbyMode: String? = nil, compact: Bool = false) -> String {
             guard percentage != nil else { return "" }
+            let resolvedMode = standbyMode ?? self.standbyMode
+            if resolvedMode == "snapshot_cooling" || resolvedMode == "snapshot_cooldown_elapsed" {
+                if isResetOverdue(at: now) {
+                    return compact
+                        ? L10n.t("accounts.standby.likely_reset", fallback: L10n.shared.isEnglish ? "Likely reset" : "预计已重置")
+                        : L10n.t("accounts.standby.likely_reset_sync", fallback: L10n.shared.isEnglish ? "Likely reset · Syncs on switch" : "预计已重置 · 切换后更新")
+                }
+                if let resetDate {
+                    return QuotaPresentation.formatLocalCountdown(to: resetDate, now: now)
+                }
+                return resetCountdown
+            }
             let isStale = effectiveStale(at: now)
             let countdown: String
             if let resetDate {
@@ -234,6 +269,7 @@ enum QuotaPresentation {
         var quotaState: String
         var windows: [GroupWindow]
         var message: String
+        var standbyMode: String? = nil
 
         var primaryWindow: GroupWindow? {
             windows.first(where: { $0.percentage != nil && !$0.stale })
@@ -375,6 +411,7 @@ enum QuotaPresentation {
         var quotaWarningCodes: [String] = []
         var refreshComplete: Bool?
         var refreshMessage = ""
+        var standbyMode: String? = nil
         var geminiPrimary: PrimaryWindow { primaryWindow(gemini5h, model: geminiModel) }
         var claudePrimary: PrimaryWindow { primaryWindow(claude5h, model: claudeModel) }
         var displayGroups: [QuotaGroup] {
@@ -738,6 +775,9 @@ enum QuotaPresentation {
     /// windows. Legacy sentinel `以周限额为准` explicitly means the 5-hour window was not returned.
     static func contract(_ raw: [String: Any]) -> Contract {
         var result = Contract()
+        let rawStandbyMode = text(dict(raw["standbyRefreshStatus"])?["mode"])
+        let standbyMode: String? = rawStandbyMode.isEmpty ? nil : rawStandbyMode
+        result.standbyMode = standbyMode
         let nested = dict(raw["quota"])
         let quotaGroupsRaw = (raw["quotaGroups"] as? [[String: Any]]) ?? nested.flatMap { $0["quotaGroups"] as? [[String: Any]] }
         let familyWindows = dict(raw["familyWindows"]) ?? nested.flatMap { dict($0["familyWindows"]) }
@@ -971,6 +1011,26 @@ enum QuotaPresentation {
                 groups.append(makeStandaloneGroup(from: item))
             }
             result.synthesizedGroups = groups
+        }
+        if let standbyMode {
+            result.gemini5h?.standbyMode = standbyMode
+            result.geminiWeekly?.standbyMode = standbyMode
+            result.claude5h?.standbyMode = standbyMode
+            result.claudeWeekly?.standbyMode = standbyMode
+            result.geminiModel?.standbyMode = standbyMode
+            result.claudeModel?.standbyMode = standbyMode
+            for idx in result.quotaGroups.indices {
+                result.quotaGroups[idx].standbyMode = standbyMode
+                for wIdx in result.quotaGroups[idx].windows.indices {
+                    result.quotaGroups[idx].windows[wIdx].standbyMode = standbyMode
+                }
+            }
+            for idx in result.synthesizedGroups.indices {
+                result.synthesizedGroups[idx].standbyMode = standbyMode
+                for wIdx in result.synthesizedGroups[idx].windows.indices {
+                    result.synthesizedGroups[idx].windows[wIdx].standbyMode = standbyMode
+                }
+            }
         }
         return result
     }
@@ -1458,7 +1518,7 @@ enum QuotaPresentation {
 
     static func fingerprint(_ raw: [String: Any]) -> String {
         let nested = dict(raw["quota"])
-        var fields = ["quotaGroups", "familyWindows", "familyModelQuota", "argonStatus", "carbonStatus", "standaloneModels", "refreshState", "quotaWarnings", "subscription_tier"].reduce(into: [String: Any]()) {
+        var fields = ["quotaGroups", "familyWindows", "familyModelQuota", "argonStatus", "carbonStatus", "standaloneModels", "refreshState", "quotaWarnings", "subscription_tier", "standbyRefreshStatus"].reduce(into: [String: Any]()) {
             if let value = raw[$1] { $0[$1] = value }
         }
         if fields["quotaGroups"] == nil, let qGroups = nested?["quotaGroups"] {

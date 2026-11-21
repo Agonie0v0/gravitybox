@@ -1415,7 +1415,7 @@ final class MenuPanelController: NSViewController {
         quotaContextSwitcherRow.isHidden = hidden
     }
 
-    private func renderUnifiedQuotaRows(contract: QuotaPresentation.Contract, keyPrefix: String) {
+    private func renderUnifiedQuotaRows(contract: QuotaPresentation.Contract, keyPrefix: String, standbyMode: String? = nil) {
         let now = Date()
         let unknownText = L10n.t("common.unknown", fallback: "未知")
         let unavailableText = L10n.t("common.unavailable", fallback: "不可用")
@@ -1423,8 +1423,9 @@ final class MenuPanelController: NSViewController {
         let quotaRowsFingerprint = [
             L10n.shared.currentLocale,
             keyPrefix,
+            standbyMode ?? "",
             contract.displayGroups.map { g in
-                let ws = g.windows.map { "\($0.localizedLabel):\($0.percentage.map(String.init) ?? "-"):\($0.placeholder(availability: g.availability)):\($0.effectiveResetText(at: now)):\($0.effectiveStale(at: now))" }.joined(separator: ",")
+                let ws = g.windows.map { "\($0.localizedLabel):\($0.percentage.map(String.init) ?? "-"):\($0.placeholder(availability: g.availability)):\($0.effectiveResetText(at: now, standbyMode: standbyMode, compact: true)):\($0.effectiveStale(at: now))" }.joined(separator: ",")
                 return "\(g.key)|\(g.displayName)|\(g.availability)|\(ws)"
             }.joined(separator: ";")
         ].joined(separator: "#")
@@ -1466,7 +1467,7 @@ final class MenuPanelController: NSViewController {
                     row.apply(
                         percentage: win.percentage,
                         placeholder: win.placeholder(availability: quotaGroup.availability),
-                        reset: win.percentage == nil ? "" : win.effectiveResetText(at: now),
+                        reset: win.percentage == nil ? "" : win.effectiveResetText(at: now, standbyMode: standbyMode, compact: true),
                         stale: effStale
                     )
                     groupViews.append(row)
@@ -1548,6 +1549,7 @@ final class MenuPanelController: NSViewController {
                 warnings.append(contractWarn)
             }
             quotaWarningLabel.stringValue = warnings.joined(separator: L10n.shared.isEnglish ? "; " : "；")
+            quotaWarningLabel.textColor = accessibleWarningColor()
             quotaWarningLabel.isHidden = warnings.isEmpty
 
             var footerParts: [String] = []
@@ -1574,6 +1576,7 @@ final class MenuPanelController: NSViewController {
             }
             quotaFooterLabel.stringValue = footerParts.joined(separator: " · ")
             quotaFooterLabel.textColor = .secondaryLabelColor
+            quotaFooterLabel.toolTip = nil
             return
         }
 
@@ -1618,8 +1621,9 @@ final class MenuPanelController: NSViewController {
             quotaStatusBadge.isHidden = true
         }
 
+        let standbyMode = app.standbyRefreshMode(account)
         let contract = QuotaPresentation.contract(account)
-        renderUnifiedQuotaRows(contract: contract, keyPrefix: "\(id)|\(email)")
+        renderUnifiedQuotaRows(contract: contract, keyPrefix: "\(id)|\(email)", standbyMode: standbyMode)
 
         var warnings: [String] = []
         if let readiness = account["credentialReadiness"] as? [String: Any], readiness["state"] as? String == "needs_authorization" {
@@ -1642,24 +1646,48 @@ final class MenuPanelController: NSViewController {
         if !contractWarn.isEmpty {
             warnings.append(contractWarn)
         }
-        quotaWarningLabel.stringValue = warnings.joined(separator: L10n.shared.isEnglish ? "; " : "；")
-        quotaWarningLabel.isHidden = warnings.isEmpty
+        if !warnings.isEmpty {
+            quotaWarningLabel.stringValue = warnings.joined(separator: L10n.shared.isEnglish ? "; " : "；")
+            quotaWarningLabel.textColor = accessibleWarningColor()
+            quotaWarningLabel.isHidden = false
+        } else if let singleNotice = app.singleAccountRefreshNotices[id]?.trimmingCharacters(in: .whitespacesAndNewlines), !singleNotice.isEmpty {
+            quotaWarningLabel.stringValue = singleNotice
+            quotaWarningLabel.textColor = .secondaryLabelColor
+            quotaWarningLabel.isHidden = false
+        } else {
+            quotaWarningLabel.stringValue = ""
+            quotaWarningLabel.isHidden = true
+        }
 
         let quota = account["quota"] as? [String: Any]
         let stamp = QuotaPresentation.number(quota?["last_updated"]) ?? QuotaPresentation.number(account["quota_last_updated"]) ?? 0
+        let offlinePrefix = !app.reachable ? L10n.t("menu_panel.quota.offline_prefix", fallback: "本机服务离线 · ") : ""
         if app.quotaRefreshing || (!id.isEmpty && app.refreshingAccountIds.contains(id)) {
             quotaFooterLabel.stringValue = L10n.t("menu_panel.quota.refreshing", fallback: "正在刷新配额…")
             quotaFooterLabel.textColor = .secondaryLabelColor
+            quotaFooterLabel.toolTip = nil
+        } else if standbyMode == "snapshot_cooldown_elapsed" {
+            quotaFooterLabel.stringValue = offlinePrefix + L10n.t("accounts.standby.reset_passed", fallback: "已到重置时间 · 切换后更新")
+            quotaFooterLabel.textColor = Design.blue
+            quotaFooterLabel.toolTip = L10n.t("accounts.standby.multi_device_hint")
+        } else if standbyMode == "snapshot_cooling", stamp > 0 {
+            let date = Date(timeIntervalSince1970: stamp)
+            let fmt = Calendar.current.isDateInToday(date) ? Self.timeFormatter : Self.dateTimeFormatter
+            quotaFooterLabel.stringValue = offlinePrefix + L10n.t("accounts.standby.recorded_at", ["time": fmt.string(from: date)], fallback: "记录于 \(fmt.string(from: date)) · 切换后同步")
+            quotaFooterLabel.textColor = .secondaryLabelColor
+            quotaFooterLabel.toolTip = L10n.t("accounts.standby.multi_device_hint")
         } else if stamp > 0 {
             let date = Date(timeIntervalSince1970: stamp)
             let fmt = Calendar.current.isDateInToday(date) ? Self.timeFormatter : Self.dateTimeFormatter
             let isStale = Date().timeIntervalSince(date) > app.quotaStaleThresholdSeconds
             let updatedStr = L10n.t("common.updated_at", ["time": fmt.string(from: date)], fallback: "更新于 \(fmt.string(from: date))")
-            quotaFooterLabel.stringValue = (!app.reachable ? L10n.t("menu_panel.quota.offline_prefix", fallback: "本机服务离线 · ") : "") + updatedStr + (isStale ? L10n.t("menu_panel.quota.stale_suffix", fallback: " · 待刷新") : "")
+            quotaFooterLabel.stringValue = offlinePrefix + updatedStr + (isStale ? L10n.t("menu_panel.quota.stale_suffix", fallback: " · 待刷新") : "")
             quotaFooterLabel.textColor = isStale ? accessibleWarningColor() : .secondaryLabelColor
+            quotaFooterLabel.toolTip = nil
         } else {
             quotaFooterLabel.stringValue = L10n.t("menu_panel.quota.no_record", fallback: "尚未取得配额记录")
             quotaFooterLabel.textColor = .secondaryLabelColor
+            quotaFooterLabel.toolTip = standbyMode == "snapshot_cooling" ? L10n.t("accounts.standby.multi_device_hint") : nil
         }
     }
 
@@ -1751,7 +1779,8 @@ final class MenuPanelController: NSViewController {
                 switchInFlight: app.accountSwitchInFlight,
                 globalBusy: app.quotaRefreshing,
                 singleBusy: app.refreshingAccountIds.contains(id),
-                singleError: app.singleAccountRefreshErrors[id]
+                singleError: app.singleAccountRefreshErrors[id],
+                singleNotice: app.singleAccountRefreshNotices[id]
             )
         }
 

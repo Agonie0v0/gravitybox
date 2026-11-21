@@ -1204,7 +1204,7 @@ final class MenuExpandableAccountCardView: NSBox {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func apply(account: [String: Any], isCurrent: Bool, isLiveVerified: Bool, isRecommended: Bool, isExpanded: Bool, reachable: Bool, switchInFlight: Bool, globalBusy: Bool, singleBusy: Bool, singleError: String?) {
+    func apply(account: [String: Any], isCurrent: Bool, isLiveVerified: Bool, isRecommended: Bool, isExpanded: Bool, reachable: Bool, switchInFlight: Bool, globalBusy: Bool, singleBusy: Bool, singleError: String?, singleNotice: String? = nil) {
         let email = account["email"] as? String ?? L10n.t("menu_panel.account_card.unnamed", fallback: "未命名账号")
         fullEmail = email
         let rawName = account["name"] as? String
@@ -1262,6 +1262,7 @@ final class MenuExpandableAccountCardView: NSBox {
         headerButton.setAccessibilityLabel(L10n.t("menu_panel.account_card.a11y", ["name": display, "email": email, "role": roleText, "summary": summary], fallback: "\(display)，\(email)，\(roleText)，\(summary)"))
 
         let now = Date()
+        let standbyMode = ((account["standbyRefreshStatus"] as? [String: Any])?["mode"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let contract = QuotaPresentation.contract(account)
         struct DynamicMeterSpec {
             let title: String
@@ -1291,7 +1292,7 @@ final class MenuExpandableAccountCardView: NSBox {
                         groupName: group.displayName,
                         percentage: win.percentage,
                         placeholder: win.placeholder(availability: group.availability),
-                        reset: win.percentage == nil ? "" : win.effectiveResetText(at: now),
+                        reset: win.percentage == nil ? "" : win.effectiveResetText(at: now, standbyMode: standbyMode, compact: true),
                         stale: win.effectiveStale(at: now)
                     ))
                 }
@@ -1335,18 +1336,44 @@ final class MenuExpandableAccountCardView: NSBox {
         if !contractWarn.isEmpty {
             warnings.append(contractWarn)
         }
-        warningLabel.stringValue = warnings.joined(separator: L10n.shared.isEnglish ? "; " : "；")
-        warningLabel.isHidden = warnings.isEmpty
+        if !warnings.isEmpty {
+            warningLabel.stringValue = warnings.joined(separator: L10n.shared.isEnglish ? "; " : "；")
+            warningLabel.textColor = accessibleWarningColor()
+            warningLabel.isHidden = false
+        } else if let singleNotice = singleNotice?.trimmingCharacters(in: .whitespacesAndNewlines), !singleNotice.isEmpty {
+            warningLabel.stringValue = singleNotice
+            warningLabel.textColor = .secondaryLabelColor
+            warningLabel.isHidden = false
+        } else {
+            warningLabel.stringValue = ""
+            warningLabel.isHidden = true
+        }
 
         let quota = account["quota"] as? [String: Any]
         let stamp = QuotaPresentation.number(quota?["last_updated"]) ?? QuotaPresentation.number(account["quota_last_updated"]) ?? 0
-        if stamp > 0 {
+        if standbyMode == "snapshot_cooldown_elapsed" {
+            timestampLabel.stringValue = L10n.t("accounts.standby.reset_passed", fallback: "已到重置时间 · 切换后更新")
+            timestampLabel.textColor = Design.blue
+            timestampLabel.toolTip = L10n.t("accounts.standby.multi_device_hint")
+            timestampLabel.isHidden = false
+        } else if standbyMode == "snapshot_cooling", stamp > 0 {
+            let date = Date(timeIntervalSince1970: stamp)
+            let fmt = Calendar.current.isDateInToday(date) ? Self.todayFormatter : Self.dateFormatter
+            timestampLabel.stringValue = L10n.t("accounts.standby.recorded_at", ["time": fmt.string(from: date)], fallback: "记录于 \(fmt.string(from: date)) · 切换后同步")
+            timestampLabel.textColor = .secondaryLabelColor
+            timestampLabel.toolTip = L10n.t("accounts.standby.multi_device_hint")
+            timestampLabel.isHidden = false
+        } else if stamp > 0 {
             let date = Date(timeIntervalSince1970: stamp)
             let fmt = Calendar.current.isDateInToday(date) ? Self.todayFormatter : Self.dateFormatter
             timestampLabel.stringValue = L10n.t("common.updated_at", ["time": fmt.string(from: date)], fallback: "更新于 \(fmt.string(from: date))")
+            timestampLabel.textColor = Design.secondary
+            timestampLabel.toolTip = nil
             timestampLabel.isHidden = false
         } else {
             timestampLabel.stringValue = ""
+            timestampLabel.textColor = Design.secondary
+            timestampLabel.toolTip = nil
             timestampLabel.isHidden = true
         }
 

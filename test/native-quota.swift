@@ -609,6 +609,61 @@ import Cocoa
         ])
         check(sortedFold.map { $0["model"] as? String ?? "" } == ["c", "b", "a"], "ModelUsageFold.sortByUsage must sort by totalTokens desc then estimatedUsd desc")
 
+        // Standby cooling & cooldown-elapsed plain-language reset text
+        let standbyOverduePayload: [String: Any] = [
+            "standbyRefreshStatus": [
+                "mode": "snapshot_cooldown_elapsed",
+                "hasLocalOAuthClient": false,
+                "canBackgroundRefresh": false,
+                "cooldownElapsedFamilies": ["gemini"]
+            ],
+            "quotaGroups": [
+                [
+                    "key": "gemini",
+                    "displayName": "Gemini",
+                    "brands": ["gemini"],
+                    "isStandalone": false,
+                    "availability": "available",
+                    "quotaState": "known",
+                    "windows": [
+                        [
+                            "id": "5h",
+                            "period": "5h",
+                            "label": "5 小时",
+                            "known": true,
+                            "remaining": 0.25,
+                            "stale": true,
+                            "resetCountdown": "重置时间已过",
+                            "resetTime": overdueIso
+                        ],
+                        [
+                            "id": "weekly",
+                            "period": "weekly",
+                            "label": "每周",
+                            "known": true,
+                            "remaining": 0.55,
+                            "stale": true,
+                            "resetCountdown": "旧文本",
+                            "resetTime": future5hIso
+                        ]
+                    ]
+                ]
+            ]
+        ]
+        let standbyContract = QuotaPresentation.contract(standbyOverduePayload)
+        check(standbyContract.standbyMode == "snapshot_cooldown_elapsed", "Contract parses standbyRefreshStatus.mode")
+        let standbyOverdueWin = standbyContract.quotaGroups[0].windows[0]
+        let standbyFutureWin = standbyContract.quotaGroups[0].windows[1]
+        check(standbyOverdueWin.effectiveResetText(at: nowRef, standbyMode: "snapshot_cooldown_elapsed", compact: true) == "预计已重置", "Compact overdue standby window shows 预计已重置")
+        check(standbyOverdueWin.effectiveResetText(at: nowRef, standbyMode: "snapshot_cooldown_elapsed", compact: false) == "预计已重置 · 切换后更新", "Wide overdue standby window shows 预计已重置 · 切换后更新")
+        check(standbyOverdueWin.effectiveResetText(at: nowRef) == "预计已重置 · 切换后更新", "Default effectiveResetText uses contract standbyMode")
+        let coolingCleanText = standbyFutureWin.effectiveResetText(at: nowRef, standbyMode: "snapshot_cooling", compact: false)
+        check(coolingCleanText.contains("4小时 42分后重置") && !coolingCleanText.contains("数据已过期"), "Future standby snapshot window keeps clean countdown without 数据已过期")
+        L10n.shared.setLanguage("en", notify: false)
+        check(standbyOverdueWin.effectiveResetText(at: nowRef, standbyMode: "snapshot_cooldown_elapsed", compact: true) == "Likely reset", "English compact overdue standby window shows Likely reset")
+        check(standbyOverdueWin.effectiveResetText(at: nowRef, standbyMode: "snapshot_cooldown_elapsed", compact: false) == "Likely reset · Syncs on switch", "English wide overdue standby window shows Likely reset · Syncs on switch")
+        L10n.shared.setLanguage("zh-Hans", notify: false)
+
         print("\(assertionCount) native quota assertions passed")
     }
 }

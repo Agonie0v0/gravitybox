@@ -474,7 +474,7 @@ test('P0-02/P1-15/P1-17/P1-19/P1-20: 维护目录动态双语、resume切回中�
   });
   assert.equal(projectedOverview.token, undefined);
   assert.equal(projectedOverview.quota.five_hour_remaining, null);
-  assert.ok(projectedOverview.revision.endsWith(':' + projectedOverview.credentialReadiness.state));
+  assert.ok(projectedOverview.revision.endsWith(':' + projectedOverview.credentialReadiness.state + ':' + projectedOverview.standbyRefreshStatus.mode));
 
   const tasks = new Tasks(dir, () => {});
   await tasks.start();

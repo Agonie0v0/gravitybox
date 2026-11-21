@@ -6,6 +6,7 @@ import {
   buildCarbonStatus,
   buildStandaloneModels,
   classifyFamily,
+  classifyWindow,
   extractGroupWindows,
   extractStandaloneGeminiCodename,
   familyWindowsFromGroups,
@@ -469,10 +470,14 @@ const MISSING_OAUTH_CLIENT_STANDBY_BODY =
   'Google OAuth credentials are not configured, so standby accounts cannot refresh tokens in the background \\(optional credentials can be set in \\.env\\)'
   + '|未配置 Google OAuth 凭据，备用账号无法后台刷新 Token（可在 \\.env 中配置可选凭据）'
   + '|Credentials expired without background auto-refresh; switch to this account or re-save the current account to refresh quota'
-  + '|登录凭据已过期（未配置后台自动续期），请切换至此账号或重新「保存当前账号」刷新配额';
+  + '|登录凭据已过期（未配置后台自动续期），请切换至此账号或重新「保存当前账号」刷新配额'
+  + '|Quota updates automatically after you switch to this account\\. Until then, refer to the last record and timer\\.'
+  + '|切换并使用该账号后会自动更新最新额度；未切换前可参考上次记录和倒计时。';
 const MISSING_OAUTH_CLIENT_ACTIVE_LIVE_BODY =
   'Current desktop account credentials expired without background auto-refresh; launch Antigravity and open a workspace so the language service is ready, then retry quota refresh'
-  + '|当前桌面账号的登录凭据已过期（未配置后台自动续期），请启动 Antigravity 并打开工作区使语言服务就绪后再刷新配额';
+  + '|当前桌面账号的登录凭据已过期（未配置后台自动续期），请启动 Antigravity 并打开工作区使语言服务就绪后再刷新配额'
+  + '|Open Antigravity and enter any project to refresh the current account\'s quota\\.'
+  + '|请先打开 Antigravity 并进入任意项目，即可刷新当前账号额度。';
 const MISSING_OAUTH_CLIENT_STANDBY_PATTERN = new RegExp(`^(?:${MISSING_OAUTH_CLIENT_STANDBY_BODY})$`);
 const MISSING_OAUTH_CLIENT_ACTIVE_LIVE_PATTERN = new RegExp(`^(?:${MISSING_OAUTH_CLIENT_ACTIVE_LIVE_BODY})$`);
 export const MISSING_OAUTH_CLIENT_PATTERN = new RegExp(
@@ -1719,27 +1724,377 @@ export function localizeStoredQuotaForIpc(quota: QuotaData | null | undefined): 
   return next;
 }
 
-export function projectAccountForIpc(account: Account | AccountSummary | null | undefined): Record<string, any> | null {
+export type StandbyRefreshMode =
+  | 'live_active'
+  | 'cloud_auto'
+  | 'snapshot_cooling'
+  | 'snapshot_cooldown_elapsed';
+
+export interface StandbyRefreshStatus {
+  mode: StandbyRefreshMode;
+  hasLocalOAuthClient: boolean;
+  canBackgroundRefresh: boolean;
+  lastSampledAt: number | null;
+  nextResetAt: string | null;
+  cooldownElapsedFamilies: Family[];
+}
+
+export interface StandbyCandidateEvaluation {
+  tier: 'fresh' | 'snapshot' | 'cooldown_elapsed';
+  remaining: number | null;
+  earliestResetMs: number | null;
+}
+
+function collectQuotaWindowTiming(
+  quota: QuotaData | null | undefined,
+  overview: QuotaOverview | undefined,
+  nowMs: number,
+): { cooldownElapsedFamilies: Family[]; nextResetAt: string | null } {
+  const elapsedSet = new Set<Family>();
+  let earliestFutureMs: number | null = null;
+  let nextResetAt: string | null = null;
+
+  const consider = (family: Family, resetTime: unknown) => {
+    const iso = normalizeResetTime(resetTime);
+    if (!iso) return;
+    const ms = Date.parse(iso);
+    if (!Number.isFinite(ms)) return;
+    if (ms <= nowMs) {
+      elapsedSet.add(family);
+    } else if (earliestFutureMs === null || ms < earliestFutureMs) {
+      earliestFutureMs = ms;
+      nextResetAt = iso;
+    }
+  };
+
+  if (overview?.familyWindows) {
+    for (const family of ['gemini', 'claude', 'argon', 'carbon'] as const) {
+      const pair = overview.familyWindows[family];
+      if (!pair) continue;
+      if (pair.fiveHour?.known && pair.fiveHour.resetTime) {
+        consider(family, pair.fiveHour.resetTime);
+      }
+      if (pair.weekly?.known && pair.weekly.resetTime) {
+        consider(family, pair.weekly.resetTime);
+      }
+    }
+  }
+
+  if (quota && Array.isArray(quota.quota_groups)) {
+    for (const group of quota.quota_groups) {
+      if (!group || !Array.isArray(group.buckets)) continue;
+      const family = group.family ?? classifyFamily({
+        groupName: group.display_name,
+        description: group.description,
+        bucketId: group.buckets[0]?.bucket_id,
+      });
+      for (const bucket of group.buckets) {
+        if (!bucket || bucket.disabled === true || bucket.remaining_fraction_known === false) continue;
+        const win = classifyWindow(bucket.window, bucket.bucket_id, bucket.display_name);
+        if (win !== '5h' && win !== 'weekly') continue;
+        consider(family, bucket.reset_time);
+      }
+    }
+  }
+
+  if (!overview?.familyWindows && quota && Array.isArray(quota.models)) {
+    for (const model of quota.models) {
+      if (!model || model.disabled === true) continue;
+      const family = model.family ?? classifyFamily({
+        modelId: model.model_id ?? model.name,
+        displayName: model.display_name,
+      });
+      if (model.family_5h?.known && model.family_5h.resetTime) {
+        consider(family, model.family_5h.resetTime);
+      }
+      if (model.family_weekly?.known && model.family_weekly.resetTime) {
+        consider(family, model.family_weekly.resetTime);
+      }
+    }
+  }
+
+  return {
+    cooldownElapsedFamilies: Array.from(elapsedSet),
+    nextResetAt,
+  };
+}
+
+export function computeStandbyRefreshStatus(
+  account: Account | AccountSummary | { quota?: QuotaData | null; quota_last_updated?: number | null; token?: Partial<TokenData> | null } | null | undefined,
+  options: {
+    isActive?: boolean;
+    hasLocalOAuthClient: boolean;
+    nowMs?: number;
+    overview?: QuotaOverview;
+  },
+): StandbyRefreshStatus {
+  const nowMs = options.nowMs ?? Date.now();
+  const nowSec = nowMs / 1000;
+  const hasLocalOAuthClient = Boolean(options.hasLocalOAuthClient);
+  const rawLastUpdated = account?.quota?.last_updated ?? (account as AccountSummary | null | undefined)?.quota_last_updated ?? null;
+  const lastSampledAt = typeof rawLastUpdated === 'number' && Number.isFinite(rawLastUpdated) && rawLastUpdated > 0
+    ? rawLastUpdated
+    : null;
+  const { cooldownElapsedFamilies, nextResetAt } = collectQuotaWindowTiming(account?.quota, options.overview, nowMs);
+
+  if (options.isActive === true) {
+    return {
+      mode: 'live_active',
+      hasLocalOAuthClient,
+      canBackgroundRefresh: true,
+      lastSampledAt,
+      nextResetAt,
+      cooldownElapsedFamilies: [],
+    };
+  }
+
+  const token = (account as Account | null | undefined)?.token;
+  const hasValidAccessToken = Boolean(
+    token?.access_token
+    && token.access_token !== 'pending_refresh'
+    && typeof token.expiry_timestamp === 'number'
+    && Number.isFinite(token.expiry_timestamp)
+    && token.expiry_timestamp - nowSec >= 300,
+  );
+  if (hasLocalOAuthClient || hasValidAccessToken) {
+    return {
+      mode: 'cloud_auto',
+      hasLocalOAuthClient,
+      canBackgroundRefresh: true,
+      lastSampledAt,
+      nextResetAt,
+      cooldownElapsedFamilies: [],
+    };
+  }
+
+  const elapsed = cooldownElapsedFamilies.length > 0 || hasExpiredQuotaWindow(account?.quota, nowMs);
+  return {
+    mode: elapsed ? 'snapshot_cooldown_elapsed' : 'snapshot_cooling',
+    hasLocalOAuthClient,
+    canBackgroundRefresh: false,
+    lastSampledAt,
+    nextResetAt,
+    cooldownElapsedFamilies,
+  };
+}
+
+function resolveTargetFamiliesForCandidate(
+  _account: Account,
+  overview: QuotaOverview,
+  monitoredModel: string,
+): { families: Set<Family>; matchedModel: ModelQuota | null } {
+  const trimmed = monitoredModel.trim().toLowerCase();
+  if (trimmed === 'argon' || trimmed === 'gemini 4 argon' || trimmed === 'gemini-4-argon') {
+    if (overview.argonStatus.mode === 'unified' && overview.argonStatus.pooledInFamily) {
+      return { families: new Set<Family>([overview.argonStatus.pooledInFamily]), matchedModel: null };
+    }
+    return { families: new Set<Family>(['argon']), matchedModel: null };
+  }
+  if (trimmed === 'carbon' || trimmed === 'gemini 4 carbon' || trimmed === 'gemini-4-carbon') {
+    if (overview.carbonStatus.mode === 'unified' && overview.carbonStatus.pooledInFamily) {
+      return { families: new Set<Family>([overview.carbonStatus.pooledInFamily]), matchedModel: null };
+    }
+    return { families: new Set<Family>(['carbon']), matchedModel: null };
+  }
+  if (trimmed === 'claude' || trimmed === '3p' || trimmed === 'claude/gpt' || trimmed === 'gpt') {
+    return { families: new Set<Family>(['claude']), matchedModel: null };
+  }
+  if (trimmed === 'gemini') {
+    return { families: new Set<Family>(['gemini']), matchedModel: null };
+  }
+  if (
+    trimmed === 'gemini_all'
+    || trimmed === 'gemini 全系模型'
+    || trimmed === 'all gemini models'
+    || trimmed === 'gemini 全系（含 argon）'
+    || trimmed === 'all gemini (incl. argon)'
+  ) {
+    return { families: new Set<Family>(['gemini', 'argon', 'carbon']), matchedModel: null };
+  }
+  if (!trimmed || trimmed === 'all') {
+    const hasCore = overview.models.some(m => (m.family === 'gemini' || m.family === 'claude') && m.disabled !== true)
+      || overview.familyWindows.gemini.fiveHour !== null
+      || overview.familyWindows.gemini.weekly !== null
+      || overview.familyWindows.claude.fiveHour !== null
+      || overview.familyWindows.claude.weekly !== null;
+    return {
+      families: new Set<Family>(hasCore ? ['gemini', 'claude'] : ['argon', 'carbon']),
+      matchedModel: null,
+    };
+  }
+
+  const matchedModels = findMatchingModels(overview.models, trimmed);
+  const model = matchedModels.find(m => m.disabled !== true && m.stale !== true) ?? matchedModels[0] ?? null;
+  if (model) {
+    const modelFamily = model.family ?? classifyFamily({ modelId: model.name, displayName: model.display_name });
+    if ((model.is_argon || modelFamily === 'argon') && overview.argonStatus.mode === 'unified' && overview.argonStatus.pooledInFamily) {
+      return { families: new Set<Family>([overview.argonStatus.pooledInFamily]), matchedModel: model };
+    }
+    if ((model.is_carbon || modelFamily === 'carbon') && overview.carbonStatus.mode === 'unified' && overview.carbonStatus.pooledInFamily) {
+      return { families: new Set<Family>([overview.carbonStatus.pooledInFamily]), matchedModel: model };
+    }
+    return { families: new Set<Family>([modelFamily]), matchedModel: model };
+  }
+
+  if (trimmed === 'gemini-4-argon') return { families: new Set<Family>(['argon']), matchedModel: null };
+  if (trimmed === 'gemini-4-carbon') return { families: new Set<Family>(['carbon']), matchedModel: null };
+  const classified = classifyFamily({ modelId: trimmed, displayName: trimmed });
+  return {
+    families: new Set<Family>(classified === 'other' ? ['gemini', 'claude'] : [classified]),
+    matchedModel: null,
+  };
+}
+
+export function evaluateStandbyCandidate(
+  account: Account,
+  monitoredModel = 'all',
+  options?: {
+    staleAfterSeconds?: number;
+    nowMs?: number;
+    minPercentage?: number;
+    overview?: QuotaOverview;
+  },
+): StandbyCandidateEvaluation | null {
+  if (!account || account.disabled || account.validation_blocked || account.quota?.is_forbidden) return null;
+  const nowMs = options?.nowMs ?? Date.now();
+  const nowSec = nowMs / 1000;
+  if (accountCredentialReadiness(account, nowSec).state === 'needs_authorization') return null;
+  const quota = account.quota;
+  if (!quota || !Array.isArray(quota.models)) return null;
+
+  const minPct = typeof options?.minPercentage === 'number' ? options.minPercentage : 0;
+  const overview = options?.overview ?? buildAccountQuotaOverview(account, {
+    nowMs,
+    staleAfterSeconds: options?.staleAfterSeconds,
+  });
+  const { families: targetFamilies, matchedModel } = resolveTargetFamiliesForCandidate(account, overview, monitoredModel);
+  if (matchedModel?.disabled === true) return null;
+
+  const expiredResetMs: number[] = [];
+  const unexpiredFractions: number[] = [];
+
+  const inspectWindow = (known: boolean | undefined, remaining: number | null | undefined, resetTime: unknown) => {
+    if (!known) return;
+    const iso = normalizeResetTime(resetTime);
+    const ms = iso ? Date.parse(iso) : Number.NaN;
+    if (Number.isFinite(ms) && ms <= nowMs) {
+      expiredResetMs.push(ms);
+    } else if (typeof remaining === 'number' && Number.isFinite(remaining)) {
+      unexpiredFractions.push(remaining);
+    }
+  };
+
+  for (const family of targetFamilies) {
+    if (family === 'gemini' || family === 'claude' || family === 'argon' || family === 'carbon') {
+      const fw = overview.familyWindows[family];
+      if (fw.fiveHour) inspectWindow(fw.fiveHour.known, fw.fiveHour.remaining, fw.fiveHour.resetTime);
+      if (fw.weekly) inspectWindow(fw.weekly.known, fw.weekly.remaining, fw.weekly.resetTime);
+    }
+  }
+
+  if (Array.isArray(quota.quota_groups)) {
+    for (const group of quota.quota_groups) {
+      if (!group || !Array.isArray(group.buckets)) continue;
+      const family = group.family ?? classifyFamily({
+        groupName: group.display_name,
+        description: group.description,
+        bucketId: group.buckets[0]?.bucket_id,
+      });
+      if (!targetFamilies.has(family)) continue;
+      for (const bucket of group.buckets) {
+        if (!bucket || bucket.disabled === true || bucket.remaining_fraction_known === false) continue;
+        inspectWindow(true, bucket.remaining_fraction, bucket.reset_time);
+      }
+    }
+  }
+
+  if (matchedModel) {
+    if (matchedModel.own_percentage_known && typeof matchedModel.own_percentage === 'number') {
+      inspectWindow(true, matchedModel.own_percentage / 100, matchedModel.own_reset_time ?? matchedModel.reset_time);
+    }
+    if (matchedModel.family_5h) inspectWindow(matchedModel.family_5h.known, matchedModel.family_5h.remaining, matchedModel.family_5h.resetTime);
+    if (matchedModel.family_weekly) inspectWindow(matchedModel.family_weekly.known, matchedModel.family_weekly.remaining, matchedModel.family_weekly.resetTime);
+  }
+
+  const freshRem = computeAccountRemaining(account, monitoredModel, {
+    staleAfterSeconds: options?.staleAfterSeconds,
+    nowMs,
+  });
+  if (freshRem !== null && expiredResetMs.length === 0) {
+    return freshRem > 0 && freshRem >= minPct
+      ? { tier: 'fresh', remaining: freshRem, earliestResetMs: null }
+      : null;
+  }
+
+  if (expiredResetMs.length === 0) {
+    const snapshotRem = computeAccountRemaining(account, monitoredModel, {
+      staleAfterSeconds: Number.MAX_SAFE_INTEGER,
+      nowMs,
+    });
+    if (snapshotRem !== null && snapshotRem > 0 && snapshotRem >= minPct) {
+      return { tier: 'snapshot', remaining: snapshotRem, earliestResetMs: null };
+    }
+    return null;
+  }
+
+  // If any unexpired known window on the target family is depleted or below minPct, do not treat as ready.
+  if (unexpiredFractions.some(frac => frac <= 0 || Math.round(frac * 100) < minPct)) {
+    return null;
+  }
+
+  return {
+    tier: 'cooldown_elapsed',
+    remaining: null,
+    earliestResetMs: Math.min(...expiredResetMs),
+  };
+}
+
+export function projectAccountForIpc(
+  account: Account | AccountSummary | null | undefined,
+  options?: {
+    isActive?: boolean;
+    hasLocalOAuthClient?: boolean;
+    nowMs?: number;
+    overview?: QuotaOverview;
+  },
+): Record<string, any> | null {
   if (!account) return null;
   const summary = account as AccountSummary;
   const rawQuota = summary.quota ?? null;
   const quota = localizeStoredQuotaForIpc(rawQuota);
   const hasTokenObject = Boolean((account as Account).token && typeof (account as Account).token === 'object');
+  const nowSec = (options?.nowMs ?? Date.now()) / 1000;
   const resolvedReadiness =
     summary.credentialReadiness ??
     (hasTokenObject
-      ? accountCredentialReadiness(account as Account)
+      ? accountCredentialReadiness(account as Account, nowSec)
       : accountCredentialReadiness({
           ...(summary as unknown as Account),
           token: {
             access_token: 'summary_projected',
             refresh_token: 'summary_projected',
             expires_in: 3600,
-            expiry_timestamp: Date.now() / 1000 + 3600,
+            expiry_timestamp: nowSec + 3600,
             token_type: 'Bearer',
             is_gcp_tos: false,
           },
-        }));
+        }, nowSec));
+  const standbyRefreshStatus = computeStandbyRefreshStatus(account, {
+    isActive: options?.isActive,
+    hasLocalOAuthClient: options?.hasLocalOAuthClient ?? false,
+    nowMs: options?.nowMs,
+    overview: options?.overview,
+  });
+  const rawError = typeof summary.quota_refresh_error === 'string' ? summary.quota_refresh_error.trim() : '';
+  const isMissingOAuthError =
+    summary.quota_refresh_error_code === 'missing_oauth_client'
+    || (rawError.length > 0 && MISSING_OAUTH_CLIENT_PATTERN.test(rawError));
+  const isStandbySnapshotMode =
+    standbyRefreshStatus.mode === 'snapshot_cooling'
+    || standbyRefreshStatus.mode === 'snapshot_cooldown_elapsed';
+  const projectedError = isStandbySnapshotMode && isMissingOAuthError
+    ? null
+    : cleanAndLocalizeRefreshError(summary.quota_refresh_error);
   return {
     id: summary.id,
     email: summary.email,
@@ -1754,7 +2109,8 @@ export function projectAccountForIpc(account: Account | AccountSummary | null | 
     last_used: summary.last_used ?? null,
     quota,
     credentialReadiness: resolvedReadiness,
-    quota_refresh_error: cleanAndLocalizeRefreshError(summary.quota_refresh_error),
+    standbyRefreshStatus,
+    quota_refresh_error: projectedError,
     quota_last_updated: summary.quota_last_updated ?? rawQuota?.last_updated ?? 0,
     subscription_tier: rawQuota?.subscription_tier ?? null,
     revision: summary.revision ?? computeAccountRevision(summary),
