@@ -1026,6 +1026,7 @@
     "account_cloud.err.aborted": "Cancelled",
     "account_cloud.err.missing_refresh_token": "This account is missing login credentials; please add it again",
     "account_cloud.err.missing_oauth_client": "Credentials expired without background auto-refresh; switch to this account or re-save the current account to refresh quota",
+    "account_cloud.err.missing_oauth_client_active_live": "Current desktop account credentials expired without background auto-refresh; launch Antigravity and open a workspace so the language service is ready, then retry quota refresh",
     "account_cloud.err.refresh_failed": "Unable to refresh login credentials; please add this account again",
     "account_cloud.err.no_access_token": "Sign-in service did not return valid credentials",
     "account_cloud.err.network": "Unable to reach the sign-in service; check your network and try again",

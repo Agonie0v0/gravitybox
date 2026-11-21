@@ -465,7 +465,19 @@ export function accountErrorCode(error: unknown): AccountErrorCode | null {
 const AUTH_REQUIRED_CODES = new Set<AccountErrorCode>(['refresh_failed', 'missing_refresh_token', 'token_invalid']);
 const NON_AUTH_ERROR_CODES = new Set<AccountErrorCode>(['network', 'oauth_network', 'token_network', 'http_3501', 'missing_oauth_client']);
 
-const MISSING_OAUTH_CLIENT_PATTERN = /^(?:Google OAuth credentials are not configured, so standby accounts cannot refresh tokens in the background \(optional credentials can be set in \.env\)|未配置 Google OAuth 凭据，备用账号无法后台刷新 Token（可在 \.env 中配置可选凭据）|Credentials expired without background auto-refresh; switch to this account or re-save the current account to refresh quota|登录凭据已过期（未配置后台自动续期），请切换至此账号或重新「保存当前账号」刷新配额)$/;
+const MISSING_OAUTH_CLIENT_STANDBY_BODY =
+  'Google OAuth credentials are not configured, so standby accounts cannot refresh tokens in the background \\(optional credentials can be set in \\.env\\)'
+  + '|未配置 Google OAuth 凭据，备用账号无法后台刷新 Token（可在 \\.env 中配置可选凭据）'
+  + '|Credentials expired without background auto-refresh; switch to this account or re-save the current account to refresh quota'
+  + '|登录凭据已过期（未配置后台自动续期），请切换至此账号或重新「保存当前账号」刷新配额';
+const MISSING_OAUTH_CLIENT_ACTIVE_LIVE_BODY =
+  'Current desktop account credentials expired without background auto-refresh; launch Antigravity and open a workspace so the language service is ready, then retry quota refresh'
+  + '|当前桌面账号的登录凭据已过期（未配置后台自动续期），请启动 Antigravity 并打开工作区使语言服务就绪后再刷新配额';
+const MISSING_OAUTH_CLIENT_STANDBY_PATTERN = new RegExp(`^(?:${MISSING_OAUTH_CLIENT_STANDBY_BODY})$`);
+const MISSING_OAUTH_CLIENT_ACTIVE_LIVE_PATTERN = new RegExp(`^(?:${MISSING_OAUTH_CLIENT_ACTIVE_LIVE_BODY})$`);
+export const MISSING_OAUTH_CLIENT_PATTERN = new RegExp(
+  `^(?:${MISSING_OAUTH_CLIENT_STANDBY_BODY}|${MISSING_OAUTH_CLIENT_ACTIVE_LIVE_BODY})$`
+);
 
 export function accountCredentialReadiness(account: Account, now = Date.now() / 1000): { state: 'ready' | 'needs_refresh' | 'needs_authorization'; message: string } {
   const rawError = account.quota_refresh_error ?? '';
@@ -494,7 +506,8 @@ const STORED_QUOTA_ERROR_PATTERNS: Array<[RegExp, string]> = [
   [/^HTTP 403\s*(?:\(Official product license verification failed, error 3501; check this account in the official app\)|（官方产品许可校验未通过，错误码 3501；请在官方应用核对该账号状态）)$/, 'account_cloud.err.http_3501'],
   [/^(?:Project context returned no verifiable quota|项目上下文未返回可验证配额)$/, 'account_cloud.err.project_no_verifiable_quota'],
   [/^(?:This account is missing login credentials; please add it again|此账号缺少登录凭据，请重新添加)$/, 'account_cloud.err.missing_refresh_token'],
-  [MISSING_OAUTH_CLIENT_PATTERN, 'account_cloud.err.missing_oauth_client'],
+  [MISSING_OAUTH_CLIENT_ACTIVE_LIVE_PATTERN, 'account_cloud.err.missing_oauth_client_active_live'],
+  [MISSING_OAUTH_CLIENT_STANDBY_PATTERN, 'account_cloud.err.missing_oauth_client'],
   [/^(?:Unable to refresh login credentials; please add this account again|登录凭据无法刷新，请重新添加此账号)$/, 'account_cloud.err.refresh_failed'],
   [/^(?:Sign-in service did not return valid credentials|登录服务未返回有效凭据)$/, 'account_cloud.err.no_access_token'],
   [/^(?:Unable to reach the sign-in service; check your network and try again|无法连接登录服务，请检查网络后重试)$/, 'account_cloud.err.network'],

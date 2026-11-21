@@ -44,6 +44,7 @@ import {
 } from './quota.js';
 import {
   CodedAccountError,
+  MISSING_OAUTH_CLIENT_PATTERN,
   accountCredentialReadiness,
   accountErrorCode,
   buildAccountQuotaOverview,
@@ -164,9 +165,10 @@ export class AccountsManager {
   private dirReadyPromise: Promise<void> | null = null;
   private inFlightRefreshes = new Map<string, Promise<Account>>();
   private mutex = new ReentrantMutex();
-  private liveProbeCache: { status: LiveLanguageServerStatus | null; expiresAt: number } | null = null;
+  private liveProbeCache: { status: LiveLanguageServerStatus; expiresAt: number } | null = null;
   private inFlightProbe: Promise<LiveLanguageServerStatus | null> | null = null;
   private inFlightForceProbe: Promise<LiveLanguageServerStatus | null> | null = null;
+  private probeLiveOnceOverride?: typeof probeLiveLanguageServerOnce;
   private providerOverride?: CloudProviderContext;
   private providerContextCache: { value: CloudProviderContext; expiresAt: number } | null = null;
   private inFlightProviderContext: Promise<CloudProviderContext | null> | null = null;
@@ -184,9 +186,10 @@ export class AccountsManager {
     return this.withWriteLock(action);
   }
 
-  constructor(private stateDir: string, options: { providerContext?: CloudProviderContext; target?: ApplicationTarget } = {}) {
+  constructor(private stateDir: string, options: { providerContext?: CloudProviderContext; target?: ApplicationTarget; probeLiveOnce?: typeof probeLiveLanguageServerOnce } = {}) {
     this.target = options.target ?? applicationTarget();
     this.providerOverride=options.providerContext;
+    this.probeLiveOnceOverride = options.probeLiveOnce;
     this.accountsDir = join(stateDir, 'accounts');
     this.indexPath = join(stateDir, 'accounts.json');
     this.autoSwitchPath = join(stateDir, 'auto_switch.json');
@@ -708,6 +711,34 @@ export class AccountsManager {
         const resolvedExpiresIn = explicitExpiryTs !== undefined
           ? (expiresIn ?? Math.max(0, explicitExpiryTs - now))
           : (expiresIn ?? existing.token.expires_in);
+        const refreshTokenChanged = Boolean(refreshToken && refreshToken !== existing.token.refresh_token);
+        const existingAccessValid = Boolean(
+          existing.token.access_token && existing.token.access_token !== 'pending_refresh'
+        );
+        const incomingAccessValid = Boolean(accessToken && accessToken !== 'pending_refresh');
+        // Never regress a fresher valid access_token on the same refresh_token with an older/expired disk snapshot.
+        const preserveExistingAccess =
+          !refreshTokenChanged &&
+          existingAccessValid &&
+          Number.isFinite(existing.token.expiry_timestamp) &&
+          (!incomingAccessValid || existing.token.expiry_timestamp > resolvedExpiryTs);
+        const finalAccessToken = preserveExistingAccess
+          ? existing.token.access_token
+          : (accessToken ?? existing.token.access_token);
+        const finalExpiryTs = preserveExistingAccess ? existing.token.expiry_timestamp : resolvedExpiryTs;
+        const finalExpiresIn = preserveExistingAccess ? existing.token.expires_in : resolvedExpiresIn;
+        const hadMissingOAuthClientError =
+          existing.quota_refresh_error_code === 'missing_oauth_client' ||
+          (typeof existing.quota_refresh_error === 'string' && MISSING_OAUTH_CLIENT_PATTERN.test(existing.quota_refresh_error.trim()));
+        const hasUsableAccessToken = Boolean(
+          finalAccessToken &&
+          finalAccessToken !== 'pending_refresh' &&
+          Number.isFinite(finalExpiryTs) &&
+          finalExpiryTs > now + 300
+        );
+        const oauthConfigured = Boolean(getGoogleClientId() && getGoogleClientSecret());
+        const shouldClearQuotaRefreshError =
+          hasNewCreds && (!hadMissingOAuthClientError || refreshTokenChanged || hasUsableAccessToken || oauthConfigured);
         account = {
           ...existing,
           name: name !== undefined ? name : existing.name,
@@ -715,9 +746,11 @@ export class AccountsManager {
           disabled: false,
           disabled_reason: null,
           disabled_at: null,
-          ...(hasNewCreds ? {
+          ...(shouldClearQuotaRefreshError ? {
             quota_refresh_error: null,
             quota_refresh_error_code: null,
+          } : {}),
+          ...(hasNewCreds ? {
             validation_blocked: false,
             validation_blocked_until: null,
             validation_blocked_reason: null,
@@ -726,9 +759,9 @@ export class AccountsManager {
           token: {
             ...existing.token,
             refresh_token: refreshToken || existing.token.refresh_token,
-            access_token: accessToken ?? existing.token.access_token,
-            expires_in: resolvedExpiresIn,
-            expiry_timestamp: resolvedExpiryTs,
+            access_token: finalAccessToken,
+            expires_in: finalExpiresIn,
+            expiry_timestamp: finalExpiryTs,
             token_type: typeof tokenType === 'string' && tokenType ? tokenType : (existing.token.token_type || 'Bearer'),
             email: email || existing.token.email || existing.email,
             project_id: projectId !== undefined ? projectId : existing.token.project_id,
@@ -1623,7 +1656,7 @@ export class AccountsManager {
       if (activeFlight) return await activeFlight;
     }
 
-    const doProbe = () => probeLiveLanguageServerOnce(this.target, fetchImpl, options, {
+    const doProbe = () => (this.probeLiveOnceOverride ?? probeLiveLanguageServerOnce)(this.target, fetchImpl, options, {
       modelQuotaFromNormalized,
       groupToQuotaGroup,
     });
@@ -1637,7 +1670,7 @@ export class AccountsManager {
     else this.inFlightProbe = probePromise;
     try {
       const res = await probePromise;
-      this.liveProbeCache = { status: res, expiresAt: Date.now() + 5000 };
+      this.liveProbeCache = res !== null ? { status: res, expiresAt: Date.now() + 5000 } : null;
       return res;
     } finally {
       if (forceRefresh) {
@@ -1646,6 +1679,54 @@ export class AccountsManager {
         this.inFlightProbe = null;
       }
     }
+  }
+
+  private static buildExtractedOAuthToken(rawToken: any, fallbackEmail: string | null): { token: TokenData; email: string | null } {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const explicitTs = AccountsManager.parseExplicitExpiryTimestamp(rawToken.expiry_timestamp, rawToken.expiry);
+    const accessToken = typeof rawToken.access_token === 'string' ? rawToken.access_token : '';
+    const isEpochZeroIso = typeof rawToken.expiry === 'string' && rawToken.expiry.trim().length > 0 && Date.parse(rawToken.expiry.trim()) === 0;
+    const hasZeroExpiry =
+      rawToken.expiry_timestamp === 0 ||
+      isEpochZeroIso ||
+      rawToken.expires_in === 0 ||
+      !accessToken ||
+      accessToken === 'pending_refresh';
+    const expiryTs = explicitTs ?? (hasZeroExpiry ? 0 : nowSec + (Number(rawToken.expires_in) || 3600));
+    const email = rawToken.email || fallbackEmail || null;
+    return {
+      token: {
+        access_token: accessToken,
+        refresh_token: rawToken.refresh_token,
+        expires_in: rawToken.expires_in ?? (expiryTs > nowSec ? expiryTs - nowSec : 0),
+        expiry_timestamp: expiryTs,
+        token_type: rawToken.token_type || 'Bearer',
+        email,
+        project_id: rawToken.project_id || null,
+        is_gcp_tos: Boolean(rawToken.is_gcp_tos),
+        id_token: rawToken.id_token || null,
+      },
+      email,
+    };
+  }
+
+  private static shouldPreferTokenCandidate(current: TokenData, candidate: TokenData, nowSec: number): boolean {
+    const hasValidAccess = (t: TokenData): boolean =>
+      Boolean(t.access_token && t.access_token !== 'pending_refresh');
+    const getExpiry = (t: TokenData): number =>
+      Number.isFinite(t.expiry_timestamp) ? t.expiry_timestamp : 0;
+
+    const curValid = hasValidAccess(current);
+    const candValid = hasValidAccess(candidate);
+    if (candValid !== curValid) return candValid;
+    if (!candValid) return false;
+
+    const curExp = getExpiry(current);
+    const candExp = getExpiry(candidate);
+    const curUnexpired = curExp > nowSec;
+    const candUnexpired = candExp > nowSec;
+    if (candUnexpired !== curUnexpired) return candUnexpired;
+    return candExp > curExp;
   }
 
   /**
@@ -1677,19 +1758,9 @@ export class AccountsManager {
           const json = JSON.parse(raw);
           const t = json.token || json;
           if (t?.refresh_token) {
-            const explicitTs = AccountsManager.parseExplicitExpiryTimestamp(t.expiry_timestamp, t.expiry);
-            extractedToken = {
-              access_token: t.access_token || '',
-              refresh_token: t.refresh_token,
-              expires_in: t.expires_in ?? 3600,
-              expiry_timestamp: explicitTs ?? (Math.floor(Date.now() / 1000) + (Number(t.expires_in) || 3600)),
-              token_type: t.token_type || 'Bearer',
-              email: t.email || json.id_token_email || null,
-              project_id: t.project_id || null,
-              is_gcp_tos: Boolean(t.is_gcp_tos),
-              id_token: t.id_token || null,
-            };
-            extractedEmail = t.email || json.id_token_email || null;
+            const parsed = AccountsManager.buildExtractedOAuthToken(t, json.id_token_email || null);
+            extractedToken = parsed.token;
+            extractedEmail = parsed.email;
             return;
           }
         } catch {}
@@ -1709,19 +1780,9 @@ export class AccountsManager {
           const raw = Buffer.from(pass.slice('go-keyring-base64:'.length), 'base64').toString('utf8');
           const parsed = JSON.parse(raw);
           if (parsed?.token?.refresh_token) {
-            const explicitTs = AccountsManager.parseExplicitExpiryTimestamp(parsed.token.expiry_timestamp, parsed.token.expiry);
-            extractedToken = {
-              access_token: parsed.token.access_token || '',
-              refresh_token: parsed.token.refresh_token,
-              expires_in: parsed.token.expires_in ?? 3600,
-              expiry_timestamp: explicitTs ?? (Math.floor(Date.now() / 1000) + (Number(parsed.token.expires_in) || 3600)),
-              token_type: parsed.token.token_type || 'Bearer',
-              email: parsed.token.email || parsed.id_token_email || null,
-              project_id: parsed.token.project_id || null,
-              is_gcp_tos: Boolean(parsed.token.is_gcp_tos),
-              id_token: parsed.token.id_token || null,
-            };
-            extractedEmail = parsed.token.email || parsed.id_token_email || null;
+            const extracted = AccountsManager.buildExtractedOAuthToken(parsed.token, parsed.id_token_email || null);
+            extractedToken = extracted.token;
+            extractedEmail = extracted.email;
           }
         }
       } catch {}
@@ -1732,80 +1793,137 @@ export class AccountsManager {
       await readSessionToken();
     }
 
-    // 4. 检查 state.vscdb (补充 token 或补充 email)
-    if (!extractedToken || !extractedEmail) {
-      const primaryProfileVscdb = join(this.target.profile, 'User', 'globalStorage', 'state.vscdb');
-      const fallbackProfileVscdb = options?.appSupportDir
-        ? join(appSupportDir, this.target.name, 'User', 'globalStorage', 'state.vscdb')
-        : primaryProfileVscdb;
-      const candidateVscdbPaths = Array.from(new Set(
-        options?.appSupportDir ? [fallbackProfileVscdb, primaryProfileVscdb] : [primaryProfileVscdb]
-      ));
-      for (const vscdbPath of candidateVscdbPaths) {
-        if (extractedToken && extractedEmail) break;
-        const stateRows = await readAntigravityStateDb(vscdbPath, [
-          'antigravityUnifiedStateSync.oauthToken',
-          'antigravityUnifiedStateSync.userStatus',
-          'antigravityUnifiedStateSync.enterprisePreferences',
-        ]);
-        if (stateRows.size === 0) continue;
-        const oauthRawB64 = extractTopicDataString(stateRows.get('antigravityUnifiedStateSync.oauthToken'));
-        const userStatusB64 = extractTopicDataString(stateRows.get('antigravityUnifiedStateSync.userStatus'));
-        const entPrefB64 = extractTopicDataString(stateRows.get('antigravityUnifiedStateSync.enterprisePreferences'));
-        let entProjectId: string | null = null;
-        if (entPrefB64) {
+    // 4. 检查 state.vscdb：在非沙箱模式下始终核对以防旧 Keychain 掩盖较新会话，在沙箱模式下仅读取显式指定的目标配置目录
+    const primaryProfileVscdb = join(this.target.profile, 'User', 'globalStorage', 'state.vscdb');
+    const fallbackProfileVscdb = options?.appSupportDir
+      ? join(appSupportDir, this.target.name, 'User', 'globalStorage', 'state.vscdb')
+      : primaryProfileVscdb;
+    const defaultProfileDir = join(homedir(), 'Library', 'Application Support', this.target.name);
+    const hasCustomTargetProfile = resolve(this.target.profile) !== resolve(defaultProfileDir);
+    const candidateVscdbPaths = isSandboxHome
+      ? Array.from(new Set([
+          ...(options?.appSupportDir ? [fallbackProfileVscdb] : []),
+          ...(hasCustomTargetProfile ? [primaryProfileVscdb] : []),
+        ]))
+      : Array.from(new Set(
+          options?.appSupportDir ? [fallbackProfileVscdb, primaryProfileVscdb] : [primaryProfileVscdb]
+        ));
+
+    for (const vscdbPath of candidateVscdbPaths) {
+      const stateRows = await readAntigravityStateDb(vscdbPath, [
+        'antigravityUnifiedStateSync.oauthToken',
+        'antigravityUnifiedStateSync.userStatus',
+        'antigravityUnifiedStateSync.enterprisePreferences',
+      ]);
+      if (stateRows.size === 0) continue;
+      const oauthRawB64 = extractTopicDataString(stateRows.get('antigravityUnifiedStateSync.oauthToken'));
+      const userStatusB64 = extractTopicDataString(stateRows.get('antigravityUnifiedStateSync.userStatus'));
+      const entPrefB64 = extractTopicDataString(stateRows.get('antigravityUnifiedStateSync.enterprisePreferences'));
+      let entProjectId: string | null = null;
+      if (entPrefB64) {
+        try {
           const entBuf = decodeTopicRow(entPrefB64, 'enterpriseGcpProjectId');
           if (entBuf) {
             entProjectId = ProtobufReader.findString(entBuf, 3) || null;
           }
-        }
+        } catch {}
+      }
 
-        if (!extractedToken && oauthRawB64) {
+      let vscdbEmail: string | null = null;
+      if (userStatusB64) {
+        try {
+          const userBuf = decodeTopicRow(userStatusB64, 'userStatusSentinelKey');
+          if (userBuf) {
+            const email = ProtobufReader.findString(userBuf, 7);
+            if (email) vscdbEmail = email;
+          }
+        } catch {}
+      }
+
+      let vscdbToken: TokenData | null = null;
+      if (oauthRawB64) {
+        try {
           const payloadBuf = decodeTopicRow(oauthRawB64, 'oauthTokenInfoSentinelKey');
           if (payloadBuf) {
             const accessToken = ProtobufReader.findString(payloadBuf, 1) || '';
             const refreshToken = ProtobufReader.findString(payloadBuf, 3) || '';
             const idToken = ProtobufReader.findString(payloadBuf, 5) || null;
             const gcpTosFlag = ProtobufReader.findVarint(payloadBuf, 6);
-            let expirySec = Math.floor(Date.now() / 1000) + 3600;
+            const nowSec = Math.floor(Date.now() / 1000);
+            let expirySec = accessToken ? nowSec + 3600 : 0;
             const timeBuf = ProtobufReader.findField(payloadBuf, 4);
             if (timeBuf) {
               const sec = ProtobufReader.findVarint(timeBuf, 1);
-              if (sec && sec > 0) expirySec = sec;
+              if (sec !== null && sec >= 0) expirySec = sec;
             }
-
             if (refreshToken) {
-              extractedToken = {
+              vscdbToken = {
                 access_token: accessToken,
                 refresh_token: refreshToken,
-                expires_in: Math.max(60, expirySec - Math.floor(Date.now() / 1000)),
+                expires_in: Math.max(0, expirySec - nowSec),
                 expiry_timestamp: expirySec,
                 token_type: 'Bearer',
-                email: null,
+                email: vscdbEmail,
                 project_id: entProjectId,
                 is_gcp_tos: Boolean(gcpTosFlag && gcpTosFlag > 0),
                 id_token: idToken,
               };
             }
           }
-        } else if (extractedToken && !extractedToken.project_id && entProjectId) {
-          extractedToken.project_id = entProjectId;
-        }
+        } catch {}
+      }
 
-        if (!extractedEmail && userStatusB64 && oauthRawB64 && extractedToken?.refresh_token === ProtobufReader.findString(decodeTopicRow(oauthRawB64, 'oauthTokenInfoSentinelKey') ?? Buffer.alloc(0), 3)) {
-          const payloadBuf = decodeTopicRow(userStatusB64, 'userStatusSentinelKey');
-          if (payloadBuf) {
-            const email = ProtobufReader.findString(payloadBuf, 7);
-            if (email) extractedEmail = email;
+      if (!extractedToken) {
+        if (vscdbToken) {
+          extractedToken = vscdbToken;
+          extractedEmail = extractedEmail || vscdbEmail;
+        }
+      } else {
+        const currentEmail = extractedEmail || extractedToken.email;
+        if (vscdbToken) {
+          const candidateEmail = vscdbEmail || vscdbToken.email;
+          const sameRefresh = Boolean(
+            vscdbToken.refresh_token &&
+            extractedToken.refresh_token &&
+            vscdbToken.refresh_token === extractedToken.refresh_token
+          );
+          const sameEmail = Boolean(
+            currentEmail &&
+            candidateEmail &&
+            currentEmail.trim().toLowerCase() === candidateEmail.trim().toLowerCase()
+          );
+          const emailsConflict = Boolean(currentEmail && candidateEmail && !sameEmail);
+          if (!emailsConflict && (sameRefresh || sameEmail)) {
+            const nowSec = Math.floor(Date.now() / 1000);
+            const preferVscdb = AccountsManager.shouldPreferTokenCandidate(extractedToken, vscdbToken, nowSec);
+            const winner = preferVscdb ? vscdbToken : extractedToken;
+            const loser = preferVscdb ? extractedToken : vscdbToken;
+            extractedToken = {
+              ...winner,
+              email: winner.email || loser.email || currentEmail || candidateEmail || null,
+              project_id: winner.project_id || loser.project_id || entProjectId || null,
+              id_token: winner.id_token || loser.id_token || null,
+              is_gcp_tos: Boolean(winner.is_gcp_tos || loser.is_gcp_tos),
+            };
+            extractedEmail = extractedEmail || candidateEmail || null;
+          }
+        } else {
+          const vscdbMatchesUser =
+            !vscdbEmail ||
+            !currentEmail ||
+            vscdbEmail.trim().toLowerCase() === currentEmail.trim().toLowerCase();
+          if (vscdbMatchesUser && !extractedToken.project_id && entProjectId) {
+            extractedToken.project_id = entProjectId;
           }
         }
       }
+      break;
     }
 
     // A live identity may enrich the same account, or provide the email for the active local session when state.vscdb is absent.
     if (!isSandboxHome && (extractedEmail || extractedToken)) {
-      const lsStatus = await this.probeLiveLanguageServer();
-      if (lsStatus?.email && (!extractedEmail || lsStatus.email.toLowerCase() === extractedEmail.toLowerCase())) {
+      const lsStatus = await this.probeLiveLanguageServer(globalThis.fetch, { forceRefresh: true });
+      if (lsStatus?.email && (!extractedEmail || lsStatus.email.trim().toLowerCase() === extractedEmail.trim().toLowerCase())) {
         extractedEmail = extractedEmail || lsStatus.email;
         extractedName = lsStatus.name || null;
         liveQuota = { ...lsStatus.quota, source: 'live' };
@@ -1874,6 +1992,8 @@ export class AccountsManager {
       } else {
         account.quota = liveQuota;
       }
+      account.quota_refresh_error = null;
+      account.quota_refresh_error_code = null;
       await this.saveAccount(account);
     }
 
@@ -2080,13 +2200,23 @@ export class AccountsManager {
     }
 
     const providerContext=await this.resolveProviderContext(fetchImpl);
-    await fetchCloudQuotaForAccount({
-      account,
-      providerContext,
-      fetchImpl,
-      signal,
-      onTokenRefreshed: (acc, prevRefresh) => this.saveRefreshedAccount(acc, prevRefresh, signal),
-    });
+    try {
+      await fetchCloudQuotaForAccount({
+        account,
+        providerContext,
+        fetchImpl,
+        signal,
+        onTokenRefreshed: (acc, prevRefresh) => this.saveRefreshedAccount(acc, prevRefresh, signal),
+      });
+    } catch (err) {
+      if (!emailMatchedLive && accountErrorCode(err) === 'missing_oauth_client') {
+        const desktopEmail = await this.detectCurrentAntigravityEmail({ liveEmailHint: lsStatus?.email ?? null }).catch(() => null);
+        if (desktopEmail && account.email && desktopEmail.trim().toLowerCase() === account.email.trim().toLowerCase()) {
+          throw new CodedAccountError('missing_oauth_client', bt('account_cloud.err.missing_oauth_client_active_live'));
+        }
+      }
+      throw err;
+    }
     await this.saveRefreshedAccount(account, account.token.refresh_token, signal);
     return account;
   }
@@ -2107,6 +2237,7 @@ export class AccountsManager {
       return bActive - aActive;
     });
     if (fetchImpl === globalThis.fetch && enabledAccounts.length > 0) {
+      void this.probeLiveLanguageServer(fetchImpl, { forceRefresh: true }).catch(() => null);
       void this.resolveProviderContext(fetchImpl).catch(() => null);
     }
     const resultsByIndex: Array<Account | undefined> = new Array(enabledAccounts.length);

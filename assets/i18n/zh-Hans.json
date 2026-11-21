@@ -1026,6 +1026,7 @@
     "account_cloud.err.aborted": "已取消",
     "account_cloud.err.missing_refresh_token": "此账号缺少登录凭据，请重新添加",
     "account_cloud.err.missing_oauth_client": "登录凭据已过期（未配置后台自动续期），请切换至此账号或重新「保存当前账号」刷新配额",
+    "account_cloud.err.missing_oauth_client_active_live": "当前桌面账号的登录凭据已过期（未配置后台自动续期），请启动 Antigravity 并打开工作区使语言服务就绪后再刷新配额",
     "account_cloud.err.refresh_failed": "登录凭据无法刷新，请重新添加此账号",
     "account_cloud.err.no_access_token": "登录服务未返回有效凭据",
     "account_cloud.err.network": "无法连接登录服务，请检查网络后重试",
