@@ -18,6 +18,7 @@ export function includeSourceDigestPath(relativePath) {
   if (parts[0] === 'windows') {
     if (parts.includes('target') || parts.includes('node_modules') || parts.includes('.vite')) return false;
     if (normalized === 'windows/app/dist' || normalized.startsWith('windows/app/dist/')) return false;
+    if (normalized === 'windows/app/src-tauri/gen' || normalized.startsWith('windows/app/src-tauri/gen/')) return false;
   }
   return includeDictionaryPath(normalized);
 }
