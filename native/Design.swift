@@ -265,6 +265,10 @@ enum Design {
         cachedBrandMark = result
         return result
     }
+    private static var activePopUpMenuDepth: Int = 0
+    static var isTrackingPopUpMenu: Bool { activePopUpMenuDepth > 0 }
+    static let popUpMenuDidCloseNotification = Notification.Name("GravityBox.DesignPopUpMenuDidClose")
+
     static func popUpOrigin(below anchor: NSView, spacing: CGFloat = 6) -> NSPoint {
         let yOffset = anchor.isFlipped ? (anchor.bounds.maxY + spacing) : (anchor.bounds.minY - spacing)
         return NSPoint(x: 0, y: yOffset)
@@ -274,16 +278,36 @@ enum Design {
         if matchAnchorWidth {
             menu.minimumWidth = max(menu.minimumWidth, anchor.bounds.width)
         }
+        #if !NATIVE_UI_TEST
+        if let panel = anchor.window as? MenuFloatingPanel {
+            if !panel.isKeyWindow {
+                panel.makeKey()
+            }
+        } else if let hostWindow = anchor.window, hostWindow.canBecomeKey {
+            if !NSApp.isActive {
+                NSApp.activate()
+            }
+            if !hostWindow.isKeyWindow {
+                hostWindow.makeKeyAndOrderFront(nil)
+            }
+        }
+        #else
         if let panel = anchor.window as? MenuFloatingPanel, !panel.isKeyWindow {
             panel.makeKey()
         }
+        #endif
+        activePopUpMenuDepth += 1
         defer {
+            activePopUpMenuDepth = max(0, activePopUpMenuDepth - 1)
             if let panel = anchor.window as? MenuFloatingPanel, panel.isVisible {
                 panel.makeKey()
                 DispatchQueue.main.async { [weak panel] in
                     guard let panel, panel.isVisible else { return }
                     panel.makeKey()
                 }
+            }
+            if activePopUpMenuDepth == 0 {
+                NotificationCenter.default.post(name: popUpMenuDidCloseNotification, object: nil)
             }
         }
         menu.popUp(positioning: nil, at: popUpOrigin(below: anchor, spacing: spacing), in: anchor)
@@ -309,10 +333,10 @@ enum Design {
         }
         let hasLeadingIcon = (popUpCell?.leadingImage != nil) || (popUpCell?.leadingSymbolName?.isEmpty == false)
         let iconExtra: CGFloat = hasLeadingIcon ? 18 : 0
-        // DesignPopUpCell draws text at x = minX + 10 (+ iconExtra) with chevron centered at maxX - 13.
+        // DesignPopUpCell draws text at x = minX + 11 (small: 9.5) (+ iconExtra) with chevron centered at maxX - 12.5 (small: 11.5).
         let baseChrome: CGFloat = (popUpCell?.visualStyle ?? .form) == .form ? (isSmall ? 34 : 38) : (isSmall ? 35 : 39)
         let chrome: CGFloat = baseChrome + iconExtra
-        let floorWidth: CGFloat = minimum ?? (isSmall ? 78 : 88)
+        let floorWidth: CGFloat = minimum ?? (isSmall ? 58 : 64)
         let raw = max(floorWidth, maxTitleW + chrome)
         let bounded = popup.pullsDown ? min(150, raw) : raw
         if let maxWidth {

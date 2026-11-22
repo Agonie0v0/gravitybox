@@ -446,6 +446,8 @@ final class CachePage: NSObject, NSPopoverDelegate {
         }
 
         Design.applyControls(view)
+        (retentionPopup.cell as? DesignPopUpCell)?.fitsSelectedTitleOnly = true
+        _ = Design.syncPopUpWidth(retentionPopup)
         Self.stripTooltipsRecursively(view)
     }
 
@@ -678,6 +680,7 @@ final class CachePage: NSObject, NSPopoverDelegate {
                     self.selectedRetentionDays = previousDays
                     if let matchIdx = Self.retentionChoices.firstIndex(where: { $0.days == previousDays }) {
                         self.retentionPopup.selectItem(at: matchIdx)
+                        _ = Design.syncPopUpWidth(self.retentionPopup)
                     }
                 }
                 self.setBusy(false)
@@ -702,15 +705,20 @@ final class CachePage: NSObject, NSPopoverDelegate {
         guard !busy, !confirmDialogOpen, app.reachable else {
             if let matchIdx = Self.retentionChoices.firstIndex(where: { $0.days == selectedRetentionDays }) {
                 retentionPopup.selectItem(at: matchIdx)
+                _ = Design.syncPopUpWidth(retentionPopup)
             }
             return
         }
         let idx = max(0, min(Self.retentionChoices.count - 1, retentionPopup.indexOfSelectedItem))
         let nextDays = Self.retentionChoices[idx].days
-        guard nextDays != selectedRetentionDays else { return }
+        guard nextDays != selectedRetentionDays else {
+            _ = Design.syncPopUpWidth(retentionPopup)
+            return
+        }
         dismissDetailPopover()
         let previousDays = selectedRetentionDays
         selectedRetentionDays = nextDays
+        _ = Design.syncPopUpWidth(retentionPopup)
         feedbackLabel.isHidden = true
         updateSummaryAndControls()
         fetch(force: true, rollbackRetentionDays: previousDays)
@@ -754,6 +762,7 @@ final class CachePage: NSObject, NSPopoverDelegate {
                 if retentionPopup.indexOfSelectedItem != matchIdx {
                     retentionPopup.selectItem(at: matchIdx)
                 }
+                _ = Design.syncPopUpWidth(retentionPopup)
             }
         }
         scannedAt = intVal(value, "scannedAt", fallback: Int(Date().timeIntervalSince1970))

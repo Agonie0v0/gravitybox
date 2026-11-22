@@ -406,13 +406,16 @@ final class DesignPopUpCell: NSPopUpButtonCell {
     var fitsSelectedTitleOnly: Bool = false
     var isActiveState: Bool = false
     var customHeight: CGFloat? = nil
+    private(set) var isTrackingMenu: Bool = false
 
     private func presentMenuBelow(_ controlView: NSView) {
         guard isEnabled, let menu, !menu.items.isEmpty else { return }
         synchronizeTitleAndSelectedItem()
+        isTrackingMenu = true
         isHighlighted = true
         controlView.needsDisplay = true
         defer {
+            isTrackingMenu = false
             isHighlighted = false
             controlView.needsDisplay = true
         }
@@ -546,7 +549,7 @@ final class DesignPopUpCell: NSPopUpButtonCell {
             }
         }
 
-        var textLeadingOffset: CGFloat = visualStyle == .form ? (isSmall ? 9 : 10) : (isSmall ? 10 : 11)
+        var textLeadingOffset: CGFloat = visualStyle == .form ? (isSmall ? 9.5 : 11) : (isSmall ? 10 : 11)
 
         let activeAccentColor: NSColor = {
             if visualStyle == .form {
@@ -604,13 +607,14 @@ final class DesignPopUpCell: NSPopUpButtonCell {
 
         let fontSize: CGFloat = isSmall ? 11.5 : 12
         let drawFont = NSFont.systemFont(ofSize: fontSize, weight: .medium)
-        let lineH = ceil(drawFont.ascender - drawFont.descender)
+        let textH = (title as NSString).size(withAttributes: [.font: drawFont]).height
         let trailingZone: CGFloat = visualStyle == .form ? (isSmall ? 22 : 24) : (isSmall ? 21 : 23)
+        let titleY = round((cellFrame.midY - textH / 2.0) * 2.0) / 2.0
         let titleRect = NSRect(
             x: cellFrame.minX + textLeadingOffset,
-            y: floor(cellFrame.midY - lineH / 2),
+            y: titleY,
             width: max(0, cellFrame.width - textLeadingOffset - trailingZone),
-            height: lineH + 2
+            height: ceil(textH) + 1
         )
         let style = NSMutableParagraphStyle(); style.lineBreakMode = .byTruncatingTail
         let fgColor = isEnabled
@@ -634,8 +638,8 @@ final class DesignPopUpCell: NSPopUpButtonCell {
         chev.lineCapStyle = .round
         chev.lineJoinStyle = .round
         if visualStyle == .form {
-            // 精细双箭头指示器（对齐现代 macOS 胶囊选择框比例）
-            let cx = cellFrame.maxX - (isSmall ? 12 : 13)
+            // 精细双箭头指示器（与左内边距对称）
+            let cx = cellFrame.maxX - (isSmall ? 11.5 : 12.5)
             let cy = cellFrame.midY
             chev.move(to: NSPoint(x: cx - 2.6, y: cy - 1.3 * ySign))
             chev.line(to: NSPoint(x: cx, y: cy - 3.8 * ySign))
@@ -673,7 +677,7 @@ final class DesignPopUpCell: NSPopUpButtonCell {
         let iconExtra: CGFloat = (leadingImage != nil || leadingSymbolName?.isEmpty == false) ? 18 : 0
         let baseChrome: CGFloat = visualStyle == .form ? (isSmall ? 34 : 38) : (isSmall ? 35 : 39)
         let chrome: CGFloat = baseChrome + iconExtra
-        let minW: CGFloat = isSmall ? 72 : 88
+        let minW: CGFloat = isSmall ? 58 : 64
         return NSSize(width: max(minW, maxTitleW + chrome), height: customHeight ?? (isSmall ? 26 : 28))
     }
 }

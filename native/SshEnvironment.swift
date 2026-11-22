@@ -1867,14 +1867,15 @@ final class EnvironmentContextPill: NSView, NSMenuDelegate {
 
             let fontSize: CGFloat = compact ? 11.5 : 12.0
             let drawFont = NSFont.systemFont(ofSize: fontSize, weight: .medium)
-            let lineH = ceil(drawFont.ascender - drawFont.descender)
+            let textH = (displayTitle as NSString).size(withAttributes: [.font: drawFont]).height
             let trailingZone: CGFloat = compact ? 19.0 : 21.0
             let titleWidth = max(0, bounds.width - xOffset - trailingZone)
+            let titleY = round(((bounds.height - textH) * 0.5) * 2.0) / 2.0
             let titleRect = NSRect(
                 x: xOffset,
-                y: floor((bounds.height - lineH) * 0.5),
+                y: titleY,
                 width: titleWidth,
-                height: lineH + 2
+                height: ceil(textH) + 1
             )
             let paraStyle = NSMutableParagraphStyle()
             paraStyle.alignment = .left

@@ -178,6 +178,8 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     var pendingAutoQuotaRefresh = false
     var workspaceWakeObserver: NSObjectProtocol?
     var appBecomeActiveObserver: NSObjectProtocol?
+    private var pendingViewUpdateAfterPopUpMenu = false
+    private var popUpMenuCloseObserver: NSObjectProtocol?
     var lastResetOverdueRefreshByAccount: [String: (signature: String, at: Date)] = [:]
     var quotaStaleThresholdSeconds: TimeInterval {
         let minutes = configuration?.value.quotaRefreshMinutes ?? 0
@@ -1269,14 +1271,26 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
             #endif
         }
         #if !NATIVE_UI_TEST
-        if NSApp.activationPolicy() != .regular {
+        let wasAccessory = NSApp.activationPolicy() != .regular
+        if wasAccessory {
             NSApp.setActivationPolicy(.regular)
         }
         if window?.isMiniaturized == true {
             window?.deminiaturize(nil)
         }
+        NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if wasAccessory {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let win = self.window, win.isVisible, !self.quitting else { return }
+                if !NSApp.isActive {
+                    NSApp.activate()
+                }
+                if !win.isKeyWindow {
+                    win.makeKeyAndOrderFront(nil)
+                }
+            }
+        }
         #endif
         configureRefreshTimer()
         if quotaRefreshTimer == nil { configureQuotaRefreshTimer() }
@@ -1596,6 +1610,10 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
             NotificationCenter.default.removeObserver(observer)
             appBecomeActiveObserver = nil
         }
+        if let observer = popUpMenuCloseObserver {
+            NotificationCenter.default.removeObserver(observer)
+            popUpMenuCloseObserver = nil
+        }
     }
 
     func oldestEnabledAccountQuotaTimestamp() -> TimeInterval? {
@@ -1897,7 +1915,28 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         ))
         serviceFootnoteLabel.attributedStringValue = attr
     }
+    private func ensurePopUpMenuCloseObserver() {
+        guard popUpMenuCloseObserver == nil else { return }
+        popUpMenuCloseObserver = NotificationCenter.default.addObserver(
+            forName: Design.popUpMenuDidCloseNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, self.pendingViewUpdateAfterPopUpMenu else { return }
+            self.pendingViewUpdateAfterPopUpMenu = false
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.quitting, !Design.isTrackingPopUpMenu else { return }
+                self.updateViews()
+            }
+        }
+    }
+
     func updateViews() {
+        if Design.isTrackingPopUpMenu {
+            pendingViewUpdateAfterPopUpMenu = true
+            ensurePopUpMenuCloseObserver()
+            return
+        }
         item?.button?.toolTip = nil
         item?.button?.setAccessibilityLabel("GravityBox · " + (reachable ? statusValue.title : L10n.t("status.disconnected", fallback: "连接已断开")))
         updateStatusItemState()
@@ -2553,7 +2592,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         }
         guard let rootWindow = self.window else {
             #if !NATIVE_UI_TEST
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
             #endif
             completion(alert.runModal())
             return
@@ -2564,7 +2603,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         Assistant.configureHeadlessWindowIfNeeded(parent)
         Assistant.configureHeadlessWindowIfNeeded(alert.window)
         #else
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         #endif
         alert.beginSheetModal(for: parent, completionHandler: completion)
     }

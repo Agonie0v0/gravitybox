@@ -218,6 +218,10 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
         root.addArrangedSubview(sectionGroup(L10n.t("settings.section.quota_pricing", fallback: "配额与计价"), card: dataSyncCard))
         root.addArrangedSubview(sectionGroup(L10n.t("settings.section.system_storage", fallback: "系统与存储"), card: systemAndStorageCard))
         view = scrollPage(root); Design.applyControls(view)
+        for popup in [languagePopup, proxyModePopup, refresh] {
+            (popup.cell as? DesignPopUpCell)?.fitsSelectedTitleOnly = true
+            Design.syncPopUpWidth(popup)
+        }
         (proxyManualField.cell as? NSTextFieldCell)?.sendsActionOnEndEditing = false
         refreshProxyRowState()
     }
@@ -306,6 +310,7 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
     private var renderedLanguagePopupKey = ""
 
     private func rebuildLanguagePopup() {
+        guard (languagePopup.cell as? DesignPopUpCell)?.isTrackingMenu != true else { return }
         let configured = app.effectiveConfiguredLanguage()
         let localesKey = ([L10n.shared.currentLocale] + L10n.shared.supportedLocales.map(\.code)).joined(separator: "|")
         if renderedLanguagePopupKey != localesKey {
@@ -332,9 +337,15 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
         } else if languagePopup.indexOfSelectedItem != 0 {
             languagePopup.selectItem(at: 0)
         }
+        if languagePopup.cell is DesignPopUpCell {
+            Design.syncPopUpWidth(languagePopup)
+        } else {
+            languagePopup.invalidateIntrinsicContentSize()
+        }
     }
 
     private func rebuildProxyModePopup() {
+        guard (proxyModePopup.cell as? DesignPopUpCell)?.isTrackingMenu != true else { return }
         let localeKey = L10n.shared.currentLocale
         let titles: [(AntigravityProxyMode, String)] = [
             (.off, L10n.t("settings.proxy.mode.off", fallback: "关闭")),
@@ -367,6 +378,11 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
         if let idx = proxyModePopup.itemArray.firstIndex(where: { ($0.representedObject as? String) == displayedMode.rawValue }),
            proxyModePopup.indexOfSelectedItem != idx {
             proxyModePopup.selectItem(at: idx)
+        }
+        if proxyModePopup.cell is DesignPopUpCell {
+            Design.syncPopUpWidth(proxyModePopup)
+        } else {
+            proxyModePopup.invalidateIntrinsicContentSize()
         }
     }
 
@@ -612,22 +628,24 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         launchAntigravityOnStartSwitch.state = app.configuration.value.launchAntigravityOnStart ? .on : .off
         launchAntigravityOnStartSwitch.setAccessibilityLabel(L10n.t("settings.launch_antigravity.title", fallback: "启动时自动打开 Antigravity"))
-        let refreshTitles = [
-            L10n.t("settings.refresh.manual", fallback: "手动刷新"),
-            L10n.t("settings.refresh.5m", fallback: "每 5 分钟"),
-            L10n.t("settings.refresh.10m", fallback: "每 10 分钟"),
-            L10n.t("settings.refresh.15m", fallback: "每 15 分钟"),
-            L10n.t("settings.refresh.30m", fallback: "每 30 分钟"),
-            L10n.t("settings.refresh.60m", fallback: "每 60 分钟")
-        ]
-        for (idx, itemTitle) in refreshTitles.enumerated() where idx < refresh.numberOfItems {
-            refresh.item(at: idx)?.title = itemTitle
-        }
-        refresh.selectItem(at: Self.refreshIntervals.firstIndex(of: app.configuration.value.quotaRefreshMinutes) ?? 0)
-        if refresh.cell is DesignPopUpCell {
-            Design.syncPopUpWidth(refresh)
-        } else {
-            refresh.invalidateIntrinsicContentSize()
+        if (refresh.cell as? DesignPopUpCell)?.isTrackingMenu != true {
+            let refreshTitles = [
+                L10n.t("settings.refresh.manual", fallback: "手动刷新"),
+                L10n.t("settings.refresh.5m", fallback: "每 5 分钟"),
+                L10n.t("settings.refresh.10m", fallback: "每 10 分钟"),
+                L10n.t("settings.refresh.15m", fallback: "每 15 分钟"),
+                L10n.t("settings.refresh.30m", fallback: "每 30 分钟"),
+                L10n.t("settings.refresh.60m", fallback: "每 60 分钟")
+            ]
+            for (idx, itemTitle) in refreshTitles.enumerated() where idx < refresh.numberOfItems {
+                refresh.item(at: idx)?.title = itemTitle
+            }
+            refresh.selectItem(at: Self.refreshIntervals.firstIndex(of: app.configuration.value.quotaRefreshMinutes) ?? 0)
+            if refresh.cell is DesignPopUpCell {
+                Design.syncPopUpWidth(refresh)
+            } else {
+                refresh.invalidateIntrinsicContentSize()
+            }
         }
         manageCacheBtn?.title = L10n.t("settings.storage.manage_btn", fallback: "管理存储…")
         if let cachedScan = app.lastMaintenanceScanPayload {
@@ -647,6 +665,9 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
     }
 
     @objc func languageChanged() {
+        if languagePopup.cell is DesignPopUpCell {
+            Design.syncPopUpWidth(languagePopup)
+        }
         guard let selected = languagePopup.selectedItem?.representedObject as? String else { return }
         DispatchQueue.main.async { [weak self] in
             self?.app.setGlobalLanguage(selected)
@@ -811,6 +832,9 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
         let previous = app.configuration.value.quotaRefreshMinutes
         let idx = max(0, min(Self.refreshIntervals.count - 1, refresh.indexOfSelectedItem))
         app.configuration.value.quotaRefreshMinutes = Self.refreshIntervals[idx]
+        if refresh.cell is DesignPopUpCell {
+            Design.syncPopUpWidth(refresh)
+        }
         do {
             try app.configuration.save()
             app.configureQuotaRefreshTimer()
@@ -821,6 +845,9 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
         catch {
             app.configuration.value.quotaRefreshMinutes = previous
             refresh.selectItem(at: Self.refreshIntervals.firstIndex(of: previous) ?? 0)
+            if refresh.cell is DesignPopUpCell {
+                Design.syncPopUpWidth(refresh)
+            }
             showError(error)
         }
     }

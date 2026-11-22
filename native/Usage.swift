@@ -271,6 +271,10 @@ enum UsageFilterSupport {
         maxWidth: CGFloat = 220,
         fitsSelectedTitleOnly: Bool = true
     ) -> String {
+        if (popup.cell as? DesignPopUpCell)?.isTrackingMenu == true {
+            let trimmed = selectedId.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "all" : trimmed
+        }
         if !(popup.cell is DesignPopUpCell) {
             Design.applyControls(popup)
         }
