@@ -78,14 +78,14 @@ jobs:
           if [ -n "$LATEST_UPSTREAM_TAG" ]; then
             LATEST_TAG_VER="${LATEST_UPSTREAM_TAG#v}"
             if [ "$LATEST_TAG_VER" = "$TARGET_VERSION" ]; then
-              if ! gh release view "v${TARGET_VERSION}-win" >/dev/null 2>&1; then
+              if ! gh release view "v${TARGET_VERSION}-win" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
                 TAG_RELEASE_MISSING="true"
               fi
             fi
           fi
 
           RELEASE_MISSING="false"
-          if ! gh release view "v${TARGET_VERSION}-win" >/dev/null 2>&1; then
+          if ! gh release view "v${TARGET_VERSION}-win" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             RELEASE_MISSING="true"
           fi
 
@@ -200,12 +200,12 @@ jobs:
           # resolve conflicts, then run: npm run verify
           ``````
           "@
-            gh label create "upstream-sync-conflict" --color "D93F0B" --description "Automated upstream sync conflict or verification failure" --force 2>$null | Out-Null
-            $existing = (gh issue list --label "upstream-sync-conflict" --state open --json number --jq '.[0].number // empty')
+            gh label create "upstream-sync-conflict" --repo $env:GITHUB_REPOSITORY --color "D93F0B" --description "Automated upstream sync conflict or verification failure" --force 2>$null | Out-Null
+            $existing = (gh issue list --repo $env:GITHUB_REPOSITORY --label "upstream-sync-conflict" --state open --json number --jq '.[0].number // empty')
             if ($existing -and $existing.Trim() -match '^\d+$') {
-              gh issue comment $existing.Trim() --body $body
+              gh issue comment $existing.Trim() --repo $env:GITHUB_REPOSITORY --body $body
             } else {
-              gh issue create --title $title --label "upstream-sync-conflict" --body $body
+              gh issue create --repo $env:GITHUB_REPOSITORY --title $title --label "upstream-sync-conflict" --body $body
             }
             Write-Host "::error::Upstream merge conflict detected; opened/updated issue and aborted safely."
             exit 1
@@ -247,12 +247,12 @@ jobs:
           ### Workflow run
           $runUrl
           "@
-            gh label create "upstream-sync-conflict" --color "D93F0B" --description "Automated upstream sync conflict or verification failure" --force 2>$null | Out-Null
-            $existing = (gh issue list --label "upstream-sync-conflict" --state open --json number --jq '.[0].number // empty')
+            gh label create "upstream-sync-conflict" --repo $env:GITHUB_REPOSITORY --color "D93F0B" --description "Automated upstream sync conflict or verification failure" --force 2>$null | Out-Null
+            $existing = (gh issue list --repo $env:GITHUB_REPOSITORY --label "upstream-sync-conflict" --state open --json number --jq '.[0].number // empty')
             if ($existing -and $existing.Trim() -match '^\d+$') {
-              gh issue comment $existing.Trim() --body $body
+              gh issue comment $existing.Trim() --repo $env:GITHUB_REPOSITORY --body $body
             } else {
-              gh issue create --title $title --label "upstream-sync-conflict" --body $body
+              gh issue create --repo $env:GITHUB_REPOSITORY --title $title --label "upstream-sync-conflict" --body $body
             }
           }
           Write-Host "::error::Windows verification gate failed; main was not pushed."
@@ -274,7 +274,7 @@ jobs:
           $exists = $false
           $prevErrorPref = $ErrorActionPreference
           $ErrorActionPreference = 'Continue'
-          gh release view $tag 2>$null | Out-Null
+          gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) { $exists = $true }
           $global:LASTEXITCODE = 0
           $ErrorActionPreference = $prevErrorPref
@@ -350,10 +350,11 @@ jobs:
           Set-Content -Path $notesFile -Value $notes -Encoding utf8
 
           if ($env:REL_EXISTS -eq 'true') {
-            gh release upload $tag $zip $zipSha $setup $setupSha --clobber
-            gh release edit $tag --title "GravityBox v$ver (Windows)" --notes-file $notesFile
+            gh release upload $tag $zip $zipSha $setup $setupSha --repo $env:GITHUB_REPOSITORY --clobber
+            gh release edit $tag --repo $env:GITHUB_REPOSITORY --title "GravityBox v$ver (Windows)" --notes-file $notesFile
           } else {
             gh release create $tag $zip $zipSha $setup $setupSha `
+              --repo $env:GITHUB_REPOSITORY `
               --target main `
               --title "GravityBox v$ver (Windows)" `
               --notes-file $notesFile
