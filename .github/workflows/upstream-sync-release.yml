@@ -286,6 +286,21 @@ jobs:
           "do_release=$($doRelease.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "Resolved release check: version=$ver tag=$tag exists=$exists force=$($env:FORCE_RELEASE) -> do_release=$doRelease"
 
+      - name: Ensure NSIS compiler is available
+        if: ${{ steps.release_check.outputs.do_release == 'true' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path 'C:\Program Files (x86)\NSIS\makensis.exe') -and -not (Test-Path 'C:\Program Files\NSIS\makensis.exe') -and -not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            choco install nsis -y --no-progress
+          }
+          $makensis = @(
+            'C:\Program Files (x86)\NSIS\makensis.exe',
+            'C:\Program Files\NSIS\makensis.exe',
+            (Get-Command makensis -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)
+          ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+          if (-not $makensis) { throw "makensis.exe not found after installing NSIS" }
+          Write-Host "Using NSIS: $makensis ($(& $makensis /VERSION))"
+
       - name: Build Windows portable ZIP & self-contained NSIS installer
         if: ${{ steps.release_check.outputs.do_release == 'true' }}
         run: node tools/package-win.mjs --installer
