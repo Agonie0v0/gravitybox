@@ -36,6 +36,15 @@ const SIDE_QUESTION_HEADER_BUTTON_TESTIDS = new Set([
   'side-question-tab-delete',
 ]);
 
+const URGENT_CHILD_MUTATION_SELECTOR =
+  'button, [role="button"], .surface-composer, .model-selector, [data-testid="agent-input-box"], [data-testid="conversation-view"], [data-testid="subagent-tab-conversation"], [data-testid="side-question-tab-conversation"], [data-media-drop-scope="subpane"], [data-testid="input-cancel-button"], [data-testid="agent-loading"], [data-testid="ephemeral-tool-status"], [data-testid="idle-status-text"], [data-testid="model-selector-trigger"], [data-testid="running-subagent-steps-toggle"], [data-testid="running-subagent-browser-steps"], [data-testid="browser-subagent-thinking"], [data-cascade-id], [data-conversation-id], [data-subagent-id]';
+
+const URGENT_TARGET_ANCESTOR_SELECTOR =
+  '.surface-composer, .model-selector, [data-testid="agent-input-box"], [data-testid="model-selector-trigger"], [data-testid="idle-status-text"], [data-testid="ephemeral-tool-status"], [data-testid="agent-loading"]';
+
+const GLOBAL_MODEL_TRIGGER_SELECTOR =
+  '[data-testid="model-selector-trigger"], .model-selector, button[data-context-window], button[aria-label*="Select model"], button[aria-label*="选择模型"]';
+
 export class AntigravityHudManager {
   constructor(options = {}) {
     this.instances = new Map();
@@ -44,6 +53,7 @@ export class AntigravityHudManager {
     this.nextRevisionCounter = Number(globalThis.__GRAVITYBOX_HUD_REVISION__) || 0;
     this.mutationObserver = null;
     this.themeObserver = null;
+    this.composerTextObservers = new Map();
     this.domReadyAbort = null;
     this.visibilityHandler = null;
     this.reconcileTimer = null;
@@ -74,10 +84,55 @@ export class AntigravityHudManager {
         this.reconcileMounts();
       }
       if (typeof MutationObserver !== 'function') return;
+      const isUrgentChildElement = (node) => {
+        if (!node || node.nodeType !== 1) return false;
+        if (
+          node.tagName === 'BUTTON' ||
+          node.getAttribute?.('role') === 'button' ||
+          node.hasAttribute?.('data-testid') ||
+          node.hasAttribute?.('data-cascade-id') ||
+          node.hasAttribute?.('data-conversation-id') ||
+          node.hasAttribute?.('data-subagent-id') ||
+          node.hasAttribute?.('data-media-drop-scope') ||
+          node.hasAttribute?.('data-model-id') ||
+          node.hasAttribute?.('data-context-window') ||
+          node.matches?.(URGENT_CHILD_MUTATION_SELECTOR)
+        ) {
+          return true;
+        }
+        return Boolean(node.querySelector?.(URGENT_CHILD_MUTATION_SELECTOR));
+      };
+      const isUrgentChildMutation = (m, t) => {
+        if (
+          !t ||
+          t === document.body ||
+          t === document.documentElement ||
+          t.tagName === 'BUTTON' ||
+          t.getAttribute?.('role') === 'button' ||
+          t.hasAttribute?.('data-cascade-id') ||
+          t.hasAttribute?.('data-conversation-id') ||
+          t.hasAttribute?.('data-subagent-id') ||
+          t.hasAttribute?.('data-media-drop-scope') ||
+          t.closest?.(URGENT_TARGET_ANCESTOR_SELECTOR)
+        ) {
+          return true;
+        }
+        const lists = [m.addedNodes, m.removedNodes];
+        for (const list of lists) {
+          if (!list || !list.length) continue;
+          const limit = Math.min(list.length, 16);
+          for (let i = 0; i < limit; i++) {
+            if (isUrgentChildElement(list[i])) return true;
+          }
+        }
+        return false;
+      };
       this.mutationObserver = new MutationObserver((mutations) => {
         if (!this.active || !this.enabled) return;
         if (this.reconcileTimer !== null) return;
         let hasUrgent = false;
+        let hasAttrMutation = false;
+        let hasContentChildList = false;
         if (Array.isArray(mutations) && mutations.length > 0) {
           let hasRelevant = false;
           for (const m of mutations) {
@@ -91,13 +146,18 @@ export class AntigravityHudManager {
             }
             if (m?.type === 'childList') {
               hasRelevant = true;
-              hasUrgent = true;
+              if (!hasUrgent) {
+                if (isUrgentChildMutation(m, t)) hasUrgent = true;
+                else hasContentChildList = true;
+              }
               continue;
             }
             const attr = m?.attributeName || '';
-            if (attr !== 'class' && attr !== 'aria-label' && attr !== 'style') {
+            // attributeFilter 仅监听 data-*、hidden 与 aria-label：非 aria-label 属性全部视为紧急状态变化
+            if (attr !== 'aria-label') {
               hasRelevant = true;
               hasUrgent = true;
+              hasAttrMutation = true;
               continue;
             }
             if (
@@ -107,6 +167,7 @@ export class AntigravityHudManager {
               typeof t.matches !== 'function'
             ) {
               hasRelevant = true;
+              hasAttrMutation = true;
               continue;
             }
             if (
@@ -125,6 +186,7 @@ export class AntigravityHudManager {
               )
             ) {
               hasRelevant = true;
+              hasAttrMutation = true;
               if (t.tagName === 'BUTTON' || attr === 'aria-label') hasUrgent = true;
             }
           }
@@ -133,7 +195,7 @@ export class AntigravityHudManager {
           hasUrgent = true;
         }
 
-        const delayMs = hasUrgent ? 20 : 60;
+        const delayMs = hasUrgent ? 20 : hasContentChildList && !hasAttrMutation ? 140 : 60;
         this.reconcileTimer = setTimeout(() => {
           this.reconcileTimer = null;
           this.checkRoute();
@@ -242,6 +304,7 @@ export class AntigravityHudManager {
         clearTimeout(this.reconcileTimer);
         this.reconcileTimer = null;
       }
+      this.clearComposerTextObservers();
       for (const instance of this.instances.values()) {
         instance.dispose();
       }
@@ -275,6 +338,7 @@ export class AntigravityHudManager {
         clearTimeout(this.reconcileTimer);
         this.reconcileTimer = null;
       }
+      this.clearComposerTextObservers();
       for (const instance of this.instances.values()) {
         instance.dispose();
       }
@@ -298,6 +362,80 @@ export class AntigravityHudManager {
     for (const [slotId, inst] of this.instances.entries()) {
       if (slotId !== originSlotId && typeof inst?.hideAllPopovers === 'function') {
         inst.hideAllPopovers();
+      }
+    }
+  }
+
+  clearComposerTextObservers() {
+    for (const obs of this.composerTextObservers.values()) {
+      try {
+        obs.disconnect();
+      } catch {}
+    }
+    this.composerTextObservers.clear();
+  }
+
+  handleComposerTextMutations(mutations) {
+    if (!this.active || !this.enabled || this.routeExcluded || this.reconcileTimer !== null) return;
+    if (!Array.isArray(mutations) || mutations.length === 0) return;
+
+    let hasRelevant = false;
+    for (const m of mutations) {
+      if (m?.type !== 'characterData') continue;
+      const parent = m.target?.parentElement || m.target?.parentNode;
+      if (!parent) continue;
+      if (
+        parent.classList?.contains?.('__gravitybox_hud_host__') ||
+        parent.closest?.('.__gravitybox_hud_host__')
+      ) {
+        continue;
+      }
+      if (parent.closest?.('[contenteditable="true"], textarea, input')) {
+        continue;
+      }
+      if (
+        parent.closest?.(
+          'button, [role="button"], .model-selector, [data-testid="model-selector-trigger"]'
+        )
+      ) {
+        hasRelevant = true;
+        break;
+      }
+    }
+    if (!hasRelevant) return;
+
+    this.reconcileTimer = setTimeout(() => {
+      this.reconcileTimer = null;
+      this.checkRoute();
+      if (this.active && this.enabled && !this.routeExcluded) {
+        this.reconcileMounts();
+      }
+    }, 20);
+  }
+
+  syncComposerTextObservers(activeComposers) {
+    const canObserve =
+      typeof MutationObserver === 'function' && this.active && this.enabled && !this.routeExcluded;
+    for (const [composer, obs] of this.composerTextObservers.entries()) {
+      if (!canObserve || !activeComposers.has(composer)) {
+        try {
+          obs.disconnect();
+        } catch {}
+        this.composerTextObservers.delete(composer);
+      }
+    }
+    if (!canObserve) return;
+
+    for (const composer of activeComposers) {
+      if (this.composerTextObservers.has(composer)) continue;
+      const obs = new MutationObserver((mutations) => this.handleComposerTextMutations(mutations));
+      try {
+        obs.observe(composer, { characterData: true, subtree: true });
+        this.composerTextObservers.set(composer, obs);
+      } catch {
+        try {
+          obs.disconnect();
+        } catch {}
       }
     }
   }
@@ -338,25 +476,13 @@ export class AntigravityHudManager {
       }
     }
     if (!views || !views.length) {
+      this.clearComposerTextObservers();
       for (const [id, instance] of this.instances.entries()) {
         instance.dispose();
         this.instances.delete(id);
       }
       return;
     }
-
-    const isNodeVisibleInDom = (el) => {
-      if (!el) return false;
-      if (el.hasAttribute?.('hidden')) return false;
-      const win = typeof window !== 'undefined' ? window : globalThis.window;
-      if (win && typeof win.getComputedStyle === 'function') {
-        try {
-          const cs = win.getComputedStyle(el);
-          if (cs?.display === 'none' || cs?.visibility === 'hidden') return false;
-        } catch {}
-      }
-      return true;
-    };
 
     const panes = views
       .filter(Boolean)
@@ -367,17 +493,17 @@ export class AntigravityHudManager {
           viewTestId === 'subagent-tab-conversation'
             ? view
             : !isMainConvView
-            ? view?.querySelector?.('[data-testid="subagent-tab-conversation"][data-cascade-id]') || null
+            ? this.findVisibleOrFirst(view, '[data-testid="subagent-tab-conversation"][data-cascade-id]')
             : null;
         const btwConvNode =
           viewTestId === 'side-question-tab-conversation'
             ? view
             : !isMainConvView
-            ? view?.querySelector?.('[data-testid="side-question-tab-conversation"][data-cascade-id]') || null
+            ? this.findVisibleOrFirst(view, '[data-testid="side-question-tab-conversation"][data-cascade-id]')
             : null;
-        const activeBtw = btwConvNode && isNodeVisibleInDom(btwConvNode) ? btwConvNode : null;
+        const activeBtw = btwConvNode && this.isNodeVisibleInDom(btwConvNode, view) ? btwConvNode : null;
         const activeSub =
-          subagentConvNode && isNodeVisibleInDom(subagentConvNode) ? subagentConvNode : null;
+          subagentConvNode && this.isNodeVisibleInDom(subagentConvNode, view) ? subagentConvNode : null;
         const subConvNode = activeBtw || activeSub || btwConvNode || subagentConvNode;
         const resolvedSubTestId = subConvNode?.getAttribute?.('data-testid');
         const paneKind = isMainConvView
@@ -407,7 +533,9 @@ export class AntigravityHudManager {
           subConvNode,
           rawCascadeId,
           slotId,
-          composer: this.resolveComposerElement(view),
+          composer:
+            this.resolveComposerElement(subConvNode || view) ||
+            (subConvNode && subConvNode !== view ? this.resolveComposerElement(view) : null),
         };
       })
       .filter((p) => p.composer);
@@ -418,6 +546,7 @@ export class AntigravityHudManager {
         this.instances.delete(slot);
       }
     }
+    this.syncComposerTextObservers(new Set(panes.map((p) => p.composer)));
     const mainPaneCount = panes.filter((p) => !p.isSubpane).length;
     const sharedGlobalSubagentIds = mainPaneCount <= 1 ? this.collectDomSubagentIds() : null;
     for (const { view, index, paneKind, isSubpane, rawCascadeId, slotId, composer } of panes) {
@@ -513,6 +642,43 @@ export class AntigravityHudManager {
     return true;
   }
 
+  isNodeVisibleInDom(el, stopAt = null) {
+    if (!el) return false;
+    const win = typeof window !== 'undefined' ? window : globalThis.window;
+    let cursor = el;
+    let depth = 0;
+    while (cursor && cursor !== stopAt && depth++ < 8) {
+      if (cursor.hasAttribute?.('hidden')) return false;
+      if (win && typeof win.getComputedStyle === 'function') {
+        try {
+          const cs = win.getComputedStyle(cursor);
+          if (cs?.display === 'none' || cs?.visibility === 'hidden') return false;
+        } catch {}
+      }
+      cursor = cursor.parentElement || null;
+    }
+    return true;
+  }
+
+  findVisibleOrFirst(root, selector) {
+    if (!root) return null;
+    if (typeof root.querySelectorAll === 'function') {
+      const matches = root.querySelectorAll(selector);
+      if (matches) {
+        const list =
+          typeof matches[Symbol.iterator] === 'function' ? [...matches] : Array.from(matches);
+        let first = null;
+        for (const el of list) {
+          if (!el) continue;
+          if (!first) first = el;
+          if (this.isNodeVisibleInDom(el, root)) return el;
+        }
+        if (first) return first;
+      }
+    }
+    return typeof root.querySelector === 'function' ? root.querySelector(selector) : null;
+  }
+
   isInsideNestedSubpane(view, node) {
     if (!node || typeof node.closest !== 'function') return false;
     const nested = node.closest(NESTED_SUBPANE_SELECTOR);
@@ -521,18 +687,40 @@ export class AntigravityHudManager {
 
   inferPaneContext(view, options = {}) {
     const viewTestId = view?.getAttribute?.('data-testid');
+    const needsSubTabProbe =
+      !options?.paneKind &&
+      options?.isSubpane !== false &&
+      viewTestId !== 'conversation-view' &&
+      viewTestId !== 'side-question-tab-conversation' &&
+      viewTestId !== 'subagent-tab-conversation';
+    const btwNode = needsSubTabProbe
+      ? this.findVisibleOrFirst(view, '[data-testid="side-question-tab-conversation"]')
+      : null;
+    const subNode = needsSubTabProbe
+      ? this.findVisibleOrFirst(view, '[data-testid="subagent-tab-conversation"]')
+      : null;
+    const activeSubTabKind =
+      btwNode && this.isNodeVisibleInDom(btwNode, view)
+        ? 'btw'
+        : subNode && this.isNodeVisibleInDom(subNode, view)
+        ? 'subagent'
+        : btwNode
+        ? 'btw'
+        : subNode
+        ? 'subagent'
+        : null;
     const inferredPaneKind =
       options?.paneKind ||
       (options?.isSubpane === false
         ? 'main'
         : viewTestId === 'conversation-view'
         ? 'main'
-        : viewTestId === 'side-question-tab-conversation' ||
-          Boolean(view?.querySelector?.('[data-testid="side-question-tab-conversation"]'))
+        : viewTestId === 'side-question-tab-conversation'
         ? 'btw'
-        : viewTestId === 'subagent-tab-conversation' ||
-          Boolean(view?.querySelector?.('[data-testid="subagent-tab-conversation"]'))
+        : viewTestId === 'subagent-tab-conversation'
         ? 'subagent'
+        : activeSubTabKind
+        ? activeSubTabKind
         : viewTestId === 'side-question-tab-content'
         ? 'btw'
         : view?.getAttribute?.('data-media-drop-scope') === 'subpane'
@@ -550,7 +738,10 @@ export class AntigravityHudManager {
   pickNonNested(view, selector) {
     if (!view || typeof view.querySelector !== 'function') return null;
     const isMainConv = view.getAttribute?.('data-testid') === 'conversation-view';
-    if (!isMainConv || typeof view.querySelectorAll !== 'function') {
+    if (!isMainConv) {
+      return this.findVisibleOrFirst(view, selector);
+    }
+    if (typeof view.querySelectorAll !== 'function') {
       return view.querySelector(selector);
     }
     const matches = view.querySelectorAll(selector);
@@ -637,7 +828,8 @@ export class AntigravityHudManager {
           viewTestId === 'side-question-tab-conversation' ||
           viewTestId === 'side-question-tab-content' ||
           (viewTestId !== 'conversation-view' &&
-            view?.querySelector?.(
+            this.findVisibleOrFirst(
+              view,
               '[data-testid="subagent-tab-conversation"][data-cascade-id], [data-testid="side-question-tab-conversation"][data-cascade-id]'
             ))
         );
@@ -650,11 +842,10 @@ export class AntigravityHudManager {
       rawCascadeId ||
       view?.getAttribute?.('data-cascade-id') ||
       (viewTestId !== 'conversation-view'
-        ? view
-            ?.querySelector?.(
-              '[data-testid="side-question-tab-conversation"][data-cascade-id], [data-testid="subagent-tab-conversation"][data-cascade-id]'
-            )
-            ?.getAttribute?.('data-cascade-id')
+        ? this.findVisibleOrFirst(
+            view,
+            '[data-testid="side-question-tab-conversation"][data-cascade-id], [data-testid="subagent-tab-conversation"][data-cascade-id]'
+          )?.getAttribute?.('data-cascade-id')
         : null) ||
       null;
     if (
@@ -719,6 +910,31 @@ export class AntigravityHudManager {
     return Number.isSafeInteger(tokens) && tokens >= 4096 && tokens <= 10_000_000 ? tokens : undefined;
   }
 
+  findGlobalNonSubpaneModelTrigger() {
+    if (typeof document === 'undefined') return null;
+    if (typeof document.querySelectorAll === 'function') {
+      const matches = document.querySelectorAll(GLOBAL_MODEL_TRIGGER_SELECTOR);
+      if (matches) {
+        const list =
+          typeof matches[Symbol.iterator] === 'function' ? [...matches] : Array.from(matches);
+        for (const el of list) {
+          if (!el) continue;
+          if (typeof el.closest === 'function' && el.closest(NESTED_SUBPANE_SELECTOR)) continue;
+          return el;
+        }
+        return null;
+      }
+    }
+    const fallback =
+      typeof document.querySelector === 'function'
+        ? document.querySelector(GLOBAL_MODEL_TRIGGER_SELECTOR)
+        : null;
+    if (fallback && typeof fallback.closest === 'function' && fallback.closest(NESTED_SUBPANE_SELECTOR)) {
+      return null;
+    }
+    return fallback;
+  }
+
   findModelSelectorTrigger(view, totalViews = 1) {
     if (!view || typeof view.querySelector !== 'function') return null;
     const localTrigger =
@@ -730,9 +946,7 @@ export class AntigravityHudManager {
       );
     if (localTrigger) return localTrigger;
     if (totalViews === 1 && typeof document !== 'undefined') {
-      return document.querySelector(
-        '[data-testid="model-selector-trigger"], .model-selector, button[data-context-window], button[aria-label*="Select model"], button[aria-label*="选择模型"]'
-      );
+      return this.findGlobalNonSubpaneModelTrigger();
     }
     return null;
   }
@@ -810,9 +1024,7 @@ export class AntigravityHudManager {
     }
 
     if (totalViews === 1 && typeof document !== 'undefined') {
-      const globalTrigger = document.querySelector(
-        '[data-testid="model-selector-trigger"], .model-selector, button[data-context-window], button[aria-label*="Select model"], button[aria-label*="选择模型"]'
-      );
+      const globalTrigger = this.findGlobalNonSubpaneModelTrigger();
       const globalModel = extractFromTrigger(globalTrigger);
       if (globalModel) return globalModel;
     }
@@ -1164,6 +1376,16 @@ export class AntigravityHudManager {
       });
     }
 
+    // 主会话对话流内嵌入的子智能体卡片 / 后台运行汇总卡片的局部 spinner 与 shimmer 属于后台/子代理信号，
+    // 不得把主会话前台纯文本生成误判为 executing（前台普通 tool-call / tool-invocation 仍保留为 executing）
+    const embeddedNonForegroundCardSelector =
+      '[aria-label^="Open Subagent:"], [aria-label^="打开子智能体："], [aria-label^="打开子智能体:"], [aria-label^="打开子代理："], [aria-label^="打开子代理:"], [data-testid*="subagent-card"], [data-testid="browser-subagent-row"], [data-testid="running-items-card"], [data-testid="idle-status-text"]';
+    const isInsideEmbeddedNonForegroundCard = (node) => {
+      if (isSubpane || typeof node?.closest !== 'function') return false;
+      const card = node.closest(embeddedNonForegroundCardSelector);
+      return Boolean(card && card !== view);
+    };
+
     // 注意：status-task-running 为后台终端任务图标 (>_) 而非前台工具 Spinner，此处仅匹配 status-loading-spinner
     const taskRunningNodes = view.querySelectorAll('[data-testid="status-loading-spinner"]');
     let hasTaskSpinner = false;
@@ -1173,7 +1395,11 @@ export class AntigravityHudManager {
       } else {
         const list = typeof taskRunningNodes.forEach === 'function' ? taskRunningNodes : Array.from(taskRunningNodes);
         list.forEach((n) => {
-          if (!hasTaskSpinner && !this.isInsideNestedSubpane(view, n)) {
+          if (
+            !hasTaskSpinner &&
+            !this.isInsideNestedSubpane(view, n) &&
+            !isInsideEmbeddedNonForegroundCard(n)
+          ) {
             hasTaskSpinner = true;
           }
         });
@@ -1185,7 +1411,9 @@ export class AntigravityHudManager {
     const shimmerNodes = view.querySelectorAll('.animate-shimmer-text');
     if (shimmerNodes && typeof shimmerNodes.forEach === 'function') {
       shimmerNodes.forEach((node) => {
-        if (!isSubpane && this.isInsideNestedSubpane(view, node)) return;
+        if (!isSubpane && (this.isInsideNestedSubpane(view, node) || isInsideEmbeddedNonForegroundCard(node))) {
+          return;
+        }
         const parentTestId = node.closest?.('[data-testid]')?.getAttribute?.('data-testid') || '';
         if (parentTestId === 'idle-status-text') return;
         const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
@@ -1279,6 +1507,7 @@ export class AntigravityHudManager {
       this.themeObserver.disconnect();
       this.themeObserver = null;
     }
+    this.clearComposerTextObservers();
     for (const instance of this.instances.values()) {
       instance.dispose();
     }

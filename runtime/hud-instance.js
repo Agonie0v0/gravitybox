@@ -455,6 +455,10 @@ export class HudInstance {
       );
       if (!wasActiveWork && this.hasActiveWork) {
         this.streamResumeAtMs = Date.now();
+        if (this.lastMetrics?.availability === 'remote_unbridged') {
+          this.turnHighWaterMark = null;
+          this.frozenClockSnapshot = null;
+        }
       }
       this.activityPhase = this.computeMergedActivityPhase();
       this.syncStreamingClass();
@@ -563,6 +567,10 @@ export class HudInstance {
       );
       if (!wasActiveWork && this.hasActiveWork) {
         this.streamResumeAtMs = Date.now();
+        if (this.lastMetrics?.availability === 'remote_unbridged') {
+          this.turnHighWaterMark = null;
+          this.frozenClockSnapshot = null;
+        }
       }
       this.activityPhase = this.computeMergedActivityPhase();
       if (!this.hasActiveWork) {
@@ -800,6 +808,7 @@ export class HudInstance {
       if (
         metrics.availability !== 'cached' &&
         metrics.availability !== 'remote_stale' &&
+        metrics.availability !== 'remote_unbridged' &&
         isRawNumber(metrics.session?.currentTurnDurationSeconds)
       ) {
         const rawTurns = isRawNumber(metrics.session?.turns) ? metrics.session.turns : 0;
@@ -1070,7 +1079,22 @@ export class HudInstance {
 
   mount(targetComposer) {
     if (!targetComposer) return;
+    const isRemount = Boolean(this.host || this.shadow);
+    const preservedClocks =
+      this.hasActiveWork &&
+      (this.turnClockAnchor || this.modelClockAnchor || this.toolClockAnchor)
+        ? {
+            turnClockAnchor: this.turnClockAnchor ? { ...this.turnClockAnchor } : null,
+            modelClockAnchor: this.modelClockAnchor ? { ...this.modelClockAnchor } : null,
+            toolClockAnchor: this.toolClockAnchor ? { ...this.toolClockAnchor } : null,
+          }
+        : null;
     this.cleanupListeners();
+    if (preservedClocks) {
+      this.turnClockAnchor = preservedClocks.turnClockAnchor;
+      this.modelClockAnchor = preservedClocks.modelClockAnchor;
+      this.toolClockAnchor = preservedClocks.toolClockAnchor;
+    }
     this.targetComposer = targetComposer;
 
     const doc = targetComposer.ownerDocument || (typeof document !== 'undefined' ? document : null);
@@ -1101,7 +1125,7 @@ export class HudInstance {
       minWidth: '0',
       height: '24px',
       marginTop: '4px',
-      marginBottom: '0px',
+      marginBottom: '4px',
       pointerEvents: 'none',
       userSelect: 'none',
       transform: 'none',
@@ -1143,6 +1167,9 @@ export class HudInstance {
     this.bindEvents(targetComposer);
     if (this.lastMetrics) {
       this.applyMetricsToDom(this.lastMetrics);
+    }
+    if (isRemount && preservedClocks && this.currentConvId) {
+      this.requestRefresh();
     }
   }
 
@@ -1939,13 +1966,14 @@ export class HudInstance {
       const s = this.lastMetrics?.session || {};
       const rawTurns = isRawNumber(s.turns) ? s.turns : 0;
       const rawSteps = isRawNumber(s.steps) ? s.steps : 0;
+      const sessionCompCount = Math.max(0, Math.floor(Number(s.compactionCount) || 0));
       const liveModel = this.modelClockAnchor ? this.getLiveClockSeconds(this.modelClockAnchor, nowMs) : Number(s.modelDurationSeconds || 0);
       const liveTool = this.toolClockAnchor ? this.getLiveClockSeconds(this.toolClockAnchor, nowMs) : Number(s.toolDurationSeconds || 0);
       const popSession = this.getShadowEl('#hud-popover-session');
       if (popSession) {
         popSession.setAttribute(
           'data-exact-summary',
-          `turns=${rawTurns}; steps=${rawSteps}; modelSec=${liveModel.toFixed(2)}; toolSec=${liveTool.toFixed(2)}; ttftSec=${Number(s.averageTtftSeconds || 0).toFixed(2)}; tps=${Number(s.outputTps || 0).toFixed(2)}`
+          `turns=${rawTurns}; steps=${rawSteps}; modelSec=${liveModel.toFixed(2)}; toolSec=${liveTool.toFixed(2)}; ttftSec=${Number(s.averageTtftSeconds || 0).toFixed(2)}; tps=${Number(s.outputTps || 0).toFixed(2)}; compactions=${sessionCompCount}`
         );
       }
       const baseModelSnap = Number(s.modelDurationSeconds || 0) + Number(s.inFlightModelDurationSeconds || 0);
@@ -1961,15 +1989,14 @@ export class HudInstance {
       );
     }
     const anchorTurnSec = this.turnClockAnchor.baseSeconds + (nowMs - this.turnClockAnchor.anchorMs) / 1000;
-    const highTurnSec = this.isSameOrMigratedFirstTurn(
+    const hwMatchesAnchor = this.isSameOrMigratedFirstTurn(
       this.turnHighWaterMark,
       this.turnClockAnchor.turns,
       anchorTurnSec
-    )
-      ? this.turnHighWaterMark.seconds
-      : 0;
+    );
+    const highTurnSec = hwMatchesAnchor ? this.turnHighWaterMark.seconds : 0;
     const elapsedSec = Math.max(anchorTurnSec, highTurnSec);
-    if (!this.turnClockAnchor.awaitingNewTurnFlush && highTurnSec > 0 && this.turnHighWaterMark) {
+    if (!this.turnClockAnchor.awaitingNewTurnFlush && hwMatchesAnchor && this.turnHighWaterMark) {
       this.turnHighWaterMark.seconds = Math.max(this.turnHighWaterMark.seconds, elapsedSec);
     }
     const roundedSec = Math.max(0, Math.round(elapsedSec));
@@ -2095,6 +2122,7 @@ export class HudInstance {
         frozenTurnSec,
         highWaterCandidate > 0 &&
           (this.turnHighWaterMark?.hasSubagent ||
+            isRemoteUnbridged ||
             (s.turnAborted === true &&
               (rawBackendTurnSec === null ||
                 rawBackendTurnSec <= 0 ||
@@ -2750,10 +2778,8 @@ export class HudInstance {
       stagesWrapEl?.setAttribute('hidden', '');
       this.renderModelStagesList(stagesListEl, [], isDark);
       modelRow?.removeAttribute('hidden');
-      for (const sel of ['#hud-txt-tokens .hud-tok-total','#hud-txt-tokens .hud-cache-val','#hud-txt-context','#pop-session-badge','#pop-tokens-badge','#val-cache-hit','#val-uncached-in','#val-cached-read','#val-output-tok','#val-est-cost','#val-cache-saved','#val-model-dur','#val-tool-dur','#val-ttft','#val-tps','#val-ttft-latest','#val-tps-latest','#val-turn-dur','#val-ctx-peak']) setTxt(sel, '—');
-      if (!hasObservedDur) {
-        setTxt('#val-turn-dur', '—');
-      }
+      for (const sel of ['#hud-txt-tokens .hud-tok-total','#hud-txt-tokens .hud-cache-val','#hud-txt-context','#pop-session-badge','#pop-tokens-badge','#val-cache-hit','#val-uncached-in','#val-cached-read','#val-output-tok','#val-est-cost','#val-cache-saved','#val-model-dur','#val-tool-dur','#val-ttft','#val-tps','#val-ttft-latest','#val-tps-latest','#val-ctx-peak']) setTxt(sel, '—');
+      setTxt('#val-turn-dur', hasObservedDur ? durationText(observedSec, locale) : '—');
     }
     if (this.activePopoverId) this.repositionActivePopover(false);
   }

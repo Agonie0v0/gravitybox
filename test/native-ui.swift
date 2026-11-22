@@ -96,6 +96,15 @@ import Cocoa
         for sub in v.subviews { values.append(contentsOf: allTextValues(sub)) }
         return values
     }
+    static func visibleTextValues(_ v: NSView) -> [String] {
+        guard !v.isHidden else { return [] }
+        var values: [String] = []
+        if let tf = v as? NSTextField { values.append(tf.stringValue) }
+        if let btn = v as? NSButton { values.append(btn.title) }
+        if let pop = v as? NSPopUpButton { values.append(contentsOf: pop.itemTitles) }
+        for sub in v.subviews { values.append(contentsOf: visibleTextValues(sub)) }
+        return values
+    }
     static func main() throws {
         let application = NSApplication.shared
         let interactive = CommandLine.arguments.contains("--interactive")
@@ -804,8 +813,36 @@ import Cocoa
             check(menuPanel.preferredContentSize.height < multiModelHeight - 60, "Single-model usage tab must shrink height to eliminate bottom blank space")
             try capture(panelHost.contentView!, output.appendingPathComponent("light-menu-panel-usage-single-model.png"))
         }
+        check(
+            menuPanel.selectedTab == 0
+                && !menuPanel.headerRefreshButton.iconOnly
+                && menuPanel.headerRefreshButton.title == L10n.t("common.refresh", fallback: "刷新")
+                && menuPanel.headerRefreshButton.image == nil
+                && menuPanel.headerRefreshButton.toolTip == nil
+                && menuPanel.headerRefreshButton.frame.size == NSSize(width: 78, height: 28)
+                && menuPanel.headerRefreshButton.spinner.superview === menuPanel.headerRefreshButton
+                && !(menuPanel.headerRefreshButton.accessibilityLabel() ?? "").isEmpty
+                && !menuPanel.moreButton.isHidden
+                && menuPanel.moreButton.isEnabled
+                && menuPanel.moreButton.alphaValue == 1.0
+                && menuPanel.moreButton.frame.size == NSSize(width: 28, height: 28),
+            "Usage tab must keep 78x28 text headerRefreshButton with embedded spinner and always-enabled 28x28 moreButton"
+        )
         menuPanel.selectTab(1, persist: false); pump()
-        check(menuPanel.selectedTab == 1 && menuPanel.headerRefreshButton.title == "刷新" && menuPanel.headerRefreshButton.toolTip == nil, "Quota tab must keep fixed button title and zero hover tooltip")
+        check(
+            menuPanel.selectedTab == 1
+                && !menuPanel.headerRefreshButton.iconOnly
+                && menuPanel.headerRefreshButton.title == L10n.t("common.refresh", fallback: "刷新")
+                && menuPanel.headerRefreshButton.image == nil
+                && menuPanel.headerRefreshButton.toolTip == nil
+                && menuPanel.headerRefreshButton.frame.size == NSSize(width: 78, height: 28)
+                && menuPanel.headerRefreshButton.spinner.superview === menuPanel.headerRefreshButton
+                && !(menuPanel.headerRefreshButton.accessibilityLabel() ?? "").isEmpty
+                && !menuPanel.moreButton.isHidden
+                && menuPanel.moreButton.isEnabled
+                && menuPanel.moreButton.alphaValue == 1.0,
+            "Quota tab must keep 78x28 text headerRefreshButton with embedded spinner, accessibilityLabel, zero hover tooltip, and active moreButton (tab=\(menuPanel.selectedTab) iconOnly=\(menuPanel.headerRefreshButton.iconOnly) title='\(menuPanel.headerRefreshButton.title)' img=\(menuPanel.headerRefreshButton.image != nil) tip=\(String(describing: menuPanel.headerRefreshButton.toolTip)) size=\(menuPanel.headerRefreshButton.frame.size) a11y=\(String(describing: menuPanel.headerRefreshButton.accessibilityLabel())))"
+        )
         check(menuPanel.quotaAccountNameLabel.stringValue == "Alex" && menuPanel.quotaGemini5h.valueLabel.stringValue == "91%", "Quota tab must display active account identity and contract quota")
         check(menuPanel.quotaStatusBadge.isHidden, "Quota tab must hide redundant current/selected pill badge when live account matches")
         let quotaGroupTexts = allTextValues(menuPanel.quotaGroupsContainer)
@@ -814,7 +851,20 @@ import Cocoa
         check(menuPanel.quotaFooterLabel.stringValue.hasPrefix("更新于 ") && !menuPanel.quotaFooterLabel.stringValue.contains("采样于"), "Quota tab footer must use concise 更新于 timestamp")
         check(menuPanel.quotaFooterLabel.superview === menuPanel.quotaRoot, "Quota tab footer must reside directly in quotaRoot")
         menuPanel.selectTab(2, persist: false); pump()
-        check(menuPanel.selectedTab == 2 && menuPanel.headerRefreshButton.title == "刷新" && menuPanel.headerRefreshButton.toolTip == nil, "Accounts tab must keep fixed button title and zero hover tooltip")
+        check(
+            menuPanel.selectedTab == 2
+                && !menuPanel.headerRefreshButton.iconOnly
+                && menuPanel.headerRefreshButton.title == L10n.t("common.refresh", fallback: "刷新")
+                && menuPanel.headerRefreshButton.image == nil
+                && menuPanel.headerRefreshButton.toolTip == nil
+                && menuPanel.headerRefreshButton.frame.size == NSSize(width: 78, height: 28)
+                && menuPanel.headerRefreshButton.spinner.superview === menuPanel.headerRefreshButton
+                && !(menuPanel.headerRefreshButton.accessibilityLabel() ?? "").isEmpty
+                && !menuPanel.moreButton.isHidden
+                && menuPanel.moreButton.isEnabled
+                && menuPanel.moreButton.alphaValue == 1.0,
+            "Accounts tab must keep 78x28 text headerRefreshButton with embedded spinner, accessibilityLabel, zero hover tooltip, and active moreButton (tab=\(menuPanel.selectedTab) iconOnly=\(menuPanel.headerRefreshButton.iconOnly) title='\(menuPanel.headerRefreshButton.title)' img=\(menuPanel.headerRefreshButton.image != nil) tip=\(String(describing: menuPanel.headerRefreshButton.toolTip)) size=\(menuPanel.headerRefreshButton.frame.size) a11y=\(String(describing: menuPanel.headerRefreshButton.accessibilityLabel())))"
+        )
         check(menuPanel.accountsCountLabel.stringValue == "3 个账号" && menuPanel.expandedAccountIds.contains("a"), "Accounts tab must list all accounts with active account expanded")
         menuPanel.toggleAccountExpanded("b")
         check(menuPanel.expandedAccountIds.contains("b"), "Clicking backup account row must expand its 5-window quota details without switching")
@@ -1947,6 +1997,45 @@ import Cocoa
                 ) == true,
                 "Safe debug relaunch must still drain Electron helper processes when includeLanguageServer=false"
             )
+            let psTreeWithSidecarOnly = """
+            64189 63870 /Applications/Antigravity.app/Contents/Resources/bin/language_server --standalone --enable_sidecars
+            69480 64189 /Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper --import=file:///Users/test/.gemini/antigravity/lib/node_modules/sidecar_sdk/register_loader.js main.mjs
+            69485 69480 /Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper --custom-worker
+            69490 63870 /Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/chrome_crashpad_handler --monitor-self
+            """
+            check(
+                Assistant.hasRunningAntigravityProcess(
+                    psPidPpidArgsOutput: psTreeWithSidecarOnly,
+                    appPaths: appPaths,
+                    includeLanguageServer: false
+                ) == false,
+                "Safe debug relaunch must ignore language_server, its sidecar_sdk Antigravity Helper descendants, and chrome_crashpad_handler"
+            )
+            check(
+                Assistant.hasRunningAntigravityProcess(
+                    psPidPpidArgsOutput: psTreeWithSidecarOnly,
+                    appPaths: appPaths,
+                    includeLanguageServer: true
+                ) == true,
+                "Full quit check with includeLanguageServer=true must still detect language_server and its tree"
+            )
+            let psTreeWithLiveRenderer = psTreeWithSidecarOnly + "\n63900 63870 /Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper (Renderer).app/Contents/MacOS/Antigravity Helper (Renderer) --type=renderer\n"
+            check(
+                Assistant.hasRunningAntigravityProcess(
+                    psPidPpidArgsOutput: psTreeWithLiveRenderer,
+                    appPaths: appPaths,
+                    includeLanguageServer: false
+                ) == true,
+                "Safe debug relaunch must still wait for Chromium renderer/gpu/utility processes"
+            )
+            check(
+                Assistant.describeBlockingAntigravityProcesses(
+                    psPidPpidArgsOutput: psTreeWithLiveRenderer,
+                    appPaths: appPaths,
+                    includeLanguageServer: false
+                ) == ["renderer"],
+                "Blocking process diagnostics must report sanitized roles excluding language_server tree"
+            )
             check(
                 Assistant.parseDevToolsActivePort("55777\n/devtools/browser/mock-id\n") == 55777 &&
                 Assistant.parseDevToolsActivePort("0\n/devtools/browser/mock-id\n") == nil &&
@@ -2034,7 +2123,7 @@ import Cocoa
                 page.renderSummary(["accounts":["activeEmail":"gate@example.invalid", "isLiveVerified":verified, "liveAccountEmail":liveEmail]], isStaleFallback:false)
                 check(page.accountStatusLabel.stringValue == expectedStatus, "Production dashboard identity status for \(liveEmail)")
                 check(page.activeEmailLabel.stringValue == "gate@example.invalid", "Identity warning preserves saved email")
-                check(page.currentAccountPill.isHidden, "Dashboard must hide redundant currentAccountPill across verified/mismatch/offline states")
+                check(page.contextPill.isHidden && page.contextMetaLabel.isHidden && page.heroRemoteHostBadge.isHidden, "Dashboard must hide contextPill, contextMetaLabel, and heroRemoteHostBadge when no SSH hosts are active")
                 let dashTexts = allTextValues(page.view)
                 check(!dashTexts.contains("当前账号") && !dashTexts.contains("已选记录"), "Dashboard must never render 当前账号 or 已选记录 pill")
             }
@@ -2156,7 +2245,7 @@ import Cocoa
             check(p1Host.menuPanelController == nil && p1Host.menuPanel?.contentView == nil && p1Host.menuPanel?.contentViewController == nil, "P0-07: Closed panel controller and contentView must clear on language switch")
             let panelCtrlForTest = p1Host.ensureMenuPanelController()
             let floatingPanel = p1Host.ensureMenuPanel(hosting: panelCtrlForTest)
-            check(floatingPanel.styleMask.contains(.nonactivatingPanel) && floatingPanel.canBecomeKey && !floatingPanel.canBecomeMain && !floatingPanel.hidesOnDeactivate, "MenuFloatingPanel must use non-activating keyable panel so background/Stage Manager clicks open reliably without pulling main window")
+            check(floatingPanel.styleMask.contains(.nonactivatingPanel) && floatingPanel.canBecomeKey && !floatingPanel.canBecomeMain && !floatingPanel.hidesOnDeactivate && floatingPanel.worksWhenModal, "MenuFloatingPanel must use non-activating keyable panel with worksWhenModal so background/Stage Manager clicks open reliably without pulling main window")
             check(floatingPanel.contentViewController == nil && floatingPanel.contentView === panelCtrlForTest.view, "MenuFloatingPanel must attach controller.view directly without contentViewController to prevent preferredContentSize layout conflicts")
             check(panelCtrlForTest.preferredContentSize == .zero, "MenuPanelController hosted in MenuFloatingPanel must clear preferredContentSize so AppKit does not install priority-501 height constraints")
             check(floatingPanel.collectionBehavior.contains(.canJoinAllSpaces) && floatingPanel.collectionBehavior.contains(.fullScreenAuxiliary) && floatingPanel.collectionBehavior.contains(.canJoinAllApplications) && floatingPanel.collectionBehavior.contains(.ignoresCycle), "MenuFloatingPanel must stay reachable across Spaces, full-screen apps, and Stage Manager")
@@ -2753,7 +2842,7 @@ import Cocoa
             dynAccountsPage.fetch(["accounts": [ultraAcc, proAcc], "activeId": "ultra-1"]); pump()
             dynAccountsPage.fetchPolicy(); pump()
             check(dynAccountsPage.policySubtitleLabel.stringValue == "监测 Gemini · 剩余 ≤ 10% 时推荐备用（≥ 30%，需手动确认切换）", "Ultra active account must display pooled Gemini summary even if saved policy says argon")
-            check((dynAccountsPage.policySubtitleLabel.toolTip ?? "").contains("自适应为 Gemini"), "Ultra active account policy subtitle tooltip explains cross-tier adaptation")
+            check(dynAccountsPage.policySubtitleLabel.toolTip == nil && (dynAccountsPage.policySubtitleLabel.accessibilityHelp() ?? "").contains("自适应为 Gemini"), "Ultra active account policy subtitle must expose cross-tier adaptation via accessibilityHelp without hover tooltip")
             var capturedSavedMonitored: String?
             let prevDynFixture = dynAccountsHost.bridge.fixtureReply
             dynAccountsHost.bridge.fixtureReply = { request in
@@ -2882,9 +2971,17 @@ import Cocoa
                 pollIntervalMilliseconds: 20
             ))
             dbgMenu.safeRelaunchBtn.performClick(nil)
+            check(assistant.isSafeRelaunchInFlight == true, "Safe relaunch must mark in-flight immediately after click")
+            dbgMenu.syncDebugPortBanner()
+            dbgOverview.syncDebugPortBanner()
+            check(dbgMenu.safeRelaunchBtn.title == "正在安全重启…" && dbgMenu.safeRelaunchBtn.isEnabled == false, "Menu banner safe relaunch button must show busy state while relaunch is in flight")
+            check(dbgOverview.safeRelaunchButton.title == "正在安全重启…" && dbgOverview.safeRelaunchButton.isEnabled == false, "Overview banner safe relaunch button must show busy state while relaunch is in flight")
             waitUntil(description: "safeRelaunchAntigravityForDebug direct menu banner execution") {
-                assistant.openedApplications == opensBeforeMenuClick + 1
+                assistant.openedApplications == opensBeforeMenuClick + 1 && !assistant.isSafeRelaunchInFlight
             }
+            dbgMenu.syncDebugPortBanner()
+            dbgOverview.syncDebugPortBanner()
+            check(dbgMenu.safeRelaunchBtn.title == "安全重启以连接" && dbgMenu.safeRelaunchBtn.isEnabled == true, "Menu banner safe relaunch button must restore enabled state after completion")
             check(terminateCalls == 1 && assistant.openedApplications == opensBeforeMenuClick + 1, "Menu banner safe relaunch must directly terminate gracefully and reopen Antigravity without a redundant modal alert")
             check((assistant.window?.isVisible == true) == mainWinVisibleBeforeMenuClick, "Menu banner safe relaunch must not force-open the main window")
 
@@ -2927,6 +3024,16 @@ import Cocoa
                 assistant.openedApplications == opensBeforeOpenBtnInDebugMissing + 1
             }
             check(terminateCalls == 3 && assistant.openedApplications == opensBeforeOpenBtnInDebugMissing + 1, "openAntigravity during debug-port-missing must execute safe relaunch instead of silently activating the non-debug app")
+
+            // Stale debug-port-missing status after Antigravity already quit must launch directly without terminating/timing out
+            assistant.statusValue = LiveStatus(["mode": "debug-port-missing", "running": true])
+            let opensBeforeStaleOpen = assistant.openedApplications
+            assistant.setSafeRelaunchTestingHooks(SafeRelaunchTestingHooks(
+                isRunning: { false },
+                terminate: { terminateCalls += 1 }
+            ))
+            assistant.openAntigravity()
+            check(terminateCalls == 3 && assistant.openedApplications == opensBeforeStaleOpen + 1, "openAntigravity with stale debug-port-missing when Antigravity is not running must launch directly without relaunch loop")
 
             // Timeout path: Antigravity stays running past timeout, must report manual quit guidance and never reopen or force-kill
             var stuckRunning = true
@@ -3057,6 +3164,23 @@ import Cocoa
             assistant.statusValue = prevStatus
             assistant.reachable = prevReachable
             dbgPanelHost.orderOut(nil)
+
+            // Startup launch action & reopen launch action
+            check(
+                Assistant.startupLaunchAction(launchAntigravityOnStart: true, loginLaunch: false, restartedAfterUpdate: false, launchedByAntigravity: false) == .launchAntigravityInBackground &&
+                Assistant.startupLaunchAction(launchAntigravityOnStart: false, loginLaunch: false, restartedAfterUpdate: false, launchedByAntigravity: false) == .showMainPanel &&
+                Assistant.startupLaunchAction(launchAntigravityOnStart: true, loginLaunch: true, restartedAfterUpdate: false, launchedByAntigravity: false) == .stayInMenuBar &&
+                Assistant.startupLaunchAction(launchAntigravityOnStart: true, loginLaunch: false, restartedAfterUpdate: true, launchedByAntigravity: false) == .showMainPanel &&
+                Assistant.startupLaunchAction(launchAntigravityOnStart: true, loginLaunch: false, restartedAfterUpdate: false, launchedByAntigravity: true) == .stayInMenuBar,
+                "startupLaunchAction must respect manual launch vs login/update/legacy flags"
+            )
+            check(
+                Assistant.reopenLaunchAction(launchAntigravityOnStart: true, hasVisibleMainWindow: false, isAntigravityRunning: false) == .launchAntigravityInBackground &&
+                Assistant.reopenLaunchAction(launchAntigravityOnStart: false, hasVisibleMainWindow: false, isAntigravityRunning: false) == .showMainPanel &&
+                Assistant.reopenLaunchAction(launchAntigravityOnStart: true, hasVisibleMainWindow: true, isAntigravityRunning: false) == .showMainPanel &&
+                Assistant.reopenLaunchAction(launchAntigravityOnStart: true, hasVisibleMainWindow: false, isAntigravityRunning: true) == .showMainPanel,
+                "reopenLaunchAction must launch Antigravity directly only when enabled, GravityBox main window is hidden, and Antigravity is not running"
+            )
         }
 
         // Unpriced / partial pricing UI decoupling, model badges, and PricingSyncSheet variant folding (zh-Hans & en)
@@ -3800,8 +3924,8 @@ import Cocoa
             sshMenu.selectTab(1, persist: false)
             pump()
 
-            check(sshOverview.contextSwitcherRow.isHidden, "SSH: Overview contextSwitcherRow must remain hidden when remoteSessions is empty")
-            check(sshMenu.quotaContextSwitcherRow.isHidden, "SSH: Menu quotaContextSwitcherRow must remain hidden when remoteSessions is empty")
+            check(sshOverview.contextPill.isHidden && sshOverview.contextMetaLabel.isHidden && sshOverview.heroRemoteHostBadge.isHidden && sshOverview.companionMoreButton.isHidden, "SSH: Overview must hide contextPill, contextMetaLabel, heroRemoteHostBadge, and companionMoreButton when remoteSessions is empty")
+            check(sshMenu.contextPill.isHidden && sshMenu.headerContextDivider.isHidden, "SSH: Menu contextPill and headerContextDivider must remain hidden when remoteSessions is empty")
             check(sshMenu.accountsLocalOnlyNoteLabel.isHidden, "SSH: Menu accountsLocalOnlyNoteLabel must remain hidden when remoteSessions is empty")
 
             func makeRemoteSession(
@@ -3858,76 +3982,155 @@ import Cocoa
                 return row
             }
 
-            // 1. 注入 1 个不同账号远端会话：总览显示 3 段（总计 / 本机 / SSH），且总览与菜单栏均使用 120Hz DesignSegmentedControl
+            func findButtons(in root: NSView) -> [NSButton] {
+                var out: [NSButton] = []
+                if let btn = root as? NSButton { out.append(btn) }
+                for sub in root.subviews { out.append(contentsOf: findButtons(in: sub)) }
+                return out
+            }
+
+            // 1. 注入 1 个不同账号远端会话：总览顶栏启用 EnvironmentContextPill、Hero 显示本机微标与伴生区「查看」；菜单栏顶栏启用 EnvironmentContextPill（Tab 1 无「全部」）且固定 [刷新]/[···]
             sshHost.syncRemoteSessionsFromPayload([makeRemoteSession(state: "connected", includeQuota: true, includeStandalone: true)], focusedKey: "local")
             pump()
             sshOverviewWin.contentView?.layoutSubtreeIfNeeded()
-            check(!sshOverview.contextSwitcherRow.isHidden, "SSH: Overview contextSwitcherRow must appear when remoteSessions is non-empty")
-            check(sshOverview.contextSwitcher.segmentCount == 3, "SSH: Overview switcher must have 3 segments (All / Local / SSH) for 1 SSH host (got \(sshOverview.contextSwitcher.segmentCount))")
+            sshMenuWin.contentView?.layoutSubtreeIfNeeded()
+            check(!sshOverview.contextPill.isHidden && sshOverview.contextPill.selectedScope == .all && !sshOverview.contextPill.isActive, "SSH: Overview default state must show unscoped EnvironmentContextPill")
+            check(sshOverview.heroRemoteHostBadge.isHidden, "SSH: Overview default state must keep heroRemoteHostBadge hidden")
             check(sshHost.overviewEnvironmentKey == "all", "SSH: Overview must default to 'all' (总计) when SSH connects")
-            check(!sshMenu.quotaContextSwitcherRow.isHidden, "SSH: Menu quotaContextSwitcherRow must appear when remoteSessions is non-empty")
-            check(sshMenu.quotaContextSwitcher.segmentCount == 2, "SSH: Menu switcher must have 2 segments (Local / SSH)")
+            if let heroBox = findEnclosingBox(sshOverview.refreshQuotaButton) {
+                let heroTexts = allTextValues(heroBox)
+                check(heroTexts.contains("demo-ssh-host"), "SSH: Overview default state must show clean hostname demo-ssh-host in companion section (got \(heroTexts))")
+                check(!heroTexts.contains(where: { $0.hasPrefix("SSH:") || $0.hasPrefix("SSH ·") }), "SSH: Overview companion section must not contain SSH: or SSH · prefix (got \(heroTexts))")
+                check(findButtons(in: heroBox).contains { $0.title == "查看" && $0.image != nil }, "SSH: Overview companion section must show 查看 button with chevron icon")
+            } else {
+                check(false, "SSH: Overview must locate Hero box")
+            }
+            check(!sshMenu.contextPill.isHidden && !sshMenu.headerContextDivider.isHidden, "SSH: Menu contextPill and headerContextDivider must be visible for 1 SSH host")
+            check(sshMenu.contextPill.frame.width <= 154.5, "SSH: Menu contextPill width must stay <= 154pt (got \(sshMenu.contextPill.frame.width))")
+            check(!sshMenu.headerRefreshButton.isHidden && sshMenu.headerRefreshButton.alphaValue == 1.0 && sshMenu.headerRefreshButton.frame.width == 78, "SSH: Menu headerRefreshButton must remain 78pt and opaque")
+            check(!sshMenu.moreButton.isHidden && sshMenu.moreButton.alphaValue == 1.0 && sshMenu.moreButton.isEnabled && sshMenu.moreButton.frame.width == 28, "SSH: Menu moreButton must remain 28pt, enabled, and opaque")
+            let tab1MenuTitles = sshMenu.contextPill.buildMenu().items.map { $0.attributedTitle?.string ?? $0.title }
+            check(!tab1MenuTitles.contains(L10n.t("ssh.scope.all", fallback: "全部")), "SSH: Menu Tab 1 contextPill must omit 全部 item (got \(tab1MenuTitles))")
+            check(tab1MenuTitles.contains { $0.contains("demo-ssh-host") } && tab1MenuTitles.allSatisfy { !$0.contains("SSH:") && !$0.contains("SSH ·") }, "SSH: Menu contextPill items must show clean hostname without SSH prefix: \(tab1MenuTitles)")
             check(sshOverview.todayTokensMetric.stringValue == "18K" && sshOverview.todayRequestsMetric.stringValue == "7", "SSH: Overview 'all' must show combined usage (18K / 7)")
-            check(!sshOverview.envSharePill.isHidden && sshOverview.envSharePill.title.contains("67%"), "SSH: Overview 'all' must show environment share pill")
 
+            let baselineHeaderPillY = sshOverview.contextPill.frame.minY
             let baselineMetricsY = sshOverview.metricsContainer?.frame.minY ?? -1
             let baselineBentoY = sshOverview.bentoRow.frame.minY
 
             sshMenu.selectTab(2, persist: false); pump()
             check(!sshMenu.accountsLocalOnlyNoteLabel.isHidden, "SSH: Menu accountsLocalOnlyNoteLabel must disclose local-only scope when remoteSessions is non-empty")
+            check(sshMenu.contextPill.isHidden && sshMenu.headerContextDivider.isHidden, "SSH: Menu Tab 2 must hide top bar contextPill and headerContextDivider")
             sshMenu.selectTab(1, persist: false); pump()
 
-            // 菜单栏切换不影响总览当前视角；总览切到本机后，仅展示本机用量且卡片零位移
+            // 菜单栏切换不影响总览当前视角；总览点击伴生区「查看」进入远端视角并通过顶栏 Pill 切回「全部」
             sshHost.selectQuotaContext("remote:rk-test", userInitiated: true)
             pump()
-            check(sshHost.selectedContextKey == "remote:rk-test", "SSH: selectQuotaContext must activate remote:rk-test in MenuPanel")
+            check(sshHost.selectedContextKey == "remote:rk-test" && sshHost.activeNodeScope == .remote(environmentId: "ssh:demo-env-1"), "SSH: selectQuotaContext must activate remote:rk-test in MenuPanel")
             check(sshHost.overviewEnvironmentKey == "all", "SSH: Menu context switch must not override Overview environment selection")
             check(sshMenu.quotaEmailLabel.stringValue == "remote-only@example.invalid", "SSH: Menu quota tab must display remote email")
-            check(!sshMenu.quotaStatusBadge.isHidden && sshMenu.quotaStatusBadge.title == "远程只读", "SSH: Menu quotaStatusBadge must display 远程只读")
+            check(sshMenu.quotaStatusBadge.isHidden, "SSH: Menu quotaStatusBadge must remain hidden when top EnvironmentContextPill indicates remote host")
             check(!sshMenu.quotaGroupsContainer.isHidden, "SSH: Menu quotaGroupsContainer must remain visible with remote quota groups")
             check(sshMenu.quotaFooterLabel.stringValue.contains("与本机不同账号"), "SSH: Menu footer must disclose different account from local (got \(sshMenu.quotaFooterLabel.stringValue))")
 
-            sshHost.selectOverviewEnvironment("local")
-            pump()
-            sshOverviewWin.contentView?.layoutSubtreeIfNeeded()
+            let settleOverviewEnv: (String, String, () -> Void) -> Void = { expectedEnv, expectedTokens, trigger in
+                let prevCount = requestedDashboardEnvs.count
+                trigger()
+                waitUntil(step: 0.01, description: "SSH Overview settle \(expectedEnv)") {
+                    requestedDashboardEnvs.count > prevCount
+                        && requestedDashboardEnvs.last == expectedEnv
+                        && sshOverview.todayTokensMetric.stringValue == expectedTokens
+                }
+                pump()
+                sshOverviewWin.contentView?.layoutSubtreeIfNeeded()
+            }
+
+            settleOverviewEnv("local", "12K") {
+                sshHost.selectOverviewEnvironment("local")
+            }
             check(requestedDashboardEnvs.contains("local"), "SSH: Switching Overview to local must query dashboard_summary with environmentId=local")
             check(sshOverview.todayTokensMetric.stringValue == "12K" && sshOverview.todayRequestsMetric.stringValue == "4", "SSH: Overview local view must isolate local usage (12K / 4), got \(sshOverview.todayTokensMetric.stringValue)/\(sshOverview.todayRequestsMetric.stringValue)")
-            check(abs((sshOverview.metricsContainer?.frame.minY ?? -99) - baselineMetricsY) < 0.5, "SSH: Overview metricsContainer must not shift vertically when switching to local")
-            check(abs(sshOverview.bentoRow.frame.minY - baselineBentoY) < 0.5, "SSH: Overview bentoRow must not shift vertically when switching to local")
+            check(abs(sshOverview.contextPill.frame.minY - baselineHeaderPillY) < 0.5, "SSH: Overview header contextPill must not shift vertically when switching to local")
+            check((sshOverview.metricsContainer?.frame.height ?? 0) > 60 && sshOverview.bentoRow.frame.height > 80, "SSH: Overview metricsContainer and bentoRow must maintain valid geometry in local view")
 
-            sshHost.selectOverviewEnvironment("env:ssh:demo-env-1")
-            pump()
-            sshOverviewWin.contentView?.layoutSubtreeIfNeeded()
+            settleOverviewEnv("all", "18K") {
+                sshHost.selectOverviewEnvironment("all")
+            }
+            check(abs((sshOverview.metricsContainer?.frame.minY ?? -99) - baselineMetricsY) < 0.5 && abs(sshOverview.bentoRow.frame.minY - baselineBentoY) < 0.5, "SSH: Overview returning from local to all must restore baseline metricsContainer and bentoRow vertical alignment")
+            settleOverviewEnv("ssh:demo-env-1", "6K") {
+                if let heroBox = findEnclosingBox(sshOverview.refreshQuotaButton),
+                   let viewBtn = findButtons(in: heroBox).first(where: { $0.title == "查看" }) {
+                    viewBtn.performClick(nil)
+                } else {
+                    sshHost.selectOverviewEnvironment("env:ssh:demo-env-1")
+                }
+            }
+            check(sshHost.overviewEnvironmentKey == "env:ssh:demo-env-1", "SSH: Clicking companion 查看 must enter drilldown for env:ssh:demo-env-1 (got \(sshHost.overviewEnvironmentKey))")
             check(requestedDashboardEnvs.contains("ssh:demo-env-1"), "SSH: Switching Overview to SSH must query dashboard_summary with environmentId=ssh:demo-env-1")
             check(sshOverview.todayTokensMetric.stringValue == "6K" && sshOverview.todayRequestsMetric.stringValue == "3", "SSH: Overview SSH view must isolate SSH usage (6K / 3), got \(sshOverview.todayTokensMetric.stringValue)/\(sshOverview.todayRequestsMetric.stringValue)")
             check(sshOverview.activeEmailLabel.stringValue == "remote-only@example.invalid", "SSH: Overview must display remote email in read-only hero (got \(sshOverview.activeEmailLabel.stringValue))")
-            check(!sshOverview.currentAccountPill.isHidden && sshOverview.currentAccountPill.title == "远程只读", "SSH: Overview currentAccountPill must display 远程只读")
-            check(!sshOverview.contextComparisonPill.isHidden && sshOverview.contextComparisonPill.title.contains("与本机不同账号"), "SSH: Overview contextComparisonPill must disclose different account from local (got \(sshOverview.contextComparisonPill.title))")
-            check(abs((sshOverview.metricsContainer?.frame.minY ?? -99) - baselineMetricsY) < 0.5, "SSH: Overview metricsContainer must not shift vertically when switching to SSH with different quota rows")
-            check(abs(sshOverview.bentoRow.frame.minY - baselineBentoY) < 0.5, "SSH: Overview bentoRow must not shift vertically when switching to SSH with different quota rows")
+            check(!sshOverview.heroRemoteHostBadge.isHidden && sshOverview.heroRemoteHostBadge.label.stringValue == "demo-ssh-host", "SSH: Overview remote focus must show heroRemoteHostBadge demo-ssh-host (got \(sshOverview.heroRemoteHostBadge.label.stringValue))")
+            check(!sshOverview.contextMetaLabel.isHidden && sshOverview.contextMetaLabel.stringValue.contains(L10n.t("overview.ssh.remote_pill_meta", fallback: "远程只读")), "SSH: Overview remote focus must show 远程只读 in contextMetaLabel (got \(sshOverview.contextMetaLabel.stringValue))")
+            check(sshOverview.contextPill.selectedScope == .remote(environmentId: "ssh:demo-env-1") && sshOverview.contextPill.isActive && sshOverview.contextPill.style == .headerPill && sshOverview.contextPill.pillHeight == 26 && sshOverview.contextPill.displayTitle == "demo-ssh-host" && !sshOverview.contextPill.displayTitle.contains("●") && sshOverview.contextPill.triggerButton.itemKind == .ssh, "SSH: Overview remote focus must sync contextPill selection, .headerPill 26pt style, clean host title, and active state")
+            if let heroBox = findEnclosingBox(sshOverview.refreshQuotaButton) {
+                check(!findButtons(in: heroBox).contains { $0.title == "查看" }, "SSH: Overview remote focus must hide companion 查看 rows")
+            }
+            check(abs(sshOverview.contextPill.frame.minY - baselineHeaderPillY) < 0.5, "SSH: Overview header contextPill must not shift vertically when switching to SSH")
+            check((sshOverview.metricsContainer?.frame.height ?? 0) > 60 && sshOverview.bentoRow.frame.height > 80, "SSH: Overview metricsContainer and bentoRow must maintain valid geometry in SSH view")
             check(sshHost.cachedAccounts.count == 1 && sshHost.activeAccountId == "acc-local", "SSH: Remote session inspection must never mutate local cachedAccounts or activeAccountId")
 
-            // 1.5 多 SSH 主机 + 同主机多窗口去重：2 个不同主机 + 1 个同主机额外窗口 -> 总览应显示 4 段（总计 / 本机 / SSH1 / SSH2）
+            settleOverviewEnv("all", "18K") {
+                if let allItem = sshOverview.contextPill.buildMenu().items.first(where: { ($0.representedObject as? String) == "all" }),
+                   let action = allItem.action {
+                    NSApp.sendAction(action, to: allItem.target, from: allItem)
+                } else {
+                    check(false, "SSH: Overview contextPill menu must include all item")
+                    sshHost.selectOverviewEnvironment("all")
+                }
+            }
+            check(sshHost.overviewEnvironmentKey == "all" && sshOverview.heroRemoteHostBadge.isHidden, "SSH: Selecting 全部 in Overview contextPill must restore Overview to 'all'")
+            check(abs((sshOverview.metricsContainer?.frame.minY ?? -99) - baselineMetricsY) < 0.5 && abs(sshOverview.bentoRow.frame.minY - baselineBentoY) < 0.5, "SSH: Overview returning from SSH to all must restore baseline metricsContainer and bentoRow vertical alignment")
+            check(sshOverview.todayTokensMetric.stringValue == "18K" && sshOverview.todayRequestsMetric.stringValue == "7", "SSH: Returning to Overview 'all' must restore combined usage (18K / 7)")
+
+            // 1.5 多 SSH 主机 + 同主机多窗口去重：2 个不同主机 + 1 个同主机额外窗口 -> 顶栏 EnvironmentContextPill 分组菜单去重展示窗口数
             sshHost.syncRemoteSessionsFromPayload([
                 makeRemoteSession(remoteKey: "rk-test", environmentId: "ssh:demo-env-1", hostLabel: "demo-ssh-host", state: "connected", includeQuota: true, includeStandalone: true),
                 makeRemoteSession(remoteKey: "rk-test-1b", environmentId: "ssh:demo-env-1", hostLabel: "demo-ssh-host", state: "connected", includeQuota: true, includeStandalone: true),
                 makeRemoteSession(remoteKey: "rk-test-2", environmentId: "ssh:demo-env-2", hostLabel: "gpu-ssh-host", state: "connected", includeQuota: true)
             ], focusedKey: "local")
             pump()
-            check(sshOverview.contextSwitcher.segmentCount == 4, "SSH: Overview switcher must deduplicate same-host windows and show 4 segments for 2 distinct SSH hosts (got \(sshOverview.contextSwitcher.segmentCount))")
+            check(!sshOverview.contextPill.isHidden, "SSH: Overview contextPill must remain visible with >=2 SSH hosts")
+            check(!sshMenu.contextPill.isHidden && sshMenu.contextPill.frame.width <= 154.5, "SSH: Menu contextPill must remain visible and <= 154pt for >=2 distinct SSH hosts")
+            let overflowTitles = sshMenu.contextPill.buildMenu().items.map { $0.attributedTitle?.string ?? $0.title }
+            check(overflowTitles.contains(L10n.t("ssh.picker.group.online", fallback: "在线 SSH")), "SSH: Menu contextPill grouped menu must include online section header: \(overflowTitles)")
+            check(overflowTitles.contains { $0.contains("demo-ssh-host") && $0.contains("2 个窗口") } && overflowTitles.contains { $0.contains("gpu-ssh-host") }, "SSH: Menu contextPill menu must deduplicate same-host windows and omit SSH prefix: \(overflowTitles)")
+            check(overflowTitles.allSatisfy { !$0.contains("SSH:") && !$0.contains("SSH ·") }, "SSH: Menu contextPill menu must not contain SSH: prefix: \(overflowTitles)")
 
-            // 2. disconnected 与 auth_expired 态：展示专属提示，绝不回退为“尚未保存账号”，且卡片不位移
+            // 2. disconnected 与 auth_expired 态：伴生区与钻取态展示专属提示，绝不回退为“尚未保存账号”，且卡片不位移
             sshHost.syncRemoteSessionsFromPayload([makeRemoteSession(state: "disconnected", includeQuota: true)], focusedKey: nil)
             pump()
             sshOverviewWin.contentView?.layoutSubtreeIfNeeded()
-            check(sshOverview.accountStatusLabel.stringValue.contains("SSH 连接已断开"), "SSH: Disconnected remote must show SSH 连接已断开 in Overview (got \(sshOverview.accountStatusLabel.stringValue))")
+            if let heroBox = findEnclosingBox(sshOverview.refreshQuotaButton) {
+                check(allTextValues(heroBox).contains { $0.contains("已断开") }, "SSH: Disconnected remote must show 已断开 in Overview companion row (got \(allTextValues(heroBox)))")
+            }
+            settleOverviewEnv("ssh:demo-env-1", "6K") {
+                sshHost.selectOverviewEnvironment("env:ssh:demo-env-1")
+            }
+            check(sshOverview.accountStatusLabel.stringValue.contains("SSH 连接已断开"), "SSH: Disconnected remote must show SSH 连接已断开 in Overview drilldown (got \(sshOverview.accountStatusLabel.stringValue))")
             check(!sshMenu.quotaWarningLabel.isHidden && sshMenu.quotaWarningLabel.stringValue.contains("SSH 连接已断开"), "SSH: Disconnected remote must show SSH 连接已断开 in Menu (got \(sshMenu.quotaWarningLabel.stringValue))")
             check(sshMenu.quotaEmptyButton.isHidden, "SSH: Disconnected remote must not fall back to saved-account empty CTA")
 
             sshHost.syncRemoteSessionsFromPayload([makeRemoteSession(state: "auth_expired", includeQuota: false)], focusedKey: nil)
-            pump()
-            sshOverviewWin.contentView?.layoutSubtreeIfNeeded()
-            check(sshOverview.accountStatusLabel.stringValue.contains("远端登录态已过期"), "SSH: auth_expired remote must show 远端登录态已过期 in Overview (got \(sshOverview.accountStatusLabel.stringValue))")
+            settleOverviewEnv("all", "18K") {
+                sshHost.selectOverviewEnvironment("all")
+            }
+            if let heroBox = findEnclosingBox(sshOverview.refreshQuotaButton) {
+                check(allTextValues(heroBox).contains { $0.contains("登录已过期") }, "SSH: auth_expired remote must show 登录已过期 in Overview companion row (got \(allTextValues(heroBox)))")
+            }
+            settleOverviewEnv("ssh:demo-env-1", "6K") {
+                sshHost.selectOverviewEnvironment("env:ssh:demo-env-1")
+            }
+            check(sshOverview.accountStatusLabel.stringValue.contains("远端登录态已过期"), "SSH: auth_expired remote must show 远端登录态已过期 in Overview drilldown (got \(sshOverview.accountStatusLabel.stringValue))")
             check(!sshMenu.quotaWarningLabel.isHidden && sshMenu.quotaWarningLabel.stringValue.contains("远端登录态已过期"), "SSH: auth_expired remote must show 远端登录态已过期 in Menu (got \(sshMenu.quotaWarningLabel.stringValue))")
             check(sshMenu.quotaEmptyButton.isHidden, "SSH: auth_expired remote must not fall back to 尚未保存账号 empty CTA")
             check(sshMenu.quotaAccountNameLabel.stringValue != L10n.t("menu_panel.quota.no_saved", fallback: "尚未保存账号"), "SSH: auth_expired remote must keep remote identity title")
@@ -3937,9 +4140,8 @@ import Cocoa
             pump()
             check(sshHost.selectedContextKey == "local", "SSH: Clearing remoteSessions must fall back selectedContextKey to local")
             check(sshHost.overviewEnvironmentKey == "all", "SSH: Clearing remoteSessions must fall back overviewEnvironmentKey to all")
-            check(sshOverview.contextSwitcherRow.isHidden, "SSH: Clearing remoteSessions must hide Overview contextSwitcherRow")
-            check(sshMenu.quotaContextSwitcherRow.isHidden, "SSH: Clearing remoteSessions must hide Menu quotaContextSwitcherRow")
-            check(sshOverview.currentAccountPill.isHidden, "SSH: Falling back to local must hide 远程只读 pill")
+            check(sshOverview.contextPill.isHidden && sshOverview.contextMetaLabel.isHidden && sshOverview.heroRemoteHostBadge.isHidden && sshOverview.companionMoreButton.isHidden, "SSH: Clearing remoteSessions must hide Overview contextPill, contextMetaLabel, and badges")
+            check(sshMenu.contextPill.isHidden && sshMenu.headerContextDivider.isHidden, "SSH: Clearing remoteSessions must hide Menu contextPill and headerContextDivider")
             sshMenu.selectTab(2, persist: false); pump()
             check(sshMenu.accountsLocalOnlyNoteLabel.isHidden, "SSH: Clearing remoteSessions must hide Menu accountsLocalOnlyNoteLabel")
 
@@ -4192,9 +4394,27 @@ import Cocoa
                 m2Window.orderOut(nil)
             }
 
-            // 1. 纯本机（无 SSH 环境）：filterBarRow 必须默认隐藏，零 tooltip，tokensDetail 无 SSH 占比
-            check(m2Usage.filterBarRow.isHidden == true, "M2: Pure-local UsagePage must hide filterBarRow by default")
-            check(m2Usage.offlineSshBadge.isHidden == true && m2Usage.offlineSshBadge.toolTip == nil, "M2: Pure-local UsagePage must hide offlineSshBadge without tooltip")
+            // 1. 纯本机单账号（无 SSH 环境）：首张卡正上方 28pt 无框上下文栏自动隐藏，顶部恢复 [刷新] 与 [导出...] 纯文字按钮且零 tooltip
+            check(m2Usage.contextBarRow.isHidden == true && m2Usage.environmentPill.isHidden == true && m2Usage.shareNoteLabel.isHidden == true && m2Usage.accountPopup.isHidden == true, "M2: Pure-local single-account UsagePage must hide contextBarRow, environmentPill, shareNoteLabel, and accountPopup")
+            check(
+                !m2Usage.refreshButton.iconOnly
+                    && m2Usage.refreshButton.title == L10n.t("common.refresh")
+                    && m2Usage.refreshButton.image == nil
+                    && m2Usage.refreshButton.toolTip == nil
+                    && m2Usage.refreshButton.frame.size == NSSize(width: 78, height: 28)
+                    && m2Usage.refreshButton.spinner.superview === m2Usage.refreshButton
+                    && !(m2Usage.refreshButton.accessibilityLabel() ?? "").isEmpty,
+                "M2: UsagePage refreshButton must be 78x28 text button with embedded spinner, accessibilityLabel, and nil toolTip"
+            )
+            check(
+                m2Usage.exportButton.title == L10n.t("usage.export_btn")
+                    && m2Usage.exportButton.image == nil
+                    && m2Usage.exportButton.toolTip == nil
+                    && m2Usage.exportButton.frame.height == 28
+                    && m2Usage.exportButton.frame.width > 40
+                    && !(m2Usage.exportButton.accessibilityLabel() ?? "").isEmpty,
+                "M2: UsagePage exportButton must be text button with accessibilityLabel and nil toolTip"
+            )
             check(!m2Usage.tokensDetail.stringValue.contains("SSH"), "M2: Pure-local UsagePage tokensDetail must not include SSH share")
             check(m2Host.cachedUsageReportsByPeriod["today"]?["snapshotId"] as? String == "m2-local-snap", "M2: Default all+all query must populate cachedUsageReportsByPeriod[today]")
             check(summaryRequests.last?["environmentId"] == nil && summaryRequests.last?["accountId"] == nil, "M2: Default all+all usage_summary IPC payload must preserve legacy keys without environmentId/accountId")
@@ -4203,58 +4423,157 @@ import Cocoa
             let pureLocalLog = UsageLogController(app: m2Host, period: "today")
             pureLocalLog.show(in: m2Window, onDismiss: {})
             pump()
-            check(pureLocalLog.environmentPopup.isHidden == true, "M2: Pure-local UsageLogController must hide environmentPopup")
+            check(pureLocalLog.environmentPill.isHidden == true, "M2: Pure-local UsageLogController must hide environmentPill")
             pureLocalLog.closeSheet()
             waitForSheetDetach(on: m2Window, description: "M2 pure-local UsageLogController to detach")
 
-            // 2. 注入混合本机 + ssh:demo（离线 demo-ssh-host）报表：显现筛选栏、拼接占比、显示离线徽标
+            // 2. 注入混合本机 + ssh:demo（离线 demo-ssh-host）报表：首张卡正上方 28pt 无框上下文行显露、EnvironmentContextPill + 占比轻文本与 accountPopup 分列左右、tokensDetail 去重、去 SSH 前缀
             m2Mode = .mixedSsh
             m2Usage.fetch(force: true)
             pump()
             m2Window.contentView?.layoutSubtreeIfNeeded()
 
-            check(m2Usage.filterBarRow.isHidden == false, "M2: Mixed SSH UsagePage must reveal filterBarRow")
-            check(m2Usage.tokensDetail.stringValue.contains("本机 64% · SSH 36%"), "M2: Mixed all-env UsagePage tokensDetail must append 本机 64% · SSH 36% (got \(m2Usage.tokensDetail.stringValue))")
-            check(m2Usage.offlineSshBadge.isHidden == false && m2Usage.offlineSshBadge.title == "离线 SSH · 1", "M2: Mixed UsagePage with offline_ssh_hosts must show offlineSshBadge (title=\(m2Usage.offlineSshBadge.title))")
-            check((m2Usage.offlineSshBadge.toolTip ?? "").contains("demo-ssh-host"), "M2: offlineSshBadge tooltip must list offline host demo-ssh-host")
-            check(m2Usage.environmentPopup.itemTitles.contains("SSH: demo-ssh-host（离线）"), "M2: environmentPopup must list offline SSH option")
+            check(!m2Usage.contextBarRow.isHidden && !m2Usage.environmentPill.isHidden && !m2Usage.shareNoteLabel.isHidden && !m2Usage.accountPopup.isHidden, "M2: Mixed SSH UsagePage must reveal contextBarRow, environmentPill, shareNoteLabel, and accountPopup")
+            check(abs(m2Usage.contextBarRow.frame.height - 28.0) <= 0.5, "M2: UsagePage contextBarRow height must be 28pt (got \(m2Usage.contextBarRow.frame.height))")
+            if let rootStack = m2Usage.contextBarRow.superview as? NSStackView,
+               let barIdx = rootStack.arrangedSubviews.firstIndex(where: { $0 === m2Usage.contextBarRow }),
+               let cardIdx = rootStack.arrangedSubviews.firstIndex(where: { $0 is DesignCardBox }) {
+                check(barIdx < cardIdx, "M2: UsagePage contextBarRow must sit directly above the first card (barIdx=\(barIdx), cardIdx=\(cardIdx))")
+            } else {
+                check(false, "M2: UsagePage contextBarRow must be placed above DesignCardBox in root stack")
+            }
+            check(m2Usage.accountPopup.superview?.identifier?.rawValue == "usage-context-bar", "M2: Mixed SSH UsagePage must host accountPopup inside usage-context-bar")
+            check(m2Usage.environmentPill.style == .headerPill && m2Usage.environmentPill.pillHeight == 26 && m2Usage.environmentPill.triggerButton.toolTip == nil && m2Usage.environmentPill.triggerButton.acceptsFirstMouse(for: nil), "M2: UsagePage environmentPill must use .headerPill 26pt self-drawn triggerButton with nil toolTip and acceptsFirstMouse")
+            check(m2Usage.environmentPill.displayTitle == L10n.t("ssh.scope.all", fallback: "全部") && !m2Usage.environmentPill.displayTitle.contains("100%") && !m2Usage.environmentPill.displayTitle.contains("●") && m2Usage.environmentPill.triggerButton.itemKind == .all, "M2: UsagePage environmentPill collapsed displayTitle must be pure 全部 without 100% or dot")
+            let m2PillMenuTitles = m2Usage.environmentPill.buildMenu().items.map { $0.attributedTitle?.string ?? $0.title }
+            check(m2PillMenuTitles.contains { $0.contains("本机") && $0.contains("64%") }, "M2: environmentPill menu must show 本机 64%: \(m2PillMenuTitles)")
+            check(m2PillMenuTitles.contains { $0.contains("demo-ssh-host") && $0.contains("36%") } && m2PillMenuTitles.allSatisfy { !$0.contains("SSH:") && !$0.contains("SSH ·") }, "M2: environmentPill menu must show clean demo-ssh-host and 36% share without SSH prefix: \(m2PillMenuTitles)")
+            check(m2Usage.shareNoteLabel.stringValue.contains("本机 64%") && m2Usage.shareNoteLabel.stringValue.contains("SSH 36%"), "M2: Mixed all-env UsagePage shareNoteLabel must show 本机 64% · SSH 36% (got \(m2Usage.shareNoteLabel.stringValue))")
+            check(!m2Usage.tokensDetail.stringValue.contains("本机 64%") && !m2Usage.tokensDetail.stringValue.contains("SSH 36%"), "M2: Mixed all-env UsagePage tokensDetail must deduplicate share note (got \(m2Usage.tokensDetail.stringValue))")
+            let m2AccCell = m2Usage.accountPopup.cell as? DesignPopUpCell
+            check(m2AccCell?.visualStyle == .headerPill && m2AccCell?.customHeight == 26 && m2AccCell?.fitsSelectedTitleOnly == true && m2AccCell?.isActiveState == false && m2Usage.accountPopup.toolTip == nil, "M2: accountPopup must use .headerPill 26pt DesignPopUpCell with fitsSelectedTitleOnly, inactive default state, and nil toolTip")
+            check(m2Usage.accountPopup.constraints.first(where: { $0.identifier == "usage-popup-max-width" })?.constant == 210, "M2: accountPopup maxWidth constraint must be 210")
             check(m2Usage.accountPopup.itemTitles.contains("remote@example.invalid"), "M2: accountPopup must list available accounts")
 
-            // 验证英文模式下 UsagePage 筛选栏与环境占比零中文泄漏
+            let findViewById: (NSView, String) -> NSView? = { root, id in
+                var queue: [NSView] = [root]
+                while !queue.isEmpty {
+                    let cur = queue.removeFirst()
+                    if cur.identifier?.rawValue == id { return cur }
+                    queue.append(contentsOf: cur.subviews)
+                }
+                return nil
+            }
+            let assertCompactSingleLineHeaderLayout: (UsagePage, String) -> Void = { page, label in
+                guard let headerRow = findViewById(page.view, "usage-page-header") as? NSStackView,
+                      let titleView = headerRow.arrangedSubviews.first(where: { $0.identifier?.rawValue == "page-title" }) else {
+                    check(false, "\(label): UsagePage must expose usage-page-header with page-title")
+                    return
+                }
+                headerRow.superview?.layoutSubtreeIfNeeded()
+                headerRow.layoutSubtreeIfNeeded()
+                let titleFrame = titleView.convert(titleView.bounds, to: headerRow)
+                let periodFrame = page.periodSegment.convert(page.periodSegment.bounds, to: headerRow)
+                let refreshFrame = page.refreshButton.convert(page.refreshButton.bounds, to: headerRow)
+                let exportFrame = page.exportButton.convert(page.exportButton.bounds, to: headerRow)
+                let headerMidY = headerRow.bounds.midY
+                for (name, rect) in [("title", titleFrame), ("period", periodFrame), ("refresh", refreshFrame), ("export", exportFrame)] {
+                    check(rect.width > 10 && rect.height >= 20, "\(label): \(name) must have non-zero geometry (got \(rect))")
+                    check(abs(rect.midY - headerMidY) <= 4.0, "\(label): \(name) must align on single horizontal header row (midY=\(rect.midY), headerMidY=\(headerMidY))")
+                }
+                check(titleFrame.maxX <= periodFrame.minX + 0.5, "\(label): page-title must not collide with periodSegment (\(titleFrame.maxX) vs \(periodFrame.minX))")
+                check(periodFrame.maxX <= refreshFrame.minX + 0.5, "\(label): periodSegment must not collide with refreshButton (\(periodFrame.maxX) vs \(refreshFrame.minX))")
+                check(refreshFrame.maxX <= exportFrame.minX + 0.5, "\(label): refreshButton must not collide with exportButton (\(refreshFrame.maxX) vs \(exportFrame.minX))")
+                check(exportFrame.maxX <= headerRow.bounds.width + 0.5, "\(label): exportButton must not overflow headerRow width (\(exportFrame.maxX) vs \(headerRow.bounds.width))")
+                if let contextBar = findViewById(page.view, "usage-context-bar") as? NSStackView, !page.contextBarRow.isHidden {
+                    let pillFrame = page.environmentPill.convert(page.environmentPill.bounds, to: contextBar)
+                    let accFrame = page.accountPopup.convert(page.accountPopup.bounds, to: contextBar)
+                    check(pillFrame.maxX <= accFrame.minX + 0.5, "\(label): environmentPill must not collide with accountPopup (\(pillFrame.maxX) vs \(accFrame.minX))")
+                    if !page.shareNoteLabel.isHidden {
+                        let shareFrame = page.shareNoteLabel.convert(page.shareNoteLabel.bounds, to: contextBar)
+                        check(pillFrame.maxX <= shareFrame.minX + 0.5 && shareFrame.maxX <= accFrame.minX + 0.5, "\(label): shareNoteLabel must sit cleanly between environmentPill and accountPopup")
+                    }
+                    check(accFrame.maxX <= contextBar.bounds.width + 0.5, "\(label): accountPopup must not overflow usage-context-bar (\(accFrame.maxX) vs \(contextBar.bounds.width))")
+                    check(accFrame.width <= 210.5, "\(label): accountPopup width must stay within 210pt (got \(accFrame.width))")
+                }
+            }
+
+            // 880pt 最小窗口宽度（扣除最大 210pt 侧边栏 -> 内容区 670pt）下验证中文单行顶栏与上下文栏零挤压/零重叠/零溢出
+            m2Window.setContentSize(NSSize(width: 670, height: 580))
+            m2Window.contentView?.layoutSubtreeIfNeeded()
+            pump()
+            assertCompactSingleLineHeaderLayout(m2Usage, "M2 zh-Hans 880pt-min header")
+
+            // 验证英文模式下 UsagePage 筛选栏与环境占比零中文泄漏，且在 880pt 最小窗口下保持单行顶栏零溢出
             L10n.shared.setLanguage("en", notify: false)
             let m2UsageEn = UsagePage(app: m2Host)
+            m2Window.contentView = m2UsageEn.view
             m2UsageEn.fetch(force: true)
             waitUntil(step: 0.01, description: "M2 English UsagePage fetch") { !m2UsageEn.loading }
-            check(m2UsageEn.tokensDetail.stringValue.contains("Local 64% · SSH 36%"), "M2: English mixed UsagePage must format Local 64% · SSH 36% (got \(m2UsageEn.tokensDetail.stringValue))")
-            check(m2UsageEn.offlineSshBadge.title == "Offline SSH · 1", "M2: English offlineSshBadge must display Offline SSH · 1")
+            m2Window.contentView?.layoutSubtreeIfNeeded()
+            assertCompactSingleLineHeaderLayout(m2UsageEn, "M2 English 880pt-min header (all)")
+            check(m2UsageEn.shareNoteLabel.stringValue.contains("Local 64%") && m2UsageEn.shareNoteLabel.stringValue.contains("SSH 36%"), "M2: English UsagePage shareNoteLabel must show Local 64% · SSH 36% (got \(m2UsageEn.shareNoteLabel.stringValue))")
+            check(!m2UsageEn.tokensDetail.stringValue.contains("Local 64%") && !m2UsageEn.tokensDetail.stringValue.contains("SSH 36%"), "M2: English mixed UsagePage tokensDetail must deduplicate share note (got \(m2UsageEn.tokensDetail.stringValue))")
             let m2EnLeaks = allTextValues(m2UsageEn.view).filter { $0.range(of: "[\\u4E00-\\u9FFF]", options: .regularExpression) != nil }
             check(m2EnLeaks.isEmpty, "M2: English mixed UsagePage must contain zero Chinese characters: \(m2EnLeaks)")
+            m2Window.contentView = m2Usage.view
+            m2Window.setContentSize(NSSize(width: 960, height: 640))
+            m2Window.contentView?.layoutSubtreeIfNeeded()
             L10n.shared.setLanguage("zh-Hans", notify: false)
 
-            // 3. 切换 environmentPopup 到 ssh:demo 与 accountPopup 到 acc-remote，并验证 MenuPanel all+all 缓存零污染
+            // 3. 通过 EnvironmentContextPill 切换到 ssh:demo（高亮态 + 隐藏全部占比）、切回 all、以及 accountPopup 切换与 MenuPanel all+all 缓存零污染
             let allCacheBeforeFilter = m2Host.cachedUsageReportsByPeriod["today"]?["snapshotId"] as? String
-            if let sshIdx = m2Usage.environmentPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "ssh:demo" }) {
-                m2Usage.environmentPopup.selectItem(at: sshIdx)
-                m2Usage.environmentChanged(m2Usage.environmentPopup)
-                pump()
+            if let sshItem = m2Usage.environmentPill.buildMenu().items.first(where: { ($0.representedObject as? String) == "ssh:demo" }),
+               let action = sshItem.action {
+                NSApp.sendAction(action, to: sshItem.target, from: sshItem)
+                waitUntil(step: 0.01, description: "M2 switch pill to ssh:demo") { !m2Usage.loading && m2Usage.totalTokensMetric.stringValue == "3.6K" }
             } else {
-                check(false, "M2: environmentPopup must contain ssh:demo option")
+                check(false, "M2: environmentPill menu must contain ssh:demo")
             }
-            check(m2Usage.selectedEnvironmentId == "ssh:demo" && m2Host.usageSelectedEnvironment == "ssh:demo", "M2: Switching environmentPopup must update selectedEnvironmentId and Assistant.usageSelectedEnvironment")
-            check(summaryRequests.last?["environmentId"] as? String == "ssh:demo", "M2: Switching environmentPopup must dispatch usage_summary with environmentId=ssh:demo")
+            check(m2Usage.selectedEnvironmentId == "ssh:demo" && m2Host.usageSelectedEnvironment == "ssh:demo" && m2Host.usageFilterScope == .remote(environmentId: "ssh:demo"), "M2: Selecting ssh:demo in environmentPill must update selectedEnvironmentId and SSOT usageFilterScope")
+            check(m2Usage.environmentPill.isActive && m2Usage.environmentPill.displayTitle == "demo-ssh-host" && !m2Usage.environmentPill.displayTitle.contains("●") && !m2Usage.environmentPill.displayTitle.contains("%") && m2Usage.environmentPill.triggerButton.itemKind == .ssh && m2Usage.shareNoteLabel.isHidden, "M2: Selecting ssh:demo must activate environmentPill with clean host title, .ssh icon kind, and hide all-env shareNoteLabel")
+            check(summaryRequests.last?["environmentId"] as? String == "ssh:demo", "M2: Selecting ssh:demo must dispatch usage_summary with environmentId=ssh:demo")
             check(m2Usage.totalTokensMetric.stringValue == "3.6K", "M2: Selecting ssh:demo must refresh KPI to SSH-only 3.6K (got \(m2Usage.totalTokensMetric.stringValue))")
             check(!m2Usage.tokensDetail.stringValue.contains("本机 64%"), "M2: Filtered ssh:demo view must not show all-environments share split")
             check(m2Host.cachedUsageReportsByPeriod["today"]?["snapshotId"] as? String == allCacheBeforeFilter, "M2: Filtered ssh:demo query must never overwrite MenuPanel's all+all cachedUsageReportsByPeriod[today]")
 
+            // 切回 all 后再次切回 ssh:demo 继续后续验证
+            if m2Usage.environmentPill.selectItem(id: "all", notify: true) {
+                waitUntil(step: 0.01, description: "M2 reset pill to all") { !m2Usage.loading && m2Usage.selectedEnvironmentId == "all" }
+                check(m2Usage.selectedEnvironmentId == "all" && !m2Usage.environmentPill.isActive && m2Usage.environmentPill.displayTitle == L10n.t("ssh.scope.all", fallback: "全部"), "M2: Selecting all in environmentPill must reset to all with pure title")
+            } else {
+                check(false, "M2: environmentPill selectItem(id: all) must succeed")
+            }
+            if let sshItemAgain = m2Usage.environmentPill.buildMenu().items.first(where: { ($0.representedObject as? String) == "ssh:demo" }),
+               let action = sshItemAgain.action {
+                NSApp.sendAction(action, to: sshItemAgain.target, from: sshItemAgain)
+                waitUntil(step: 0.01, description: "M2 select ssh:demo again") { !m2Usage.loading && m2Usage.selectedEnvironmentId == "ssh:demo" }
+            }
+
             if let accIdx = m2Usage.accountPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "acc-remote" }) {
                 m2Usage.accountPopup.selectItem(at: accIdx)
                 m2Usage.accountChanged(m2Usage.accountPopup)
-                pump()
+                waitUntil(step: 0.01, description: "M2 switch accountPopup to acc-remote") { !m2Usage.loading && summaryRequests.last?["accountId"] as? String == "acc-remote" }
+                check((m2Usage.accountPopup.cell as? DesignPopUpCell)?.isActiveState == true, "M2: accountPopup selecting acc-remote must activate headerPill isActiveState")
             } else {
                 check(false, "M2: accountPopup must contain acc-remote option")
             }
             check(summaryRequests.last?["environmentId"] as? String == "ssh:demo" && summaryRequests.last?["accountId"] as? String == "acc-remote", "M2: Orthogonal account switch must send both environmentId and accountId")
             check(m2Usage.exportButton.isEnabled, "M2: Matching filtered report must keep exportButton enabled")
+
+            // 880pt 最小窗口宽度（英文选中超长环境与超长账号）单行顶栏与底栏零挤压/零溢出验证
+            L10n.shared.setLanguage("en", notify: false)
+            let m2UsageEnLong = UsagePage(app: m2Host)
+            m2Window.contentView = m2UsageEnLong.view
+            m2Window.setContentSize(NSSize(width: 670, height: 580))
+            m2UsageEnLong.fetch(force: true)
+            waitUntil(step: 0.01, description: "M2 English long-selected UsagePage fetch") { !m2UsageEnLong.loading }
+            m2Window.contentView?.layoutSubtreeIfNeeded()
+            assertCompactSingleLineHeaderLayout(m2UsageEnLong, "M2 English 880pt-min header (selected long items)")
+            m2Window.contentView = m2Usage.view
+            m2Window.setContentSize(NSSize(width: 960, height: 640))
+            m2Window.contentView?.layoutSubtreeIfNeeded()
+            L10n.shared.setLanguage("zh-Hans", notify: false)
 
             // 校验 UsageQueryIdentity 错配拦截与 remoteSyncRevision 推进自动重拉
             m2Mode = .mismatchEnv
@@ -4278,7 +4597,7 @@ import Cocoa
             pump()
             check(exportedUsagePayload?["environmentId"] as? String == "ssh:demo" && exportedUsagePayload?["accountId"] as? String == "acc-remote", "M2: UsagePage exportUsage must carry active environmentId and accountId")
 
-            // 4. 打开 UsageLogController：透传过滤参数、验证 UsageEventCard SSH 徽标与账号展示、翻页与多页导出参数透传、快照一致性校验
+            // 4. 打开 UsageLogController：继承用量筛选、验证 UsageEventCard (showStatusDot == false / 混排本机标)、翻页与多页导出参数透传、快照一致性校验
             m2Usage.showLog()
             pump()
             guard let m2Log = m2Usage.logController else {
@@ -4286,7 +4605,10 @@ import Cocoa
                 fatalError("Unreachable")
             }
             check(m2Log.selectedEnvironmentId == "ssh:demo" && m2Log.selectedAccountId == "acc-remote", "M2: UsageLogController must inherit selected environmentId and accountId from UsagePage")
-            check(!m2Log.environmentPopup.isHidden && !m2Log.accountPopup.isHidden, "M2: Mixed SSH UsageLogController must show both environmentPopup and accountPopup")
+            check(!m2Log.environmentPill.isHidden && !m2Log.accountPopup.isHidden, "M2: Mixed SSH UsageLogController must show both environmentPill and accountPopup")
+            check(m2Log.environmentPill.style == .headerPill && m2Log.environmentPill.pillHeight == 26 && m2Log.environmentPill.triggerButton.toolTip == nil, "M2: UsageLogController environmentPill must use .headerPill 26pt style and nil toolTip")
+            let m2LogAccCell = m2Log.accountPopup.cell as? DesignPopUpCell
+            check(m2LogAccCell?.visualStyle == .headerPill && m2LogAccCell?.customHeight == 26 && m2LogAccCell?.fitsSelectedTitleOnly == true && m2LogAccCell?.isActiveState == true, "M2: UsageLogController accountPopup must use .headerPill 26pt with fitsSelectedTitleOnly and active state for acc-remote")
             check(eventRequests.last?["environmentId"] as? String == "ssh:demo" && eventRequests.last?["accountId"] as? String == "acc-remote", "M2: UsageLogController initial usage_events must pass environmentId and accountId")
 
             // 验证多页导出参数透传 (650 条 -> limit 500 翻 2 页: offset 0 与 offset 500)
@@ -4305,9 +4627,9 @@ import Cocoa
             check((exportedLogPayload?["rows"] as? [[String: Any]])?.count == 650, "M2: Exported UsageLog JSON must collect all 650 rows")
 
             // 切到全部环境查看混合事件卡片，并测试下一页参数透传
-            if let allEnvIdx = m2Log.environmentPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "all" }) {
-                m2Log.environmentPopup.selectItem(at: allEnvIdx)
-                m2Log.environmentChanged(m2Log.environmentPopup)
+            if let allEnvItem = m2Log.environmentPill.buildMenu().items.first(where: { ($0.representedObject as? String) == "all" }),
+               let action = allEnvItem.action {
+                NSApp.sendAction(action, to: allEnvItem.target, from: allEnvItem)
                 waitUntil(step: 0.01, description: "M2 UsageLog switch env to all") { !m2Log.loading }
             }
             if let allAccIdx = m2Log.accountPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "all" }) {
@@ -4323,9 +4645,20 @@ import Cocoa
             if let sshCard = m2Log.tableView(m2Log.table, viewFor: nil, row: 0) as? UsageEventCard,
                let localCardInMixed = m2Log.tableView(m2Log.table, viewFor: nil, row: 1) as? UsageEventCard,
                let unattributedSshCard = m2Log.tableView(m2Log.table, viewFor: nil, row: 2) as? UsageEventCard {
-                check(!sshCard.envBadge.isHidden && sshCard.envBadge.title == "SSH · demo-ssh-host", "M2: SSH UsageEventCard must display SSH · demo-ssh-host badge (got \(sshCard.envBadge.title))")
+                func findSshTag(in view: NSView) -> SshHostTagBadge? {
+                    if let tag = view as? SshHostTagBadge { return tag }
+                    for sub in view.subviews {
+                        if let found = findSshTag(in: sub) { return found }
+                    }
+                    return nil
+                }
+                let sshTag = findSshTag(in: sshCard)
+                let localSshTag = findSshTag(in: localCardInMixed)
+                let sshLocalTag = findViewById(sshCard, "usage-event-local-tag")
+                let mixedLocalTag = findViewById(localCardInMixed, "usage-event-local-tag")
+                check(sshTag != nil && sshTag?.isHidden == false && sshTag?.showStatusDot == false && sshTag?.label.stringValue == "demo-ssh-host" && (sshLocalTag == nil || sshLocalTag?.isHidden == true), "M2: SSH UsageEventCard must display SshHostTagBadge(showStatusDot: false) demo-ssh-host without SSH prefix and hide local tag (got \(sshTag?.label.stringValue ?? "nil"))")
                 check(!sshCard.accountLabel.isHidden && sshCard.accountLabel.stringValue == "remote@example.invalid", "M2: SSH UsageEventCard must display account_email (got \(sshCard.accountLabel.stringValue))")
-                check(!localCardInMixed.envBadge.isHidden && localCardInMixed.envBadge.title == "本机", "M2: Mixed-list local UsageEventCard must display 本机 badge")
+                check(mixedLocalTag != nil && mixedLocalTag?.isHidden == false && (localSshTag == nil || localSshTag?.isHidden == true), "M2: Mixed-list local UsageEventCard must display UsageLocalTagBadge and hide SshHostTagBadge")
                 check(!unattributedSshCard.accountLabel.isHidden && unattributedSshCard.accountLabel.stringValue == "未关联账号", "M2: Unattributed SSH UsageEventCard must display 未关联账号")
                 sshCard.frame = NSRect(x: 0, y: 0, width: 640, height: 64)
                 sshCard.layoutSubtreeIfNeeded()
@@ -4337,13 +4670,13 @@ import Cocoa
 
             let pureLocalCard = UsageEventCard(frame: NSRect(x: 0, y: 0, width: 640, height: 64))
             pureLocalCard.configure(["model": "gemini-3.8-flash-n", "timestamp_seconds": 1761544267, "input_tokens": 100, "output_tokens": 20, "cached_tokens": 50, "cache_write_tokens": 0, "environment_kind": "local"], showLocalEnvironmentBadge: false)
-            check(pureLocalCard.envBadge.isHidden && pureLocalCard.accountLabel.isHidden, "M2: Pure-local UsageEventCard without email must hide envBadge and accountLabel")
+            check(pureLocalCard.sshTag.isHidden && (findViewById(pureLocalCard, "usage-event-local-tag")?.isHidden ?? true) && pureLocalCard.accountLabel.isHidden, "M2: Pure-local UsageEventCard without email must hide sshTag, localBadge, and accountLabel")
 
             // 验证 UsageLogController 快照筛选一致性校验（返回环境与当前选中不一致时拦截）
-            if let sshIdx = m2Log.environmentPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "ssh:demo" }) {
+            if let sshItem = m2Log.environmentPill.buildMenu().items.first(where: { ($0.representedObject as? String) == "ssh:demo" }),
+               let action = sshItem.action {
                 eventMismatchEnv = "local"
-                m2Log.environmentPopup.selectItem(at: sshIdx)
-                m2Log.environmentChanged(m2Log.environmentPopup)
+                NSApp.sendAction(action, to: sshItem.target, from: sshItem)
                 pump()
                 check(!m2Log.exportButton.isEnabled && m2Log.rows.isEmpty && m2Log.status.stringValue == L10n.t("usage.error.period_mismatch"), "M2: UsageLogController must reject mismatched returned environmentId")
                 eventMismatchEnv = nil
@@ -4352,22 +4685,18 @@ import Cocoa
             m2Log.closeSheet()
             waitForSheetDetach(on: m2Window, description: "M2 mixed UsageLogController to detach")
 
-            // 5. 切回无 SSH 报表后，filterBarRow 自动重新隐藏
+            // 5. 切回 all 与无 SSH 报表后，首张卡正上方上下文栏自动重新隐藏
             m2Mode = .pureLocal
             if let allAccIdx = m2Usage.accountPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "all" }) {
                 m2Usage.accountPopup.selectItem(at: allAccIdx)
                 m2Usage.accountChanged(m2Usage.accountPopup)
             }
-            if let allEnvIdx = m2Usage.environmentPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "all" }) {
-                m2Usage.environmentPopup.selectItem(at: allEnvIdx)
-                m2Usage.environmentChanged(m2Usage.environmentPopup)
-            }
-            waitUntil(step: 0.01, description: "M2 return to pure-local report") { !m2Usage.loading && m2Usage.filterBarRow.isHidden }
-            check(m2Usage.filterBarRow.isHidden == true, "M2: Returning to pure-local report without SSH must auto-hide filterBarRow again")
-            check(m2Usage.offlineSshBadge.isHidden == true && m2Usage.offlineSshBadge.toolTip == nil, "M2: Returning to pure-local report must hide offlineSshBadge and clear tooltip")
+            m2Usage.applyExternalFilter(environmentId: "all")
+            waitUntil(step: 0.01, description: "M2 return to pure-local report") { !m2Usage.loading && m2Usage.contextBarRow.isHidden }
+            check(m2Usage.contextBarRow.isHidden == true && m2Usage.environmentPill.isHidden == true && m2Usage.shareNoteLabel.isHidden == true && m2Usage.accountPopup.isHidden == true, "M2: Returning to pure-local single-account report must hide contextBarRow, environmentPill, shareNoteLabel, and accountPopup again")
         }
 
-        // UsagePage & UsageLogController: 120Hz segmented env bar (<=4 envs), regular glass popups (>4 envs fallback), unattributed option & zero-record notice
+        // UsagePage & UsageLogController: Token card bottom context chips (<=2 SSH inline, >=3 SSH [+N 台] overflow), fitsSelectedTitleOnly accountPopup, unattributed option & zero-record notice
         do {
             L10n.shared.setLanguage("zh-Hans", notify: false)
             let u3Host = Assistant(state: state.appendingPathComponent("usage-v12-filter-polish"))
@@ -4516,21 +4845,29 @@ import Cocoa
             u3Window.contentView = u3Page.view
             u3Page.view.layoutSubtreeIfNeeded()
             u3Page.update(force: true)
-            waitUntil(step: 0.01, description: "UsagePage v1.2 filter bar initial fetch") { !u3Page.loading && !u3Page.filterBarRow.isHidden }
+            waitUntil(step: 0.01, description: "UsagePage v5 context bar initial fetch") { !u3Page.loading && !u3Page.contextBarRow.isHidden && !u3Page.environmentPill.isHidden && !u3Page.accountPopup.isHidden }
 
-            // 1. <= 4 环境时使用 120Hz DesignSegmentedControl，accountPopup 为 .regular 玻璃控件且包含未关联账号项
-            check(!u3Page.environmentSegment.isHidden && u3Page.environmentPopup.isHidden, "UsagePage with <= 4 environments must display environmentSegment and hide environmentPopup")
-            check(u3Page.environmentSegment.segmentCount == 3, "UsagePage environmentSegment must list All + Local + 1 SSH (got \(u3Page.environmentSegment.segmentCount))")
-            check(u3Page.accountPopup.controlSize == .regular && u3Page.accountPopup.cell is DesignPopUpCell, "UsagePage accountPopup must use .regular size and DesignPopUpCell")
+            // 1. 1 台 SSH 时，首张卡正上方 28pt 上下文栏展示 EnvironmentContextPill 与 [本机 40% · SSH 60%]，accountPopup 为 .headerPill 26pt 轻胶囊（fitsSelectedTitleOnly=true, maxWidth=210, toolTip=nil），彻底移除「未关联账号」选项与提示横幅
+            let u3MenuTitles = u3Page.environmentPill.buildMenu().items.map { $0.attributedTitle?.string ?? $0.title }
+            check(u3MenuTitles.contains { $0.contains("本机") && $0.contains("40%") }, "UsagePage environmentPill menu must include 本机 40%: \(u3MenuTitles)")
+            check(u3MenuTitles.contains { $0.contains("demo-ssh-host") && $0.contains("60%") } && u3MenuTitles.allSatisfy { !$0.contains("SSH:") }, "UsagePage environmentPill menu must list clean hostname demo-ssh-host with 60% without SSH prefix: \(u3MenuTitles)")
+            check(u3Page.environmentPill.style == .headerPill && u3Page.environmentPill.pillHeight == 26 && u3Page.environmentPill.displayTitle == L10n.t("ssh.scope.all", fallback: "全部") && !u3Page.environmentPill.displayTitle.contains("100%"), "UsagePage environmentPill must use .headerPill 26pt and pure 全部 collapsed title")
+            check(u3Page.shareNoteLabel.stringValue.contains("本机 40%") && u3Page.shareNoteLabel.stringValue.contains("SSH 60%"), "UsagePage shareNoteLabel must show 本机 40% · SSH 60% (got \(u3Page.shareNoteLabel.stringValue))")
+            let u3AccCell = u3Page.accountPopup.cell as? DesignPopUpCell
+            check(u3Page.accountPopup.controlSize == .regular && u3AccCell != nil, "UsagePage accountPopup must use .regular size and DesignPopUpCell")
+            check(u3AccCell?.visualStyle == .headerPill && u3AccCell?.customHeight == 26 && u3AccCell?.fitsSelectedTitleOnly == true && u3AccCell?.isActiveState == false && u3Page.accountPopup.toolTip == nil, "UsagePage accountPopup must use .headerPill 26pt DesignPopUpCell with fitsSelectedTitleOnly, inactive default state, and nil toolTip")
+            check(u3Page.accountPopup.constraints.first(where: { $0.identifier == "design-control-height" })?.constant == 26, "UsagePage accountPopup design-control-height constraint must be 26")
+            check(u3Page.accountPopup.constraints.first(where: { $0.identifier == "usage-popup-max-width" })?.constant == 210, "UsagePage accountPopup maxWidth constraint must be 210")
             check(u3Page.accountPopup.subviews.contains { $0 is DesignPopUpHoverOverlay }, "UsagePage accountPopup must attach DesignPopUpHoverOverlay")
-            check(u3Page.accountPopup.itemTitles.contains(L10n.t("usage.account.unattributed")), "UsagePage accountPopup must append unattributed option when unattributedRequests > 0")
+            let u3AccountIds = (u3Page.accountPopup.menu?.items ?? []).compactMap { $0.representedObject as? String }
+            check(u3AccountIds == ["all", "acc-local", "acc-remote"] && !u3Page.accountPopup.itemTitles.contains(L10n.t("usage.account.unattributed")), "UsagePage accountPopup must only include all and real accounts, never unattributed even when unattributedRequests > 0 (got \(u3AccountIds))")
 
-            // 2. 通过 environmentSegment 切到 ssh:demo，并立即中断/切换 accountPopup 到无记录的 acc-local -> 显示 unattributedNoticeBox
-            if let sshSegIdx = u3Page.environmentSegment.labels.firstIndex(where: { $0.contains("demo-ssh-host") }) {
-                u3Page.environmentSegment.selectedSegment = sshSegIdx
-                u3Page.environmentSegmentChanged(u3Page.environmentSegment)
+            // 2. 选中 ssh:demo 并切换 accountPopup 到 acc-local -> 激活态切换正常，且无任何未关联引导提示条
+            if let sshItem = u3Page.environmentPill.buildMenu().items.first(where: { ($0.representedObject as? String) == "ssh:demo" }),
+               let action = sshItem.action {
+                NSApp.sendAction(action, to: sshItem.target, from: sshItem)
             } else {
-                check(false, "UsagePage environmentSegment must contain demo-ssh-host")
+                check(false, "UsagePage environmentPill menu must contain ssh:demo")
             }
             if let localAccIdx = u3Page.accountPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "acc-local" }) {
                 u3Page.accountPopup.selectItem(at: localAccIdx)
@@ -4538,49 +4875,83 @@ import Cocoa
             } else {
                 check(false, "UsagePage accountPopup must contain acc-local")
             }
-            waitUntil(step: 0.01, description: "UsagePage unattributed notice banner") { !u3Page.loading && u3Page.selectedAccountId == "acc-local" }
-            check(u3Page.selectedEnvironmentId == "ssh:demo" && !u3Page.unattributedNoticeBox.isHidden, "UsagePage selecting acc-local with 0 usage under SSH while unattributedRequests > 0 must show unattributedNoticeBox")
+            waitUntil(step: 0.01, description: "UsagePage ssh:demo + acc-local filter") { !u3Page.loading && u3Page.selectedAccountId == "acc-local" && u3Page.selectedEnvironmentId == "ssh:demo" }
+            check((u3Page.accountPopup.cell as? DesignPopUpCell)?.isActiveState == true, "UsagePage accountPopup selecting acc-local must set isActiveState = true")
+            check(!allTextValues(u3Page.view).contains { $0.contains("未关联") }, "UsagePage must not render any unattributed notice banner")
 
-            // 3. 点击「查看未关联」一键切至 unattributed 并隐藏提示横幅
-            u3Page.switchToUnattributedPressed()
-            waitUntil(step: 0.01, description: "UsagePage switch to unattributed") { !u3Page.loading && u3Page.selectedAccountId == "unattributed" }
-            check(summaryCalls.last?["accountId"] as? String == "unattributed", "switchToUnattributedPressed must query usage_summary with accountId=unattributed")
-            check(u3Page.totalTokensMetric.stringValue == "15K" && u3Page.unattributedNoticeBox.isHidden, "Switching to unattributed must display 15K tokens and hide unattributedNoticeBox")
+            // 3. 验证历史遗留 "unattributed" 传入 syncAccountPopup / UsagePage / UsageLogController 时自动归一化回 "all"，且单真实账号 + unattributedRequests > 0 时隐藏 accountPopup
+            let legacyPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+            let normalizedLegacyId = UsageFilterSupport.syncAccountPopup(
+                legacyPopup,
+                accounts: buildAccs(),
+                selectedId: "unattributed",
+                allTitle: L10n.t("usage.account.all")
+            )
+            let legacyCell = legacyPopup.cell as? DesignPopUpCell
+            let legacyPopupIds = (legacyPopup.menu?.items ?? []).compactMap { $0.representedObject as? String }
+            check(normalizedLegacyId == "all" && legacyCell?.visualStyle == .headerPill && legacyCell?.customHeight == 26 && legacyCell?.fitsSelectedTitleOnly == true && legacyCell?.isActiveState == false, "UsageFilterSupport.syncAccountPopup must normalize legacy unattributed to all and configure .headerPill 26pt cell")
+            check(legacyPopupIds == ["all", "acc-local", "acc-remote"] && !legacyPopup.itemTitles.contains(L10n.t("usage.account.unattributed")), "UsageFilterSupport.syncAccountPopup must exclude unattributed item")
 
-            // 4. availability == unavailable 时，即便存在 cachedUnattributedRequests 也不可弹出未关联提示
-            if let localAccIdx = u3Page.accountPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "acc-local" }) {
+            u3Host.usageSelectedAccount = "unattributed"
+            let legacyUsagePage = UsagePage(app: u3Host)
+            check(legacyUsagePage.selectedAccountId == "all" && u3Host.usageSelectedAccount == "all", "UsagePage init must normalize legacy usageSelectedAccount=unattributed back to all")
+            let singleRealPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+            _ = UsageFilterSupport.syncAccountPopup(
+                singleRealPopup,
+                accounts: [
+                    ["id": "all", "email": "全部账号", "label": "全部账号"],
+                    ["id": "acc-local", "email": "local@example.invalid", "label": "local@example.invalid"],
+                    ["id": "unattributed", "email": "未关联账号", "label": "未关联账号"]
+                ],
+                selectedId: "unattributed",
+                allTitle: L10n.t("usage.account.all")
+            )
+            let singleRealIds = (singleRealPopup.menu?.items ?? []).compactMap { $0.representedObject as? String }
+            check(singleRealIds == ["all", "acc-local"], "syncAccountPopup must strip unattributed entries even if supplied in accounts payload (got \(singleRealIds))")
+
+            // 4. availability == unavailable 时仍保持正常不可用态，无任何未关联提示
+            if let allAccIdx = u3Page.accountPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "all" }) {
                 unavailableNoticeCheck = true
-                u3Page.accountPopup.selectItem(at: localAccIdx)
+                u3Page.accountPopup.selectItem(at: allAccIdx)
                 u3Page.accountChanged(u3Page.accountPopup)
                 u3Page.update(force: true)
-                waitUntil(step: 0.01, description: "UsagePage unavailable notice suppression") { !u3Page.loading && u3Page.totalTokensMetric.stringValue == "—" }
-                check(u3Page.unattributedNoticeBox.isHidden, "UsagePage must keep unattributedNoticeBox hidden when availability is unavailable")
+                waitUntil(step: 0.01, description: "UsagePage unavailable state") { !u3Page.loading && u3Page.totalTokensMetric.stringValue == "—" }
                 unavailableNoticeCheck = false
             }
 
-            // 5. > 4 环境时自动回退为 .regular 玻璃 environmentPopup 并隐藏 environmentSegment
+            // 5. >= 3 台 SSH 时：EnvironmentContextPill 分组菜单列出全部 5 台 SSH 主机并支持选中第 4 台激活高亮
             envCountMode = 6
-            u3Page.switchToUnattributedPressed()
-            waitUntil(step: 0.01, description: "UsagePage switch back to unattributed") { !u3Page.loading && u3Page.selectedAccountId == "unattributed" }
-            u3Page.update(force: true)
-            waitUntil(step: 0.01, description: "UsagePage >4 environments popup fallback") { !u3Page.loading && !u3Page.environmentPopup.isHidden }
-            check(u3Page.environmentSegment.isHidden && !u3Page.environmentPopup.isHidden, "UsagePage with > 4 environments must fall back to environmentPopup")
-            check(u3Page.environmentPopup.controlSize == .regular && u3Page.environmentPopup.cell is DesignPopUpCell && u3Page.environmentPopup.subviews.contains { $0 is DesignPopUpHoverOverlay }, "UsagePage environmentPopup fallback must use .regular size, DesignPopUpCell, and hover overlay")
-
-            // 6. 打开 UsageLogController 验证 .regular 尺寸、DesignPopUpCell 与 unattributed 透传
-            u3Page.showLog()
-            pump()
-            guard let u3Log = u3Page.logController else {
-                check(false, "UsagePage.showLog must open UsageLogController")
-                fatalError("Unreachable")
+            u3Page.applyExternalFilter(environmentId: "all")
+            u3Page.fetch(force: true, interruptInFlight: true)
+            waitUntil(step: 0.01, description: "UsagePage >=3 SSH grouped pill") {
+                !u3Page.loading
+                    && u3Page.selectedAccountId == "all"
+                    && u3Page.environmentPill.items.filter { $0.kind == .ssh }.count == 5
             }
-            waitUntil(step: 0.01, description: "UsageLogController v1.2 unattributed fetch") { !u3Log.loading }
-            check(u3Log.environmentPopup.controlSize == .regular && u3Log.accountPopup.controlSize == .regular, "UsageLogController filter popups must use .regular size")
-            check(u3Log.environmentPopup.cell is DesignPopUpCell && u3Log.accountPopup.cell is DesignPopUpCell, "UsageLogController filter popups must use DesignPopUpCell")
-            check(u3Log.selectedAccountId == "unattributed" && u3Log.accountPopup.itemTitles.contains(L10n.t("usage.account.unattributed")), "UsageLogController must inherit and expose unattributed account item")
-            check(eventCalls.last?["accountId"] as? String == "unattributed" && u3Log.rows.count == 1, "UsageLogController must query usage_events with accountId=unattributed and render 1 row")
-            u3Log.closeSheet()
-            waitForSheetDetach(on: u3Window, description: "UsageLogController v1.2 sheet detach")
+            let multiPillMenu = u3Page.environmentPill.buildMenu()
+            let multiPillTitles = multiPillMenu.items.map { $0.attributedTitle?.string ?? $0.title }
+            check(multiPillTitles.contains(L10n.t("ssh.picker.group.online", fallback: "在线 SSH")), "UsagePage >=3 SSH menu must include online section header: \(multiPillTitles)")
+            check((1...5).allSatisfy { idx in multiPillTitles.contains { $0.contains("demo-ssh-\(idx)") } }, "UsagePage >=3 SSH menu must list all 5 SSH hosts cleanly: \(multiPillTitles)")
+            u3Page.applyExternalFilter(environmentId: "ssh:demo4")
+            waitUntil(step: 0.01, description: "UsagePage 4th SSH host selected") {
+                !u3Page.loading && u3Page.selectedEnvironmentId == "ssh:demo4"
+            }
+            check(u3Page.environmentPill.selectedScope == .remote(environmentId: "ssh:demo4") && u3Page.environmentPill.isActive, "UsagePage selecting ssh:demo4 must activate environmentPill with selectedScope == .remote(ssh:demo4)")
+
+            // 6. 打开 UsageLogController 验证 EnvironmentContextPill (.headerPill 26pt) 与 accountPopup (.headerPill 26pt / fitsSelectedTitleOnly)、以及传入历史 "unattributed" 归一化回 "all"
+            let legacyLog = UsageLogController(app: u3Host, period: "today", environmentId: "ssh:demo4", accountId: "unattributed")
+            check(legacyLog.selectedAccountId == "all", "UsageLogController init must normalize legacy accountId=unattributed back to all")
+            let legacyLogAccIds = (legacyLog.accountPopup.menu?.items ?? []).compactMap { $0.representedObject as? String }
+            check(legacyLogAccIds == ["all", "acc-local", "acc-remote"] && !legacyLog.accountPopup.itemTitles.contains(L10n.t("usage.account.unattributed")), "UsageLogController accountPopup must exclude unattributed (got \(legacyLogAccIds))")
+            legacyLog.show(in: u3Window) {}
+            waitUntil(step: 0.01, description: "UsageLogController normalized fetch") { !legacyLog.loading }
+            check(legacyLog.environmentPill.style == .headerPill && legacyLog.environmentPill.pillHeight == 26, "UsageLogController environmentPill must use .headerPill 26pt")
+            let u3LogAccCell = legacyLog.accountPopup.cell as? DesignPopUpCell
+            check(legacyLog.accountPopup.controlSize == .regular && u3LogAccCell?.visualStyle == .headerPill && u3LogAccCell?.customHeight == 26 && u3LogAccCell?.fitsSelectedTitleOnly == true && u3LogAccCell?.isActiveState == false, "UsageLogController accountPopup must use .headerPill 26pt DesignPopUpCell with fitsSelectedTitleOnly and inactive state for all")
+            check(legacyLog.accountPopup.constraints.first(where: { $0.identifier == "design-control-height" })?.constant == 26, "UsageLogController accountPopup design-control-height must be 26")
+            check(eventCalls.last?["accountId"] as? String == "all", "UsageLogController normalized from unattributed must query usage_events with accountId=all")
+            legacyLog.closeSheet()
+            waitForSheetDetach(on: u3Window, description: "UsageLogController normalized sheet detach")
         }
 
         // MenuPanelController Tab 0 (Usage): 条件显隐环境切换栏（无账号选择器、<=3 紧凑分段 / >3 玻璃下拉、396pt 宽度与英文零泄漏、主窗口环境同步）
@@ -4729,57 +5100,78 @@ import Cocoa
             waitUntil(step: 0.01, description: "MenuPanel Tab 0 pure-local fetch") { m4Host.cachedUsageReportsByPeriod["today"] != nil }
             pump()
 
-            // 1. 纯本机模式下隐藏 usageEnvironmentBar（0pt 占位）
-            check(m4Panel.usageEnvironmentBar.isHidden == true, "MenuPanel Tab 0 in pure-local mode must hide usageEnvironmentBar")
+            // 1. 纯本机模式下隐藏 contextPill 与 headerContextDivider，且零静态 tooltip；顶栏固定 424pt 与 [刷新]/[···]
+            let m4PanelWin = makeHeadlessHostWindow(width: MenuPanelController.panelWidth, height: MenuPanelController.defaultPanelHeight)
+            m4PanelWin.contentViewController = m4Panel
+            defer { m4PanelWin.orderOut(nil) }
+            m4PanelWin.contentView?.layoutSubtreeIfNeeded()
+            check(MenuPanelController.panelWidth == 424, "MenuPanelController.panelWidth must be 424pt (got \(MenuPanelController.panelWidth))")
+            check(m4Panel.contextPill.isHidden == true && m4Panel.headerContextDivider.isHidden == true, "MenuPanel Tab 0 in pure-local mode must hide contextPill and headerContextDivider")
+            let baselineRefreshX = m4Panel.headerRefreshButton.frame.minX
+            let baselineMoreX = m4Panel.moreButton.frame.minX
 
-            // 2. 存在 1 台 SSH 时展示紧凑分段条（<=3 项），右方显示占比，总宽严守 <= 396pt 且零静态 tooltip
+            // 2. 存在 1 台长主机名 SSH 时：顶栏 contextPill 宽度 <= 154pt 防裁切、[刷新]/[···] 恒定原位不偏移/不遮挡、占比轻融合到 usageFooterLabel，且零静态 tooltip
             m4Mode = .oneSsh
             m4Host.fetchUsageSummary(period: "today", environmentId: "all", force: true)
-            waitUntil(step: 0.01, description: "MenuPanel Tab 0 one-SSH fetch") { !m4Panel.usageEnvironmentBar.isHidden }
+            waitUntil(step: 0.01, description: "MenuPanel Tab 0 one-SSH fetch") { !m4Panel.contextPill.isHidden }
             m4Panel.view.layoutSubtreeIfNeeded()
-            check(!m4Panel.usageEnvironmentBar.isHidden && !m4Panel.usageEnvironmentSegment.isHidden && m4Panel.usageEnvironmentPopup.isHidden, "MenuPanel Tab 0 with <=3 environments must show usageEnvironmentSegment and hide usageEnvironmentPopup")
-            check(m4Panel.usageEnvironmentSegment.segmentCount == 3, "MenuPanel usageEnvironmentSegment must contain 3 items (All / Local / SSH)")
-            check(m4Panel.usageEnvShareLabel.stringValue == "本机 52% · SSH 48%", "MenuPanel usageEnvShareLabel must show 本机 52% · SSH 48% (got \(m4Panel.usageEnvShareLabel.stringValue))")
-            let contentBudget = MenuPanelController.panelWidth - 28
-            check(m4Panel.usageEnvironmentBar.fittingSize.width <= contentBudget, "MenuPanel usageEnvironmentBar with long SSH host must fit within \(contentBudget)pt (got \(m4Panel.usageEnvironmentBar.fittingSize.width))")
+            check(!m4Panel.contextPill.isHidden && !m4Panel.headerContextDivider.isHidden && !m4Panel.contextPill.isActive, "MenuPanel Tab 0 in default 'all' must show unscoped contextPill and headerContextDivider")
+            check(m4Panel.contextPill.style == .menuHeaderPill && m4Panel.contextPill.pillHeight == 24 && m4Panel.contextPill.displayTitle == L10n.t("ssh.scope.all", fallback: "全部") && !m4Panel.contextPill.displayTitle.contains("100%") && m4Panel.contextPill.triggerButton.itemKind == .all, "MenuPanel contextPill must use .menuHeaderPill 24pt and pure 全部 collapsed title")
+            check(m4Panel.contextPill.frame.width <= 154.5, "MenuPanel contextPill width must stay <= 154pt even with long hostname (got \(m4Panel.contextPill.frame.width))")
+            check(!m4Panel.headerRefreshButton.isHidden && m4Panel.headerRefreshButton.alphaValue == 1.0 && m4Panel.headerRefreshButton.isEnabled && m4Panel.headerRefreshButton.frame.width == 78 && abs(m4Panel.headerRefreshButton.frame.minX - baselineRefreshX) <= 0.5, "MenuPanel headerRefreshButton must stay fixed at 78pt, opaque, and enabled")
+            check(!m4Panel.moreButton.isHidden && m4Panel.moreButton.alphaValue == 1.0 && m4Panel.moreButton.isEnabled && m4Panel.moreButton.frame.width == 28 && abs(m4Panel.moreButton.frame.minX - baselineMoreX) <= 0.5, "MenuPanel moreButton must stay fixed at 28pt, opaque, and enabled")
+            check(m4Panel.contextPill.frame.maxX <= m4Panel.headerRefreshButton.frame.minX + 0.5, "MenuPanel contextPill must not overlap headerRefreshButton")
+            check(m4Panel.usageFooterLabel.stringValue.contains("本机 52% · SSH 48%"), "MenuPanel usageFooterLabel must include 本机 52% · SSH 48% (got \(m4Panel.usageFooterLabel.stringValue))")
+            check(m4Panel.usageScopeLabel.isHidden && m4Panel.usageScopeLabel.stringValue.isEmpty, "MenuPanel normal Tab 0 state must hide duplicate usageScopeLabel line")
+            let longMenuTitles = m4Panel.contextPill.buildMenu().items.map { $0.attributedTitle?.string ?? $0.title }
+            check(longMenuTitles.contains { $0.contains("very-long-remote-dev-hostname-oracle-phx.internal") } && longMenuTitles.allSatisfy { !$0.contains("SSH:") && !$0.contains("SSH ·") }, "MenuPanel contextPill menu must show full clean hostname without SSH prefix: \(longMenuTitles)")
             func viewTreeHasNoTooltip(_ root: NSView) -> Bool {
                 if let tip = root.toolTip, !tip.isEmpty { return false }
                 return root.subviews.allSatisfy(viewTreeHasNoTooltip)
             }
-            check(viewTreeHasNoTooltip(m4Panel.usageEnvironmentSegment), "MenuPanel usageEnvironmentSegment must have zero static tooltips")
+            check(viewTreeHasNoTooltip(m4Panel.contextPill), "MenuPanel contextPill must have zero static tooltips")
 
-            // 3. 切换至 SSH 环境：请求不带 accountId、刷新为 91.2K、持久化 configuration、且不覆盖默认 all 缓存
+            // 3. 切换至 SSH 环境（通过 contextPill.buildMenu() 菜单项动作）：请求不带 accountId、刷新为 91.2K、持久化 configuration、顶栏变为 active 状态、不偏移刷新按钮且不覆盖默认 all 缓存
             let allCacheSnap = m4Host.cachedUsageReportsByPeriod["today"]?["snapshotId"] as? String
-            m4Panel.usageEnvironmentSegment.selectedSegment = 2
-            m4Panel.usageEnvironmentSegmentChanged(m4Panel.usageEnvironmentSegment)
+            if let sshItem = m4Panel.contextPill.buildMenu().items.first(where: { ($0.representedObject as? String) == "ssh:very-long-remote-dev-hostname-oracle-phx.internal" }),
+               let action = sshItem.action {
+                NSApp.sendAction(action, to: sshItem.target, from: sshItem)
+            } else {
+                check(false, "MenuPanel contextPill menu must include ssh:very-long-remote-dev-hostname-oracle-phx.internal")
+                m4Panel.selectUsageEnvironment("ssh:very-long-remote-dev-hostname-oracle-phx.internal", persist: true)
+            }
             waitUntil(step: 0.01, description: "MenuPanel switch to SSH environment") { m4Host.cachedUsageReportsByPeriod["today|env=ssh:very-long-remote-dev-hostname-oracle-phx.internal|acc=all"] != nil && m4Panel.tokensTile.valueLabel.stringValue == "91.2K" }
+            m4Panel.view.layoutSubtreeIfNeeded()
             check(m4SummaryCalls.last?["environmentId"] as? String == "ssh:very-long-remote-dev-hostname-oracle-phx.internal" && m4SummaryCalls.last?["accountId"] == nil, "MenuPanel environment switch must send environmentId without accountId")
             check(m4Host.configuration?.value.menuUsageEnvironmentId == "ssh:very-long-remote-dev-hostname-oracle-phx.internal", "MenuPanel environment switch must persist menuUsageEnvironmentId")
             check(m4Host.cachedUsageReportsByPeriod["today"]?["snapshotId"] as? String == allCacheSnap, "MenuPanel filtered environment fetch must preserve default all cachedUsageReportsByPeriod[today]")
-            check(m4Panel.usageEnvShareLabel.isHidden == true, "MenuPanel viewing specific online SSH env must hide share label")
+            check(m4Panel.contextPill.isActive && m4Panel.contextPill.triggerButton.itemKind == .ssh && !m4Panel.contextPill.displayTitle.contains("●") && m4Panel.contextPill.frame.width <= 154.5, "MenuPanel scoped contextPill must activate with .ssh kind, clean hostname, and cap width <= 154pt (got \(m4Panel.contextPill.frame.width))")
+            check(abs(m4Panel.headerRefreshButton.frame.minX - baselineRefreshX) <= 0.5 && abs(m4Panel.moreButton.frame.minX - baselineMoreX) <= 0.5, "MenuPanel [刷新] and [···] must remain fixed after selecting long SSH host")
+            check(!m4Panel.usageFooterLabel.stringValue.contains("本机 52%"), "MenuPanel viewing specific online SSH env must hide share note from footer")
+            check(m4Panel.usageScopeLabel.isHidden && m4Panel.usageScopeLabel.stringValue.isEmpty, "MenuPanel scoped Tab 0 state must hide duplicate usageScopeLabel line")
 
             // 4. 从菜单栏深链跳转到主窗口用量页时，透传当前选中的环境筛选
             m4Host.openMainWindowFromMenuPanel(tab: 0, usagePeriod: 0, usageEnvironmentId: m4Panel.selectedEnvironmentId)
             pump()
             check(m4Host.currentPage == 2 && m4Host.usagePage?.selectedEnvironmentId == "ssh:very-long-remote-dev-hostname-oracle-phx.internal" && m4Host.usagePage?.selectedAccountId == "all", "openMainWindowFromMenuPanel must carry selectedEnvironmentId to UsagePage")
 
-            // 5. > 3 环境（多台 SSH）自动切换为 .small 玻璃下拉弹出框，选中离线主机显示「离线快照」
+            // 5. > 3 环境（多台 SSH）：contextPill 弹出分组 NSMenu，选中离线主机在页脚显示「离线快照」
             m4Panel.selectUsageEnvironment("all", persist: true)
             m4Mode = .multiSsh
             m4Host.fetchUsageSummary(period: "today", environmentId: "all", force: true)
-            waitUntil(step: 0.01, description: "MenuPanel >3 environments popup fallback") { !m4Panel.usageEnvironmentPopup.isHidden }
-            check(m4Panel.usageEnvironmentSegment.isHidden && !m4Panel.usageEnvironmentPopup.isHidden, "MenuPanel Tab 0 with >3 environments must fall back to usageEnvironmentPopup")
-            check(m4Panel.usageEnvironmentPopup.controlSize == .small && m4Panel.usageEnvironmentPopup.cell is DesignPopUpCell && m4Panel.usageEnvironmentPopup.subviews.contains { $0 is DesignPopUpHoverOverlay }, "MenuPanel usageEnvironmentPopup must use .small size, DesignPopUpCell, and hover overlay")
-            if let offlineIdx = m4Panel.usageEnvironmentPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "ssh:offline-demo" }) {
-                m4Panel.usageEnvironmentPopup.selectItem(at: offlineIdx)
-                m4Panel.usageEnvironmentPopupChanged(m4Panel.usageEnvironmentPopup)
-                waitUntil(step: 0.01, description: "MenuPanel select offline SSH host") { m4Panel.usageEnvShareLabel.stringValue == L10n.t("menu_panel.env.offline_hint") }
-                check(!m4Panel.usageEnvShareLabel.isHidden && m4Panel.usageEnvShareLabel.stringValue == "离线快照", "MenuPanel selecting offline SSH host must display 离线快照 hint")
+            waitUntil(step: 0.01, description: "MenuPanel >3 environments grouped pill menu") { m4Panel.contextPill.buildMenu().items.contains { ($0.representedObject as? String) == "ssh:offline-demo" } }
+            check(!m4Panel.contextPill.isHidden, "MenuPanel Tab 0 with >3 environments must show contextPill")
+            if let offlineItem = m4Panel.contextPill.buildMenu().items.first(where: { ($0.representedObject as? String) == "ssh:offline-demo" }),
+               let action = offlineItem.action {
+                NSApp.sendAction(action, to: offlineItem.target, from: offlineItem)
+                waitUntil(step: 0.01, description: "MenuPanel select offline SSH host") { m4Panel.usageFooterLabel.stringValue.contains(L10n.t("menu_panel.env.offline_hint")) }
+                check(m4Panel.usageFooterLabel.stringValue.contains("离线快照"), "MenuPanel selecting offline SSH host must display 离线快照 in usageFooterLabel (got \(m4Panel.usageFooterLabel.stringValue))")
+                check(m4Panel.usageScopeLabel.isHidden, "MenuPanel offline SSH state must hide duplicate usageScopeLabel line")
             } else {
-                check(false, "MenuPanel usageEnvironmentPopup must include ssh:offline-demo")
+                check(false, "MenuPanel contextPill menu must include ssh:offline-demo")
             }
 
-            // 6. 英文语言验证：无中文泄漏且宽度仍 <= 396pt
+            // 6. 英文语言验证：无中文泄漏且面板内容不溢出
             L10n.shared.setLanguage("en", notify: false)
             m4Panel.selectUsageEnvironment("all", persist: true)
             m4Mode = .oneSsh
@@ -4788,22 +5180,1586 @@ import Cocoa
             _ = m4PanelEn.view
             m4PanelEn.panelWillOpen()
             m4Host.fetchUsageSummary(period: "today", environmentId: "all", force: true)
-            waitUntil(step: 0.01, description: "MenuPanel English one-SSH layout") { m4PanelEn.usageEnvShareLabel.stringValue.contains("Local 52%") }
+            waitUntil(step: 0.01, description: "MenuPanel English one-SSH layout") { m4PanelEn.usageFooterLabel.stringValue.contains("Local 52%") }
             m4PanelEn.view.layoutSubtreeIfNeeded()
-            check(m4PanelEn.usageEnvironmentBar.fittingSize.width <= contentBudget, "English MenuPanel usageEnvironmentBar must fit within \(contentBudget)pt (got \(m4PanelEn.usageEnvironmentBar.fittingSize.width))")
-            let m4EnTexts = allTextValues(m4PanelEn.usageEnvironmentBar) + m4PanelEn.usageEnvironmentSegment.labels
+            let m4EnMenuTitles = m4PanelEn.contextPill.buildMenu().items.map { $0.attributedTitle?.string ?? $0.title }
+            let m4EnTexts = allTextValues(m4PanelEn.view) + m4EnMenuTitles
             let m4EnLeaks = m4EnTexts.filter { $0.range(of: "[\\u4E00-\\u9FFF]", options: .regularExpression) != nil }
-            check(m4EnLeaks.isEmpty, "English MenuPanel usageEnvironmentBar must contain zero Chinese characters: \(m4EnLeaks)")
+            check(m4EnLeaks.isEmpty, "English MenuPanel must contain zero Chinese characters: \(m4EnLeaks)")
 
-            // 7. 恢复中文并验证无 SSH 纯本机回退时自动清回 all 并隐藏 bar
+            // 7. 恢复中文并验证无 SSH 纯本机回退时自动清回 all 并隐藏 contextPill 与竖线
             L10n.shared.setLanguage("zh-Hans", notify: false)
             m4Host.menuPanelController = m4Panel
             m4Panel.selectUsageEnvironment("ssh:offline-demo", persist: true)
             waitUntil(step: 0.01, description: "MenuPanel select stale ssh before fallback") { m4Panel.selectedEnvironmentId == "ssh:offline-demo" }
             m4Mode = .pureLocal
             m4Host.fetchUsageSummary(period: "today", environmentId: "ssh:offline-demo", force: true)
-            waitUntil(step: 0.01, description: "MenuPanel stale SSH auto-fallback to all") { m4Panel.selectedEnvironmentId == "all" && m4Panel.usageEnvironmentBar.isHidden }
-            check(m4Panel.selectedEnvironmentId == "all" && m4Panel.usageEnvironmentBar.isHidden, "MenuPanel must auto-fallback stale SSH selection to all and hide usageEnvironmentBar on pure-local report")
+            waitUntil(step: 0.01, description: "MenuPanel stale SSH auto-fallback to all") { m4Panel.selectedEnvironmentId == "all" && m4Panel.contextPill.isHidden }
+            check(m4Panel.selectedEnvironmentId == "all" && m4Panel.contextPill.isHidden && m4Panel.headerContextDivider.isHidden, "MenuPanel must auto-fallback stale SSH selection to all and hide contextPill and divider on pure-local report")
+            check(viewTreeHasNoTooltip(m4Panel.view), "MenuPanel in pure-local mode must leave zero static tooltips")
+        }
+
+        // Antigravity System Proxy: SystemProxyResolver + ConfigurationStore + PreferencesController UI
+        do {
+            defer {
+                SystemProxyResolver.testSystemProxySettingsOverride = nil
+                SystemProxyResolver.testRunningProxyStateOverride = nil
+                L10n.shared.setLanguage("zh-Hans", notify: false)
+            }
+
+            // 1. SystemProxyResolver parsing & environment generation
+            let httpHttpsRaw: [String: Any] = [
+                kCFNetworkProxiesHTTPEnable as String: 1,
+                kCFNetworkProxiesHTTPProxy as String: "127.0.0.1",
+                kCFNetworkProxiesHTTPPort as String: 7890,
+                kCFNetworkProxiesHTTPSEnable as String: 1,
+                kCFNetworkProxiesHTTPSProxy as String: "127.0.0.1",
+                kCFNetworkProxiesHTTPSPort as String: 7891,
+                kCFNetworkProxiesExceptionsList as String: ["*.local", "169.254/16", "127.0.0.1", "localhost"]
+            ]
+            let snapHttpHttps = SystemProxyResolver.readSystemProxySnapshot(rawSettings: httpHttpsRaw)
+            check(snapHttpHttps.httpUrl == "http://127.0.0.1:7890", "SystemProxyResolver must parse HTTP proxy URL (got \(String(describing: snapHttpHttps.httpUrl)))")
+            check(snapHttpHttps.httpsUrl == "http://127.0.0.1:7891", "SystemProxyResolver must parse HTTPS proxy URL (got \(String(describing: snapHttpHttps.httpsUrl)))")
+            let resSystemActive = SystemProxyResolver.resolve(mode: .system, manualUrl: "", snapshot: snapHttpHttps)
+            if case .active(let httpUrl, let httpsUrl, let noProxy, let displayUrl) = resSystemActive {
+                check(httpUrl == "http://127.0.0.1:7890", "System resolution httpUrl mismatch: \(httpUrl)")
+                check(httpsUrl == "http://127.0.0.1:7891", "System resolution httpsUrl mismatch: \(httpsUrl)")
+                check(!displayUrl.isEmpty, "System resolution displayUrl must not be empty")
+                let noProxyParts = noProxy.split(separator: ",").map { String($0) }
+                check(noProxyParts.prefix(3) == ["127.0.0.1", "localhost", "::1"], "NO_PROXY must always start with mandatory loopback exclusions (got \(noProxy))")
+                check(noProxyParts.contains("*.local") && noProxyParts.contains("169.254/16"), "NO_PROXY must merge macOS ExceptionsList (got \(noProxy))")
+                check(Set(noProxyParts).count == noProxyParts.count, "NO_PROXY must deduplicate entries (got \(noProxy))")
+            } else {
+                check(false, "Expected .active for HTTP+HTTPS system proxy, got \(resSystemActive)")
+            }
+            let launchEnv = SystemProxyResolver.launchEnvironment(for: resSystemActive)
+            check(launchEnv["HTTP_PROXY"] == "http://127.0.0.1:7890" && launchEnv["http_proxy"] == "http://127.0.0.1:7890", "launchEnvironment must set HTTP_PROXY and http_proxy")
+            check(launchEnv["HTTPS_PROXY"] == "http://127.0.0.1:7891" && launchEnv["https_proxy"] == "http://127.0.0.1:7891", "launchEnvironment must set HTTPS_PROXY and https_proxy")
+            check(launchEnv["NO_PROXY"]?.hasPrefix("127.0.0.1,localhost,::1") == true && launchEnv["no_proxy"] == launchEnv["NO_PROXY"], "launchEnvironment must set NO_PROXY and no_proxy with loopback bypass")
+            check(launchEnv["NODE_USE_ENV_PROXY"] == "1", "launchEnvironment must set NODE_USE_ENV_PROXY=1")
+            check(SystemProxyResolver.launchEnvironment(for: .disabled).isEmpty, "Disabled proxy resolution must yield empty launchEnvironment")
+
+            let pacRaw: [String: Any] = [
+                kCFNetworkProxiesProxyAutoConfigEnable as String: 1,
+                kCFNetworkProxiesProxyAutoConfigURLString as String: "http://127.0.0.1:8080/proxy.pac"
+            ]
+            let resPac = SystemProxyResolver.resolve(mode: .system, manualUrl: "", snapshot: SystemProxyResolver.readSystemProxySnapshot(rawSettings: pacRaw))
+            if case .systemUnsupported(.pac(let url)) = resPac {
+                check(url == "http://127.0.0.1:8080/proxy.pac", "PAC unsupported kind must preserve PAC URL")
+            } else {
+                check(false, "Expected .systemUnsupported(.pac), got \(resPac)")
+            }
+            check(SystemProxyResolver.launchEnvironment(for: resPac).isEmpty, "Unsupported PAC resolution must yield empty launchEnvironment")
+
+            let socksRaw: [String: Any] = [
+                kCFNetworkProxiesSOCKSEnable as String: 1,
+                kCFNetworkProxiesSOCKSProxy as String: "127.0.0.1",
+                kCFNetworkProxiesSOCKSPort as String: 1080
+            ]
+            let resSocks = SystemProxyResolver.resolve(mode: .system, manualUrl: "", snapshot: SystemProxyResolver.readSystemProxySnapshot(rawSettings: socksRaw))
+            if case .systemUnsupported(.socksOnly(let url)) = resSocks {
+                check(url.contains("127.0.0.1") && url.contains("1080"), "SOCKS-only unsupported kind must include host/port (got \(url))")
+            } else {
+                check(false, "Expected .systemUnsupported(.socksOnly), got \(resSocks)")
+            }
+
+            let resEmpty = SystemProxyResolver.resolve(mode: .system, manualUrl: "", snapshot: SystemProxyResolver.readSystemProxySnapshot(rawSettings: [:]))
+            check(resEmpty == .systemNotConfigured, "Empty system proxy settings must resolve to .systemNotConfigured (got \(resEmpty))")
+
+            // 2. normalizeManualProxyUrl validation
+            if case .success(let norm1) = SystemProxyResolver.normalizeManualProxyUrl("http://127.0.0.1:7222") {
+                check(norm1 == "http://127.0.0.1:7222", "Valid http URL must normalize cleanly")
+            } else {
+                check(false, "Expected http://127.0.0.1:7222 to succeed")
+            }
+            if case .success(let norm2) = SystemProxyResolver.normalizeManualProxyUrl("  127.0.0.1:7890  ") {
+                check(norm2 == "http://127.0.0.1:7890", "Bare host:port must normalize to http://host:port (got \(norm2))")
+            } else {
+                check(false, "Expected bare 127.0.0.1:7890 to succeed")
+            }
+            if case .success(let norm3) = SystemProxyResolver.normalizeManualProxyUrl("https://proxy.local:8443") {
+                check(norm3 == "https://proxy.local:8443", "Valid https URL must normalize cleanly")
+            } else {
+                check(false, "Expected https://proxy.local:8443 to succeed")
+            }
+            for invalidInput in ["socks5://127.0.0.1:1080", "not a url", "http://127.0.0.1:99999", ""] {
+                if case .success(let unexpected) = SystemProxyResolver.normalizeManualProxyUrl(invalidInput) {
+                    check(false, "Invalid manual proxy '\(invalidInput)' must fail validation (unexpectedly got \(unexpected))")
+                }
+            }
+
+            // 3. ConfigurationStore round-trip persistence
+            let proxyStateDir = state.appendingPathComponent("proxy-config-test", isDirectory: true)
+            try? FileManager.default.removeItem(at: proxyStateDir)
+            let store1 = try ConfigurationStore(state: proxyStateDir)
+            check(store1.value.antigravityProxyMode == "off" && store1.value.antigravityProxyManualUrl == "", "Fresh ConfigurationStore must default proxy mode to off and manualUrl to empty")
+            store1.value.antigravityProxyMode = "manual"
+            store1.value.antigravityProxyManualUrl = "http://127.0.0.1:7890"
+            try store1.save()
+            let store2 = try ConfigurationStore(state: proxyStateDir)
+            check(store2.value.antigravityProxyMode == "manual" && store2.value.antigravityProxyManualUrl == "http://127.0.0.1:7890", "ConfigurationStore must round-trip antigravityProxyMode and antigravityProxyManualUrl")
+
+            // 4. PreferencesController UI controls in zh-Hans & en
+            let proxyUiStateDir = state.appendingPathComponent("proxy-ui-test", isDirectory: true)
+            try? FileManager.default.removeItem(at: proxyUiStateDir)
+            let proxyHost = Assistant(state: proxyUiStateDir)
+            proxyHost.configuration = try ConfigurationStore(state: proxyUiStateDir)
+            proxyHost.configuration.value.navigationVersion = 5
+            proxyHost.configuration.value.appLanguage = "zh-Hans"
+            proxyHost.bridge = BackendBridge(resources: state, state: proxyUiStateDir)
+            proxyHost.reachable = true
+            proxyHost.statusValue = LiveStatus(fixtureStatus)
+            var proxySetCalls: [[String: Any]] = []
+            proxyHost.bridge.fixtureReply = { payload in
+                if (payload["command"] as? String) == "proxy_set" {
+                    proxySetCalls.append(payload)
+                    return ["ok": true]
+                }
+                return ["ok": true]
+            }
+
+            L10n.shared.setLanguage("zh-Hans", notify: false)
+            SystemProxyResolver.testSystemProxySettingsOverride = [:]
+            SystemProxyResolver.testRunningProxyStateOverride = .notRunning
+
+            let prefs = PreferencesController(app: proxyHost)
+            check(prefs.proxyModePopup.numberOfItems == 3, "proxyModePopup must have 3 options (off/system/manual)")
+            check(prefs.proxyModePopup.itemTitles == ["关闭", "跟随系统代理", "手动指定"], "proxyModePopup zh-Hans titles mismatch: \(prefs.proxyModePopup.itemTitles)")
+            check((prefs.proxyModePopup.selectedItem?.representedObject as? String) == "off", "Initial proxyModePopup must select off")
+            check(prefs.proxyManualContainer.isHidden, "proxyManualContainer must be hidden in off mode")
+            check(prefs.proxyRelaunchBtn.isHidden, "proxyRelaunchBtn must be hidden in off mode")
+            check(prefs.proxySubtitleLabel.stringValue.contains("TUN"), "Disabled proxy subtitle must mention no-TUN benefit")
+
+            // Switch to system mode (empty system proxy)
+            prefs.proxyModePopup.selectItem(at: 1)
+            prefs.proxyModeChanged()
+            pump()
+            check(proxyHost.configuration.value.antigravityProxyMode == "system", "Selecting system mode must persist antigravityProxyMode=system")
+            check(proxySetCalls.last?["mode"] as? String == "system", "Selecting system mode must sync proxy_set to backend")
+            check(prefs.proxyManualContainer.isHidden, "proxyManualContainer must remain hidden in system mode")
+            check(prefs.proxyRelaunchBtn.isHidden, "proxyRelaunchBtn must remain hidden when system proxy not configured")
+            check(prefs.proxySubtitleLabel.stringValue.contains("未检测到"), "Empty system proxy must show not-configured hint")
+
+            // PAC unsupported state
+            SystemProxyResolver.testSystemProxySettingsOverride = pacRaw
+            prefs.update()
+            check(prefs.proxyRelaunchBtn.isHidden && prefs.proxySubtitleLabel.stringValue.contains("PAC"), "PAC state must explain Go backend PAC limitation and hide relaunch button")
+
+            // SOCKS-only unsupported state
+            SystemProxyResolver.testSystemProxySettingsOverride = socksRaw
+            prefs.update()
+            check(prefs.proxyRelaunchBtn.isHidden && prefs.proxySubtitleLabel.stringValue.contains("SOCKS5"), "SOCKS-only state must explain SOCKS5 limitation and hide relaunch button")
+
+            // Active system proxy + notRunning / matched / missing / mismatch / overriddenByShell
+            SystemProxyResolver.testSystemProxySettingsOverride = httpHttpsRaw
+            SystemProxyResolver.testRunningProxyStateOverride = .notRunning
+            prefs.update()
+            check(prefs.proxyRelaunchBtn.isHidden && prefs.proxySubtitleLabel.stringValue.contains("下次通过 GravityBox 启动生效"), "Active + notRunning must show next-launch subtitle and hide relaunch button")
+
+            SystemProxyResolver.testRunningProxyStateOverride = .matched(activeUrl: "http://127.0.0.1:7891")
+            prefs.update()
+            check(prefs.proxyRelaunchBtn.isHidden && prefs.proxySubtitleLabel.stringValue.contains("当前生效") && prefs.proxySubtitleLabel.stringValue.contains("7891"), "Active + matched must show active URL and hide relaunch button")
+
+            SystemProxyResolver.testRunningProxyStateOverride = .missing
+            prefs.update()
+            check(!prefs.proxyRelaunchBtn.isHidden && prefs.proxyRelaunchBtn.title == "安全重启生效", "Active + missing must show proxyRelaunchBtn")
+            check(prefs.proxySubtitleLabel.stringValue.contains("未加载代理"), "Active + missing must show missing proxy prompt")
+
+            SystemProxyResolver.testRunningProxyStateOverride = .mismatch(actualUrl: "http://127.0.0.1:1087", expectedUrl: "http://127.0.0.1:7891")
+            prefs.update()
+            check(!prefs.proxyRelaunchBtn.isHidden, "Active + mismatch must show proxyRelaunchBtn")
+            check(prefs.proxySubtitleLabel.stringValue.contains("7891") && prefs.proxySubtitleLabel.stringValue.contains("1087"), "Active + mismatch must show expected and actual URLs")
+
+            SystemProxyResolver.testRunningProxyStateOverride = .overriddenByShell(lsActualUrl: "http://127.0.0.1:9999", appInjectedUrl: "http://127.0.0.1:7891", expectedUrl: "http://127.0.0.1:7891")
+            prefs.update()
+            check(prefs.proxyRelaunchBtn.isHidden, "Active + overriddenByShell must hide proxyRelaunchBtn")
+            check(prefs.proxySubtitleLabel.stringValue.contains("Shell") && prefs.proxySubtitleLabel.stringValue.contains("9999"), "Active + overriddenByShell must explain shell override")
+
+            // Switch to manual mode (empty field -> shows manual input container without snapping back)
+            prefs.proxyModePopup.selectItem(at: 2)
+            prefs.proxyModeChanged()
+            check(!prefs.proxyManualContainer.isHidden, "Selecting manual mode must reveal proxyManualContainer")
+            check((prefs.proxyModePopup.selectedItem?.representedObject as? String) == "manual", "proxyModePopup must stay on manual while entering URL")
+
+            // Invalid manual URL shows error and keeps manual container visible
+            prefs.proxyManualField.stringValue = "socks5://127.0.0.1:1080"
+            prefs.applyManualProxy()
+            check(!prefs.proxyManualContainer.isHidden, "Invalid manual URL must keep proxyManualContainer visible")
+            check(proxyHost.configuration.value.antigravityProxyMode == "system", "Invalid manual URL must not overwrite persisted proxy mode")
+            check(!prefs.proxySubtitleLabel.stringValue.isEmpty, "Invalid manual URL must display validation error")
+
+            // Valid manual URL normalizes, persists, syncs backend, and updates UI
+            SystemProxyResolver.testRunningProxyStateOverride = .missing
+            prefs.proxyManualField.stringValue = "127.0.0.1:7890"
+            prefs.applyManualProxy()
+            pump()
+            check(proxyHost.configuration.value.antigravityProxyMode == "manual", "Valid manual URL must persist manual mode")
+            check(proxyHost.configuration.value.antigravityProxyManualUrl == "http://127.0.0.1:7890", "Valid bare manual URL must persist normalized http:// URL")
+            check(prefs.proxyManualField.stringValue == "http://127.0.0.1:7890", "proxyManualField must reflect normalized URL")
+            check(proxySetCalls.last?["mode"] as? String == "manual" && proxySetCalls.last?["manualUrl"] as? String == "http://127.0.0.1:7890", "Applying manual proxy must sync proxy_set to backend")
+            check(!prefs.proxyManualContainer.isHidden && !prefs.proxyRelaunchBtn.isHidden, "Manual mode + missing running state must show both manual input and relaunch button")
+
+            // Switch back to off hides manual container & relaunch button
+            prefs.proxyModePopup.selectItem(at: 0)
+            prefs.proxyModeChanged()
+            pump()
+            check(prefs.proxyManualContainer.isHidden && prefs.proxyRelaunchBtn.isHidden, "Switching back to off must hide manual container and relaunch button")
+            check(proxySetCalls.last?["mode"] as? String == "off", "Switching back to off must sync proxy_set mode=off")
+
+            // English locale verification across states (zero Han leakage)
+            L10n.shared.setLanguage("en", notify: false)
+            let enPrefs = PreferencesController(app: proxyHost)
+            check(enPrefs.proxyModePopup.itemTitles == ["Off", "Follow System Proxy", "Manual Proxy"], "English proxyModePopup titles mismatch: \(enPrefs.proxyModePopup.itemTitles)")
+            check(enPrefs.proxyManualApplyBtn.title == "Apply", "English apply button title mismatch")
+            check(enPrefs.proxyRelaunchBtn.title == "Relaunch to Apply", "English relaunch button title mismatch")
+            let hanRegex = "[\\u4E00-\\u9FFF]"
+            func assertNoHan(_ text: String, _ context: String) {
+                check(text.range(of: hanRegex, options: .regularExpression) == nil, "English \(context) leaked Chinese characters: \(text)")
+            }
+            assertNoHan(enPrefs.proxySubtitleLabel.stringValue, "disabled subtitle")
+            enPrefs.proxyModePopup.selectItem(at: 1)
+            enPrefs.proxyModeChanged()
+            for (label, rawMap, runState): (String, [String: Any], RunningAntigravityProxyState) in [
+                ("systemNotConfigured", [:], .notRunning),
+                ("pac", pacRaw, .notRunning),
+                ("socksOnly", socksRaw, .notRunning),
+                ("notRunning", httpHttpsRaw, .notRunning),
+                ("matched", httpHttpsRaw, .matched(activeUrl: "http://127.0.0.1:7891")),
+                ("missing", httpHttpsRaw, .missing),
+                ("mismatch", httpHttpsRaw, .mismatch(actualUrl: "http://127.0.0.1:1087", expectedUrl: "http://127.0.0.1:7891")),
+                ("overriddenByShell", httpHttpsRaw, .overriddenByShell(lsActualUrl: "http://127.0.0.1:9999", appInjectedUrl: "http://127.0.0.1:7891", expectedUrl: "http://127.0.0.1:7891"))
+            ] {
+                SystemProxyResolver.testSystemProxySettingsOverride = rawMap
+                SystemProxyResolver.testRunningProxyStateOverride = runState
+                enPrefs.update()
+                assertNoHan(enPrefs.proxySubtitleLabel.stringValue, "state=\(label)")
+            }
+            check(enPrefs.proxyRelaunchBtn.isHidden, "English overriddenByShell must hide relaunch button")
+            enPrefs.proxyModePopup.selectItem(at: 2)
+            enPrefs.proxyModeChanged()
+            assertNoHan(enPrefs.proxySubtitleLabel.stringValue, "manual prompt")
+            enPrefs.proxyManualField.stringValue = "socks5://127.0.0.1:1080"
+            enPrefs.applyManualProxy()
+            assertNoHan(enPrefs.proxySubtitleLabel.stringValue, "invalid manual error")
+
+            // Startup automation switch: default off, legacy compatibility, persistence, zh-Hans & en copy
+            let lifecycleCfgState = state.appendingPathComponent("lifecycle-prefs-state")
+            try FileManager.default.createDirectory(at: lifecycleCfgState, withIntermediateDirectories: true)
+            let legacyConfigJSON = #"{"schema":2,"syncAntigravityLifecycle":true}"#
+            try legacyConfigJSON.write(to: lifecycleCfgState.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+            let lifecycleHost = Assistant(state: lifecycleCfgState)
+            lifecycleHost.configuration = try ConfigurationStore(state: lifecycleCfgState)
+            check(
+                lifecycleHost.configuration.value.launchAntigravityOnStart == false,
+                "launchAntigravityOnStart must default to false even when legacy syncAntigravityLifecycle was true"
+            )
+            L10n.shared.setLanguage("zh-Hans", notify: false)
+            let lifecyclePrefsZh = PreferencesController(app: lifecycleHost)
+            check(lifecyclePrefsZh.launchAntigravityOnStartSwitch.state == .off, "launchAntigravityOnStartSwitch must initialize to .off")
+            let zhPrefTexts = allTextValues(lifecyclePrefsZh.view)
+            check(
+                zhPrefTexts.contains("启动时自动打开 Antigravity") &&
+                !zhPrefTexts.contains("原生冷启动自动开启调试端口"),
+                "Preferences must show startup launch title and omit removed native cold-launch switch"
+            )
+            lifecyclePrefsZh.launchAntigravityOnStartSwitch.state = .on
+            lifecyclePrefsZh.toggleLaunchAntigravityOnStart()
+            let reloadedLifecycleCfg = try ConfigurationStore(state: lifecycleCfgState)
+            check(
+                reloadedLifecycleCfg.value.launchAntigravityOnStart == true,
+                "Toggling launchAntigravityOnStartSwitch must persist launchAntigravityOnStart"
+            )
+            L10n.shared.setLanguage("en", notify: false)
+            let lifecyclePrefsEn = PreferencesController(app: lifecycleHost)
+            let enPrefTexts = allTextValues(lifecyclePrefsEn.view)
+            check(
+                enPrefTexts.contains("Auto-Open Antigravity on Launch") &&
+                !enPrefTexts.contains("Auto-Enable Debug Port on Native Launch"),
+                "English Preferences must display localized startup launch title and omit removed switch"
+            )
+            L10n.shared.setLanguage("zh-Hans", notify: false)
+        }
+
+        // Wave 1-2 SSH 全端适配契约测试（多窗口去重、picker 0/1/2 自适应、总览伴生条、账号占用/只读区/并发刷新、切号共享提示、菜单栏微标/跟随焦点/Tab2跳转）
+        do {
+            L10n.shared.setLanguage("zh-Hans", notify: false)
+            defer { L10n.shared.setLanguage("zh-Hans", notify: false) }
+            let nowTs = Date().timeIntervalSince1970
+
+            func collectViews<T: NSView>(_ root: NSView, as type: T.Type) -> [T] {
+                var out: [T] = []
+                if let match = root as? T { out.append(match) }
+                for sub in root.subviews { out.append(contentsOf: collectViews(sub, as: type)) }
+                return out
+            }
+            func firstEmptyTooltipViolation(_ v: NSView) -> String? {
+                if let tip = v.toolTip, !tip.isEmpty { return "\(type(of: v)): \(tip)" }
+                for sub in v.subviews {
+                    if let found = firstEmptyTooltipViolation(sub) { return found }
+                }
+                return nil
+            }
+            func makeSshSession(
+                remoteKey: String,
+                envId: String,
+                hostLabel: String,
+                state: String,
+                email: String,
+                name: String = "",
+                tier: String = "PRO",
+                matchedLocalAccountId: String? = nil,
+                lastFocusedAt: Double = 100,
+                observedAt: Double = 1000,
+                windowCount: Int? = nil,
+                lastError: String = "",
+                geminiPct: Double? = 88.0
+            ) -> [String: Any] {
+                var groups: [[String: Any]] = []
+                if let geminiPct {
+                    groups.append([
+                        "key": "gemini",
+                        "displayName": "Gemini",
+                        "summaryLabel": "Gemini",
+                        "brands": ["gemini"],
+                        "isStandalone": false,
+                        "availability": "available",
+                        "quotaState": "known",
+                        "windows": [
+                            ["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": geminiPct / 100.0, "stale": false, "resetCountdown": "3 小时后重置"],
+                            ["id": "weekly", "period": "weekly", "label": "每周", "known": true, "remaining": 0.85, "stale": false, "resetCountdown": "5 天后重置"]
+                        ]
+                    ])
+                }
+                var row: [String: Any] = [
+                    "remoteKey": remoteKey,
+                    "environmentId": envId,
+                    "hostLabel": hostLabel,
+                    "state": state,
+                    "email": email,
+                    "name": name,
+                    "subscription_tier": tier,
+                    "matchedLocalAccountId": matchedLocalAccountId ?? NSNull(),
+                    "lastFocusedAt": lastFocusedAt,
+                    "observedAt": observedAt,
+                    "quotaLastUpdated": nowTs,
+                    "lastError": lastError,
+                    "quotaGroups": groups
+                ]
+                if let windowCount {
+                    row["windowCount"] = windowCount
+                }
+                return row
+            }
+
+            // 1. SshEnvironmentResolver 契约：同主机多窗口去重与窗口数累加、大小写无关匹配、未纳管宿主分离、同号判断
+            let resolverSessions: [[String: Any]] = [
+                makeSshSession(remoteKey: "rk-alpha-1", envId: "host:alpha", hostLabel: "alpha-gpu", state: "offline_recent", email: "old@example.invalid", lastFocusedAt: 500, observedAt: 5000),
+                makeSshSession(remoteKey: "rk-alpha-2", envId: "host:alpha", hostLabel: "alpha-gpu", state: "connected", email: "Alice@Example.INVALID", lastFocusedAt: 200, observedAt: 2000),
+                makeSshSession(remoteKey: "rk-alpha-3", envId: "host:alpha", hostLabel: "alpha-gpu", state: "connected", email: "Alice@Example.INVALID", lastFocusedAt: 400, observedAt: 4000),
+                makeSshSession(remoteKey: "rk-beta", envId: "host:beta", hostLabel: "beta-box", state: "auth_expired", email: "unmanaged@example.invalid", lastFocusedAt: 900, observedAt: 9000),
+                makeSshSession(remoteKey: "rk-gamma", envId: "host:gamma", hostLabel: "gamma-hist", state: "historical_only", email: "hist@example.invalid", lastFocusedAt: 999, observedAt: 9999)
+            ]
+            let aggregated = SshEnvironmentResolver.aggregateHosts(from: resolverSessions) { row in
+                (row["environmentId"] as? String) ?? ""
+            }
+            check(aggregated.count == 3, "SshEnvironmentResolver.aggregateHosts must deduplicate same-environmentId windows (got \(aggregated.count))")
+            check(aggregated[0].environmentId == "host:alpha" && aggregated[0].windowCount == 2 && aggregated[0].primaryRemoteKey == "rk-alpha-3", "aggregateHosts must rank online host first, win by lastFocusedAt, and sum active windowCount (got id=\(aggregated[0].environmentId), win=\(aggregated[0].windowCount), key=\(aggregated[0].primaryRemoteKey))")
+            check(aggregated[1].environmentId == "host:beta" && aggregated[1].state == .authExpired, "aggregateHosts must rank authExpired before historicalOnly")
+            check(aggregated[2].environmentId == "host:gamma" && aggregated[2].state == .historicalOnly && aggregated[2].windowCount == 0, "aggregateHosts historicalOnly must have 0 active windows")
+
+            let localAccs: [[String: Any]] = [
+                ["id": "acc-alice", "email": "alice@example.invalid"],
+                ["id": "acc-bob", "email": "bob@example.invalid"]
+            ]
+            let matchedAlice = SshEnvironmentResolver.matchingHosts(forAccount: localAccs[0], hosts: aggregated)
+            check(matchedAlice.count == 1 && matchedAlice[0].environmentId == "host:alpha", "matchingHosts must match email case-insensitively")
+            let idOnlyMatch = SshEnvironmentResolver.matchingHosts(forAccount: ["id": "acc-id-match", "email": "other@example.invalid"], hosts: [
+                SshEnvironmentResolver.aggregateHosts(from: [
+                    makeSshSession(remoteKey: "rk-id", envId: "host:id", hostLabel: "id-box", state: "connected", email: "diff@example.invalid", matchedLocalAccountId: "acc-id-match")
+                ]) { ($0["environmentId"] as? String) ?? "" }[0]
+            ])
+            check(idOnlyMatch.count == 1, "matchingHosts must match via matchedLocalAccountId")
+            let unmanaged = SshEnvironmentResolver.unmanagedHosts(accounts: localAccs, hosts: aggregated)
+            check(unmanaged.count == 1 && unmanaged[0].environmentId == "host:beta", "unmanagedHosts must exclude matched local accounts and historicalOnly hosts (got \(unmanaged.map(\.environmentId)))")
+            check(SshEnvironmentResolver.isSameAccountAsLocal(host: aggregated[0], localEmail: "alice@example.invalid") == true, "isSameAccountAsLocal must compare case-insensitively")
+            check(SshEnvironmentResolver.isSameAccountAsLocal(host: aggregated[1], localEmail: "alice@example.invalid") == false, "isSameAccountAsLocal must return false for different email")
+            check(SshEnvironmentResolver.isSameAccountAsLocal(host: aggregated[1], localEmail: "") == nil, "isSameAccountAsLocal must return nil when localEmail is empty")
+
+            // 1.5 SshTerminalIcon 缓存一致性 & DesignPopUpCell.fitsSelectedTitleOnly 宽度契约
+            let icon12a = SshTerminalIcon.image(pointSize: 12.5)
+            let icon12b = SshTerminalIcon.image(pointSize: 12.5)
+            let icon12Rounded = SshTerminalIcon.image(pointSize: 12.4)
+            let icon16 = SshTerminalIcon.image(pointSize: 16.0)
+            check(icon12a === icon12b && icon12a === icon12Rounded, "SshTerminalIcon.image(pointSize:) must return cached identical NSImage instance for matching 0.5pt keys")
+            check(icon12a !== icon16 && icon12a.isTemplate && icon16.isTemplate, "SshTerminalIcon.image(pointSize:) must cache distinct template instances across pointSizes")
+
+            let fitPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+            fitPopup.addItems(withTitles: [
+                "本机",
+                "very-long-remote-cluster-hostname-01.us-west.internal.example.com"
+            ])
+            fitPopup.selectItem(at: 0)
+            Design.applyControls(fitPopup)
+            let fullAllOptionsWidth = Design.fittedPopUpWidth(fitPopup)
+            if let fitCell = fitPopup.cell as? DesignPopUpCell {
+                fitCell.fitsSelectedTitleOnly = true
+                let selectedOnlyNoIconWidth = Design.fittedPopUpWidth(fitPopup)
+                let cellSizeNoIcon = fitCell.cellSize(forBounds: NSRect(x: 0, y: 0, width: 400, height: 28))
+                check(selectedOnlyNoIconWidth < fullAllOptionsWidth - 120, "DesignPopUpCell.fitsSelectedTitleOnly must yield significantly narrower fitted width than longest option (got selected=\(selectedOnlyNoIconWidth), full=\(fullAllOptionsWidth))")
+                check(cellSizeNoIcon.width < fullAllOptionsWidth - 120, "DesignPopUpCell.cellSize(forBounds:) must also shrink to selected title when fitsSelectedTitleOnly is true (got \(cellSizeNoIcon.width))")
+                fitCell.leadingImage = icon12a
+                let selectedOnlyWithIconWidth = Design.fittedPopUpWidth(fitPopup)
+                let cellSizeWithIcon = fitCell.cellSize(forBounds: NSRect(x: 0, y: 0, width: 400, height: 28))
+                check(selectedOnlyWithIconWidth >= selectedOnlyNoIconWidth, "Design.fittedPopUpWidth must account for leadingImage width")
+                check(cellSizeWithIcon.width >= cellSizeNoIcon.width, "DesignPopUpCell.cellSize must account for leadingImage width")
+            } else {
+                check(false, "Design.applyControls must install DesignPopUpCell on fitPopup")
+            }
+
+            // 2. EnvironmentPickerControl 0 / 1 / 2 台主机自适应切换与分组菜单
+            let picker = EnvironmentPickerControl(includeAll: true, compact: true, maxSegmentedRemoteCount: 1, maxSegmentedWidth: 320)
+            picker.frame = NSRect(x: 0, y: 0, width: 320, height: 28)
+            var pickerSelected: [String] = []
+            picker.onSelect = { pickerSelected.append($0) }
+            picker.update(options: [
+                .init(id: "all", hostLabel: "总计", kind: .all),
+                .init(id: "local", hostLabel: "本机", kind: .local)
+            ], selectedId: "all")
+            check(picker.isHidden == true, "EnvironmentPickerControl with 0 SSH hosts must be hidden")
+
+            picker.update(options: [
+                .init(id: "all", hostLabel: "总计", kind: .all),
+                .init(id: "local", hostLabel: "本机", kind: .local),
+                .init(id: "host:alpha", hostLabel: "alpha-gpu", kind: .ssh, state: .online, windowCount: 2)
+            ], selectedId: "all")
+            check(!picker.isHidden && !picker.isUsingPopUp && !picker.segmentedControl.isHidden && picker.popUpButton.isHidden, "EnvironmentPickerControl with 1 SSH host must use segmentedControl")
+            check(picker.segmentedControl.segmentCount == 3, "EnvironmentPickerControl 1-host segmentedControl must have 3 segments")
+
+            picker.update(options: [
+                .init(id: "all", hostLabel: "总计", kind: .all),
+                .init(id: "local", hostLabel: "本机", kind: .local),
+                .init(id: "host:alpha", hostLabel: "alpha-gpu", kind: .ssh, state: .online, windowCount: 2),
+                .init(id: "host:beta", hostLabel: "beta-box", kind: .ssh, state: .offlineRecent, windowCount: 0)
+            ], selectedId: "host:alpha")
+            check(!picker.isHidden && picker.isUsingPopUp && picker.segmentedControl.isHidden && !picker.popUpButton.isHidden, "EnvironmentPickerControl with >=2 SSH hosts must auto-switch to grouped popUpButton")
+            let popupTitles = picker.popUpButton.menu?.items.map(\.title) ?? []
+            check(popupTitles.contains(L10n.t("ssh.picker.group.online", fallback: "在线 SSH")) && popupTitles.contains(L10n.t("ssh.picker.group.offline", fallback: "离线 / 历史 SSH")), "Grouped popUpButton must render online and offline section headers: \(popupTitles)")
+            check(popupTitles.contains { $0.contains("alpha-gpu") && $0.contains("(2)") }, "Grouped popUpButton must show multi-window count for alpha-gpu: \(popupTitles)")
+            picker.popUpButton.selectItem(at: 0)
+            if let action = picker.popUpButton.action {
+                NSApp.sendAction(action, to: picker.popUpButton.target, from: picker.popUpButton)
+            }
+            check(pickerSelected.last == "all", "EnvironmentPickerControl popUp selection must invoke onSelect")
+
+            // 2.5 EnvironmentContextPill, EnvironmentScope, SshEnvironmentVisuals, SshHostTagBadge(showStatusDot:), QuotaFreshness, and fuseAccountQuota contracts
+            let ctxPill = EnvironmentContextPill(compact: true, minWidth: 72, maxWidth: 154, height: 24)
+            var pillSelectedScopes: [EnvironmentScope] = []
+            ctxPill.onSelectScope = { pillSelectedScopes.append($0) }
+            ctxPill.update(items: [
+                .init(scope: .all, hostLabel: "全部"),
+                .init(scope: .local, hostLabel: "本机")
+            ], selectedScope: .all)
+            check(ctxPill.isHidden == true, "EnvironmentContextPill with 0 SSH items must be hidden")
+
+            ctxPill.update(items: [
+                .init(scope: .all, hostLabel: "全部"),
+                .init(scope: .local, hostLabel: "本机"),
+                .init(scope: .remote(environmentId: "ssh:very-long-cluster"), hostLabel: "SSH: very-long-cluster-hostname.us-west.internal.example.com", state: .online, windowCount: 2, email: "alice@example.invalid", secondaryText: "36%")
+            ], selectedScope: .remote(environmentId: "ssh:very-long-cluster"))
+            check(!ctxPill.isHidden && ctxPill.isActive && ctxPill.selectedScope == .remote(environmentId: "ssh:very-long-cluster"), "EnvironmentContextPill with SSH item must be visible and active")
+            check(ctxPill.intrinsicContentSize.width <= 154.0, "EnvironmentContextPill intrinsic width must cap at maxWidth 154pt (got \(ctxPill.intrinsicContentSize.width))")
+            let ctxMenuTitles = ctxPill.buildMenu().items.map { $0.attributedTitle?.string ?? $0.title }
+            check(ctxMenuTitles.contains { $0.contains("very-long-cluster-hostname.us-west.internal.example.com") && $0.contains("36%") } && ctxMenuTitles.allSatisfy { !$0.contains("SSH:") }, "EnvironmentContextPill menu must strip SSH prefix and preserve full clean hostname + secondaryText: \(ctxMenuTitles)")
+
+            check(SshEnvironmentVisuals.statusDotChar(for: .online) == "●" && SshEnvironmentVisuals.isStatusDotFilled(for: .online), "online state dot must be filled ●")
+            check(SshEnvironmentVisuals.statusDotChar(for: .authExpired) == "●" && SshEnvironmentVisuals.isStatusDotFilled(for: .authExpired), "authExpired state dot must be filled ●")
+            check(SshEnvironmentVisuals.statusDotChar(for: .offlineRecent) == "○" && !SshEnvironmentVisuals.isStatusDotFilled(for: .offlineRecent), "offlineRecent state dot must be hollow ○")
+            check(SshEnvironmentVisuals.statusDotChar(for: .historicalOnly) == "○" && !SshEnvironmentVisuals.isStatusDotFilled(for: .historicalOnly), "historicalOnly state dot must be hollow ○")
+
+            let tagWithDot = SshHostTagBadge(hostLabel: "SSH: alpha-node", state: .offlineRecent, showStatusDot: true)
+            let tagWithoutDot = SshHostTagBadge(hostLabel: "SSH · alpha-node", state: .offlineRecent, scale: .compact, showStatusDot: false)
+            check(tagWithDot.hostLabel == "alpha-node" && tagWithoutDot.hostLabel == "alpha-node", "SshHostTagBadge must strip SSH prefix")
+            check(tagWithoutDot.showStatusDot == false && tagWithoutDot.intrinsicContentSize.width < tagWithDot.intrinsicContentSize.width, "SshHostTagBadge(showStatusDot: false) must omit dot width for historical rows")
+
+            // 3. DashboardPage + AccountsPage + AssistantAccountUsage + MenuPanelController 集成契约
+            let w3State = state.appendingPathComponent("wave3-ssh-contracts", isDirectory: true)
+            try? FileManager.default.removeItem(at: w3State)
+            let w3Host = Assistant(state: w3State)
+            w3Host.configuration = try ConfigurationStore(state: w3State)
+            w3Host.bridge = BackendBridge(resources: state, state: w3State)
+            w3Host.reachable = true
+            let w3Accounts: [[String: Any]] = [
+                [
+                    "id": "acc-a", "name": "Alice", "email": "alice@example.invalid", "subscription_tier": "PRO", "revision": "r-a",
+                    "quota": ["last_updated": nowTs - 3600],
+                    "quotaGroups": [["key": "gemini", "displayName": "Gemini", "summaryLabel": "Gemini", "brands": ["gemini"], "isStandalone": false, "availability": "available", "quotaState": "known", "windows": [["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.35, "stale": false, "resetCountdown": "4 小时后重置"]]]]
+                ],
+                [
+                    "id": "acc-b", "name": "Bob", "email": "bob@example.invalid", "subscription_tier": "PRO", "revision": "r-b",
+                    "quota": ["last_updated": nowTs],
+                    "quotaGroups": [["key": "gemini", "displayName": "Gemini", "summaryLabel": "Gemini", "brands": ["gemini"], "isStandalone": false, "availability": "available", "quotaState": "known", "windows": [["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.70, "stale": false, "resetCountdown": "3 小时后重置"]]]]
+                ]
+            ]
+            w3Host.cachedAccounts = w3Accounts
+            w3Host.activeAccountId = "acc-a"
+            w3Host.statusValue = LiveStatus([
+                "mode": "connected",
+                "running": true,
+                "runningChannel": "stable",
+                "activeAccountEmail": "alice@example.invalid",
+                "liveAccountEmail": "alice@example.invalid",
+                "accountsRevision": "r-w3"
+            ])
+
+            var w3Commands: [[String: Any]] = []
+            let w3BaseAccount = w3Accounts[0].merging([
+                "activeName": "Alice",
+                "activeEmail": "alice@example.invalid",
+                "activeTier": "PRO",
+                "liveAccountEmail": "alice@example.invalid",
+                "isLiveVerified": true
+            ]) { _, new in new }
+            let w3Usage: [String: Any] = [
+                "selectedEnvironmentId": "all",
+                "todayTokens": 5000, "totalTokens": 10000,
+                "estimatedUsd": 0.05, "allTimeEstimatedUsd": 0.10,
+                "requestCount": 2, "totalRequestCount": 5,
+                "todayPricedModels": 1, "todayUnpricedModels": 0,
+                "pricedModels": 1, "unpricedModels": 0,
+                "databasesScanned": 1, "databasesDiscovered": 1,
+                "availability": "complete",
+                "todayByModel": [["model": "gemini-3.8-flash-n", "totalTokens": 5000, "requestCount": 2, "estimatedUsd": 0.05, "priced": true]]
+            ]
+            w3Host.bridge.fixtureReply = { payload in
+                w3Commands.append(payload)
+                let cmd = payload["command"] as? String ?? ""
+                switch cmd {
+                case "account_list":
+                    return ["ok": true, "activeId": "acc-a", "currentAccountId": "acc-a", "accounts": w3Accounts, "pendingSwitch": false]
+                case "auto_switch_get":
+                    return ["ok": true, "config": ["enabled": false, "strategy": "priority", "monitored_model": "all"]]
+                case "dashboard_summary":
+                    let envId = (payload["environmentId"] as? String) ?? "all"
+                    var usg = w3Usage
+                    usg["selectedEnvironmentId"] = envId
+                    return ["ok": true, "accounts": w3BaseAccount, "usage": usg, "remoteSessions": w3Host.remoteSessions, "focusedContextKey": w3Host.statusValue.focusedContextKey]
+                case "quota_refresh_start":
+                    return ["ok": true, "taskId": "w3-task-1"]
+                case "remote_quota_refresh":
+                    return ["ok": true, "remoteObservedVersion": w3Host.statusValue.remoteObservedVersion + 1, "focusedContextKey": w3Host.statusValue.focusedContextKey, "remoteSessions": w3Host.remoteSessions]
+                case "account_switch_preflight":
+                    return ["ok": true, "safe": true, "appRunning": true, "stableRunning": true, "hasRunningTask": false, "activeSshWindowsCount": 1, "activeSshHosts": ["bob-host-1"]]
+                default:
+                    return ["ok": true]
+                }
+            }
+
+            autoreleasepool {
+            let w3Win = makeHeadlessHostWindow(width: 960, height: 680)
+            w3Host.window = w3Win
+            let w3Overview = DashboardPage(app: w3Host)
+            w3Host.overview = w3Overview
+            let w3AccountsPage = AccountsPage(app: w3Host)
+            w3Host.accountsPage = w3AccountsPage
+            let w3Menu = w3Host.ensureMenuPanelController()
+            let w3MenuWin = makeHeadlessHostWindow(width: MenuPanelController.panelWidth, height: MenuPanelController.defaultPanelHeight)
+            w3MenuWin.contentViewController = w3Menu
+            w3Menu.panelWillOpen()
+            defer {
+                w3Host.failPendingQuotaRefresh("", cancelBackendTask: false)
+                w3Host.bridge.fixtureReply = nil
+                w3Host.accountsPage = nil
+                w3Host.overview = nil
+                w3Host.menuPanelController = nil
+                w3Host.window = nil
+                w3Win.contentView = nil
+                w3Win.orderOut(nil)
+                w3MenuWin.contentViewController = nil
+                w3MenuWin.orderOut(nil)
+            }
+
+            w3Win.contentView = w3Overview.view
+            w3Overview.renderSummary(["ok": true, "accounts": w3BaseAccount, "usage": w3Usage, "remoteSessions": [], "focusedContextKey": "local"], isStaleFallback: false)
+            w3AccountsPage.fetch(["accounts": w3Accounts, "activeId": "acc-a", "pendingSwitch": false])
+            pump()
+
+            // A. 无 SSH 基线：四端全隐藏、无残留 tooltip
+            check(w3Overview.contextPill.isHidden && w3Overview.contextMetaLabel.isHidden && w3Overview.heroRemoteHostBadge.isHidden && w3Overview.companionMoreButton.isHidden, "Wave3: Pure-local Overview must hide contextPill, contextMetaLabel, heroRemoteHostBadge, and companionMoreButton")
+            check(w3AccountsPage.localSectionHeaderRow.isHidden && w3AccountsPage.remoteSectionStack.isHidden && w3AccountsPage.cardsStack.arrangedSubviews.count == 2, "Wave3: Pure-local AccountsPage must hide localSectionHeaderRow and remoteSectionStack")
+            check(!visibleTextValues(w3AccountsPage.cardsStack).contains(L10n.t("ssh.presence.active_locally", fallback: "本机使用中")), "Wave3: Pure-local AccountsPage must hide 本机使用中 badge when no SSH exists")
+            check(firstEmptyTooltipViolation(w3AccountsPage.view) == nil, "Wave3: Pure-local AccountsPage must have zero static tooltips")
+            check(w3Menu.contextPill.isHidden && w3Menu.headerContextDivider.isHidden && w3Menu.accountsLocalOnlyNoteLabel.isHidden && w3Menu.accountsRemoteSectionStack.isHidden, "Wave3: Pure-local MenuPanel must hide contextPill, divider, local-only note, and remote section")
+            check(firstEmptyTooltipViolation(w3Menu.view) == nil, "Wave3: Pure-local MenuPanel must have zero static tooltips (found: \(firstEmptyTooltipViolation(w3Menu.view) ?? ""))")
+
+            // B. 同号健康场景 A：总览顶栏挂载 EnvironmentContextPill，伴生区展示「查看」按钮；点击进入远端视角，选「全部」恢复
+            let sceneASessions = [
+                makeSshSession(remoteKey: "rk-same-1", envId: "host:same-a", hostLabel: "same-a", state: "connected", email: "Alice@Example.INVALID", matchedLocalAccountId: "acc-a", lastFocusedAt: 300, geminiPct: 92)
+            ]
+            w3Host.syncRemoteSessionsFromPayload(sceneASessions, focusedKey: "remote:rk-same-1")
+            pump()
+            w3Win.contentView?.layoutSubtreeIfNeeded()
+            check(!w3Overview.contextPill.isHidden && w3Overview.contextPill.selectedScope == .all && !w3Overview.contextPill.isActive, "Wave3 Scene A: Overview must show unscoped EnvironmentContextPill")
+            if let heroBox = findEnclosingBox(w3Overview.refreshQuotaButton) {
+                let heroTexts = visibleTextValues(heroBox)
+                check(heroTexts.contains("same-a") && heroTexts.contains("查看"), "Wave3 Scene A: Overview default state must show companion row with clean same-a and 查看 even for healthy same-account SSH (got \(heroTexts))")
+                let viewBtn = collectViews(heroBox, as: NSButton.self).first { $0.title == "查看" }
+                viewBtn?.performClick(nil)
+                pump()
+                w3Win.contentView?.layoutSubtreeIfNeeded()
+                check(w3Host.overviewEnvironmentKey == "env:host:same-a" && !w3Overview.heroRemoteHostBadge.isHidden && w3Overview.heroRemoteHostBadge.label.stringValue == "same-a", "Wave3 Scene A: Clicking 查看 must enter remote view for host:same-a with heroRemoteHostBadge")
+                check(!visibleTextValues(heroBox).contains("查看"), "Wave3 Scene A: Remote view must hide companion 查看 rows")
+                if let allItem = w3Overview.contextPill.buildMenu().items.first(where: { ($0.representedObject as? String) == "all" }),
+                   let action = allItem.action {
+                    NSApp.sendAction(action, to: allItem.target, from: allItem)
+                    pump()
+                } else {
+                    check(false, "Wave3 Scene A: Overview contextPill menu must include all item")
+                    w3Host.selectOverviewEnvironment("all")
+                    pump()
+                }
+                w3Win.contentView?.layoutSubtreeIfNeeded()
+                check(w3Host.overviewEnvironmentKey == "all" && w3Overview.heroRemoteHostBadge.isHidden && visibleTextValues(heroBox).contains("查看"), "Wave3 Scene A: Selecting 全部 in Overview contextPill must restore default overview with companion rows")
+            } else {
+                check(false, "Wave3 Scene A: Overview must locate hero box")
+            }
+
+            // C. 菜单栏 424pt 顶栏 EnvironmentContextPill 在单主机/中主机名/超长主机名下恒定 <=154pt、[刷新]/[···] 恒定原位、跟随焦点页脚、以及重连换端口保留锁定
+            w3Menu.selectTab(1, persist: false)
+            pump()
+            w3MenuWin.contentView?.layoutSubtreeIfNeeded()
+            let w3RefreshBaseX = w3Menu.headerRefreshButton.frame.minX
+            let w3MoreBaseX = w3Menu.moreButton.frame.minX
+            check(!w3Menu.contextPill.isHidden && !w3Menu.headerContextDivider.isHidden && w3Menu.contextPill.isActive && w3Menu.contextPill.selectedScope == .remote(environmentId: "host:same-a"), "Wave3: MenuPanel Tab 1 with focused SSH host must activate contextPill")
+            check(w3Menu.contextPill.frame.width <= 154.5, "Wave3: MenuPanel Tab 1 contextPill width must stay <= 154pt (got \(w3Menu.contextPill.frame.width))")
+            check(w3Menu.quotaStatusBadge.isHidden, "Wave3: MenuPanel Tab 1 must hide redundant quotaStatusBadge when contextPill shows SSH host")
+            check(w3Menu.quotaFooterLabel.stringValue.contains(L10n.t("menu_panel.ssh.following_focus_footer", fallback: "跟随当前窗口")), "Wave3: MenuPanel Tab 1 footer must show 跟随当前窗口 when auto-following focused SSH window (got \(w3Menu.quotaFooterLabel.stringValue))")
+            check(!w3Menu.headerRefreshButton.isHidden && w3Menu.headerRefreshButton.alphaValue == 1.0 && w3Menu.headerRefreshButton.isEnabled && abs(w3Menu.headerRefreshButton.frame.minX - w3RefreshBaseX) <= 0.5, "Wave3: headerRefreshButton must remain fixed, enabled, and opaque")
+            check(!w3Menu.moreButton.isHidden && w3Menu.moreButton.alphaValue == 1.0 && w3Menu.moreButton.isEnabled && abs(w3Menu.moreButton.frame.minX - w3MoreBaseX) <= 0.5, "Wave3: moreButton must remain fixed, enabled, and opaque")
+
+            // 手动切换后清除「跟随当前窗口」
+            w3Host.setActiveNodeScope(.remote(environmentId: "host:same-a"), userInitiated: true)
+            pump()
+            check(!w3Menu.quotaFooterLabel.stringValue.contains(L10n.t("menu_panel.ssh.following_focus_footer", fallback: "跟随当前窗口")), "Wave3: MenuPanel Tab 1 must clear 跟随当前窗口 after user manually pins host")
+
+            // 后端 SSOT `environments` 下发 + 重连换端口（primaryRemoteKey 变化但 environmentId 不变）保留 activeNodeScope 锁定
+            let reconnectEnvV1: [[String: Any]] = [
+                ["environmentId": "local", "kind": "local", "hostLabel": "本机", "lifecycleState": "online", "focused": true],
+                ["environmentId": "host:port-lock", "kind": "ssh", "hostLabel": "port-lock-node", "primaryRemoteKey": "127.0.0.1:9101", "lifecycleState": "online", "windowCount": 1, "focused": false, "accountEmail": "remote-port@example.invalid", "lastQuotaObservedAt": nowTs - 10]
+            ]
+            w3Host.syncEnvironmentsFromPayload(["environments": reconnectEnvV1, "environmentsRevision": 10, "focusedEnvironmentId": "local"], notifyUI: true)
+            w3Host.setActiveNodeScope(.remote(environmentId: "host:port-lock"), userInitiated: true)
+            pump()
+            check(w3Host.activeNodeScope == .remote(environmentId: "host:port-lock") && w3Host.selectedContextKey == "remote:127.0.0.1:9101", "Wave3: Locking host:port-lock must track initial primaryRemoteKey")
+            let reconnectEnvV2: [[String: Any]] = [
+                ["environmentId": "local", "kind": "local", "hostLabel": "本机", "lifecycleState": "online", "focused": true],
+                ["environmentId": "host:port-lock", "kind": "ssh", "hostLabel": "port-lock-node", "primaryRemoteKey": "127.0.0.1:9202", "lifecycleState": "online", "windowCount": 1, "focused": false, "accountEmail": "remote-port@example.invalid", "lastQuotaObservedAt": nowTs]
+            ]
+            w3Host.syncEnvironmentsFromPayload(["environments": reconnectEnvV2, "environmentsRevision": 11, "focusedEnvironmentId": "local"], notifyUI: true)
+            pump()
+            check(w3Host.activeNodeScope == .remote(environmentId: "host:port-lock") && w3Host.selectedContextKey == "remote:127.0.0.1:9202", "Wave3: Reconnecting on a new SSH port must preserve activeNodeScope lock by environmentId")
+
+            // 中等 & 超宽单主机名：424pt 顶栏恒定防挤压/防偏移
+            for (envId, hostName) in [("host:med-a", "alpha-node-01"), ("host:ultra-a", "alpha-cluster-node01-01-very-long.internal")] {
+                w3Host.syncRemoteSessionsFromPayload([
+                    makeSshSession(remoteKey: "rk-\(envId)", envId: envId, hostLabel: hostName, state: "connected", email: "Alice@Example.INVALID", matchedLocalAccountId: "acc-a", lastFocusedAt: 300, geminiPct: 90)
+                ], focusedKey: "local")
+                w3Menu.selectTab(0, persist: false)
+                pump()
+                w3MenuWin.contentView?.layoutSubtreeIfNeeded()
+                check(!w3Menu.contextPill.isHidden && w3Menu.contextPill.frame.width <= 154.5, "Wave3: contextPill for \(hostName) must stay <= 154pt (got \(w3Menu.contextPill.frame.width))")
+                check(w3Menu.contextPill.frame.maxX <= w3Menu.headerRefreshButton.frame.minX + 0.5, "Wave3: contextPill for \(hostName) must not overlap headerRefreshButton")
+                check(abs(w3Menu.headerRefreshButton.frame.minX - w3RefreshBaseX) <= 0.5 && w3Menu.headerRefreshButton.alphaValue == 1.0 && w3Menu.headerRefreshButton.isEnabled, "Wave3: headerRefreshButton must remain fixed and enabled for \(hostName)")
+                check(abs(w3Menu.moreButton.frame.minX - w3MoreBaseX) <= 0.5 && w3Menu.moreButton.alphaValue == 1.0 && w3Menu.moreButton.isEnabled, "Wave3: moreButton must remain fixed and enabled for \(hostName)")
+            }
+
+            // D. 场景 B + >=2 台主机 + 多窗口去重 + 伴生区 +3 可点菜单 + 同号配额融合 + 3+ 台远端折叠 + 菜单栏 Tab 0/1/2 对称联动 + 历史主机回退
+            let sceneBSessions = [
+                makeSshSession(remoteKey: "rk-alice-w1", envId: "host:alice-dev", hostLabel: "alice-dev", state: "connected", email: "ALICE@example.invalid", matchedLocalAccountId: "acc-a", lastFocusedAt: 200, observedAt: (nowTs - 10) * 1000.0, geminiPct: 85),
+                makeSshSession(remoteKey: "rk-alice-w2", envId: "host:alice-dev", hostLabel: "alice-dev", state: "connected", email: "ALICE@example.invalid", matchedLocalAccountId: "acc-a", lastFocusedAt: 400, observedAt: (nowTs - 20) * 1000.0, geminiPct: 85),
+                makeSshSession(remoteKey: "rk-bob-1", envId: "host:bob-1", hostLabel: "bob-1", state: "connected", email: "bob@example.invalid", matchedLocalAccountId: "acc-b", lastFocusedAt: 350, geminiPct: 80),
+                makeSshSession(remoteKey: "rk-bob-2", envId: "host:bob-2", hostLabel: "bob-2", state: "connected", email: "bob@example.invalid", matchedLocalAccountId: "acc-b", lastFocusedAt: 340, geminiPct: 75),
+                makeSshSession(remoteKey: "rk-bob-3", envId: "host:bob-3", hostLabel: "bob-3", state: "offline_recent", email: "bob@example.invalid", matchedLocalAccountId: "acc-b", lastFocusedAt: 100, geminiPct: 60),
+                makeSshSession(remoteKey: "rk-unmanaged-1", envId: "host:gpu-err", hostLabel: "gpu-err", state: "auth_expired", email: "guest1@example.invalid", name: "Guest1", tier: "ULTRA", matchedLocalAccountId: nil, lastFocusedAt: 900, windowCount: 2, geminiPct: 15),
+                makeSshSession(remoteKey: "rk-unmanaged-2", envId: "host:gpu-extra-1", hostLabel: "gpu-extra-1", state: "connected", email: "guest2@example.invalid", name: "Guest2", tier: "PRO", matchedLocalAccountId: nil, lastFocusedAt: 800, windowCount: 1, geminiPct: 62),
+                makeSshSession(remoteKey: "rk-unmanaged-3", envId: "host:gpu-extra-2", hostLabel: "gpu-extra-2", state: "offline_recent", email: "guest3@example.invalid", name: "Guest3", tier: "PRO", matchedLocalAccountId: nil, lastFocusedAt: 700, windowCount: 1, geminiPct: 48)
+            ]
+            w3Host.syncRemoteSessionsFromPayload(sceneBSessions, focusedKey: "local")
+            pump()
+            w3Win.contentView?.layoutSubtreeIfNeeded()
+            check(firstEmptyTooltipViolation(w3Overview.view) == nil, "Wave3 Scene B: Overview with active SSH hosts must have zero hover tooltips (found: \(firstEmptyTooltipViolation(w3Overview.view) ?? ""))")
+            check(firstEmptyTooltipViolation(w3AccountsPage.view) == nil, "Wave3 Scene B: AccountsPage with active SSH hosts and remote cards must have zero hover tooltips (found: \(firstEmptyTooltipViolation(w3AccountsPage.view) ?? ""))")
+            for tabIdx in 0...2 {
+                w3Menu.selectTab(tabIdx, persist: false)
+                pump()
+                check(firstEmptyTooltipViolation(w3Menu.view) == nil, "Wave3 Scene B: MenuPanel tab \(tabIdx) with active SSH hosts must have zero hover tooltips (found: \(firstEmptyTooltipViolation(w3Menu.view) ?? ""))")
+            }
+
+            // 总览：顶栏挂载 EnvironmentContextPill，伴生区显示最多 2 行 + 可点击 "+5 台主机" 菜单按钮，点击「查看」进入远端视角
+            check(!w3Overview.contextPill.isHidden, "Wave3 Scene B: Overview must display contextPill")
+            check(!w3Overview.companionMoreButton.isHidden && w3Overview.companionMoreButton.isEnabled && w3Overview.companionMoreButton.title == "+5 台主机" && w3Overview.companionMoreButton.image != nil && w3Overview.companionMoreButton.target != nil && w3Overview.companionMoreButton.action != nil, "Wave3 Scene B: Overview companionMoreButton must be clickable with +5 台主机 and chevron icon (got title=\(w3Overview.companionMoreButton.title))")
+            if let heroBox = findEnclosingBox(w3Overview.refreshQuotaButton) {
+                let viewBtns = collectViews(heroBox, as: NSButton.self).filter { $0.title == "查看" }
+                check(viewBtns.count == 2, "Wave3 Scene B: Overview companion section must show at most 2 jump buttons (got \(viewBtns.count))")
+                viewBtns.first?.performClick(nil)
+                pump()
+                w3Win.contentView?.layoutSubtreeIfNeeded()
+                check(w3Host.overviewEnvironmentKey.hasPrefix("env:"), "Wave3 Scene B: Clicking companion 查看 must jump Overview to target SSH env (got \(w3Host.overviewEnvironmentKey))")
+                if w3Host.overviewEnvironmentKey == "env:host:gpu-err" {
+                    check(!w3Overview.heroRemoteHostBadge.isHidden && w3Overview.heroRemoteHostBadge.label.stringValue == "gpu-err", "Wave3 Scene B: Multi-window SSH host heroRemoteHostBadge must show gpu-err")
+                    check(w3Overview.contextMetaLabel.stringValue.contains("2 窗口"), "Wave3 Scene B: Multi-window SSH host contextMetaLabel must show 2 窗口 (got \(w3Overview.contextMetaLabel.stringValue))")
+                }
+                w3Host.selectOverviewEnvironment("all")
+                pump()
+                check(w3Host.overviewEnvironmentKey == "all", "Wave3 Scene B: Returning to all must reset Overview to all")
+            }
+
+            // 账号页：本机分区头 + 本机使用中微标 + 同号跨机配额新鲜度融合(85% + 同步自 alice-dev) + 去重复「远程只读」 + 3+ 台远端第 3 台默认折叠
+            check(!w3AccountsPage.localSectionHeaderRow.isHidden && w3AccountsPage.localSectionTitleLabel.stringValue == "本机已保存账号" && w3AccountsPage.localSectionMetaLabel.stringValue.contains("仅作用于本机"), "Wave3: AccountsPage must show localSectionHeaderRow with local-only hint")
+            check(w3AccountsPage.cardsStack.arrangedSubviews.count == 2, "Wave3: AccountsPage cardsStack must only hold local accounts")
+            let accStackTexts = visibleTextValues(w3AccountsPage.cardsStack)
+            check(accStackTexts.contains(L10n.t("ssh.presence.active_locally", fallback: "本机使用中")), "Wave3: AccountsPage active card must display 本机使用中 micro badge when SSH hosts exist (got \(accStackTexts))")
+            check(accStackTexts.contains { $0.contains("同步自 alice-dev") }, "Wave3: Alice card must fuse fresher remote quota and display 同步自 alice-dev (got \(accStackTexts))")
+            if let aliceCardView = w3AccountsPage.cardsStack.arrangedSubviews.first {
+                let aliceQuotaBars = collectViews(aliceCardView, as: QuotaBarView.self)
+                let aliceQuotaText = aliceQuotaBars.map { "\($0.titleLabel.stringValue):\($0.percentage)" }
+                check(aliceQuotaBars.contains { $0.percentage == 85 }, "Wave3: Alice card must display fused fresher remote quota 85% instead of stale local 35% (got \(aliceQuotaText))")
+            }
+            let localCardHostBadges = collectViews(w3AccountsPage.cardsStack, as: SshHostTagBadge.self).filter { !$0.isHidden }
+            check(localCardHostBadges.count == 2 && localCardHostBadges.allSatisfy { $0.scale == .regular && $0.intrinsicContentSize.height == 19.0 }, "Wave3: AccountsPage local cards must render regular SshHostTagBadge (19pt height)")
+            check(localCardHostBadges.contains { $0.label.stringValue == "alice-dev" }, "Wave3: Alice card SshHostTagBadge must display clean alice-dev without SSH prefix: \(localCardHostBadges.map(\.label.stringValue))")
+            check(localCardHostBadges.contains { $0.label.stringValue == "bob-1 +2" }, "Wave3: Bob card SshHostTagBadge must collapse 3 SSH hosts to bob-1 +2: \(localCardHostBadges.map(\.label.stringValue))")
+
+            check(!w3AccountsPage.remoteSectionStack.isHidden && w3AccountsPage.remoteCardsStack.arrangedSubviews.count == 3, "Wave3: AccountsPage must show 3 unmanaged remote cards in remoteSectionStack")
+            check(w3AccountsPage.remoteSectionMetaLabel.stringValue.contains(L10n.t("accounts.ssh.remote_section_readonly_note", fallback: "仅只读查看")), "Wave3: AccountsPage remoteSectionMetaLabel must disclose 仅只读查看 (got \(w3AccountsPage.remoteSectionMetaLabel.stringValue))")
+            let remoteBadges = collectViews(w3AccountsPage.remoteCardsStack, as: SshHostTagBadge.self).filter { !$0.isHidden }
+            check(remoteBadges.count == 3 && remoteBadges.allSatisfy { $0.scale == .regular }, "Wave3: Unmanaged remote cards must render regular SshHostTagBadge")
+            let remoteTexts = visibleTextValues(w3AccountsPage.remoteCardsStack)
+            check(!remoteTexts.contains(L10n.t("ssh.context.remote_readonly_badge", fallback: "远程只读")), "Wave3: Unmanaged remote cards must NOT repeat 远程只读 pill")
+            check(remoteTexts.contains { $0.contains("2 个窗口") }, "Wave3: Unmanaged remote card with windowCount=2 must show 2 个窗口")
+            check(!remoteTexts.contains(L10n.t("accounts.switch_btn")), "Wave3: Unmanaged remote card must NOT expose switch button")
+
+            // 第 3 台未保存远端默认单行折叠，点击展开后记忆展开态
+            check(!w3AccountsPage.collapsedRemoteEnvIds.contains("host:gpu-err") && !w3AccountsPage.collapsedRemoteEnvIds.contains("host:gpu-extra-1") && w3AccountsPage.collapsedRemoteEnvIds.contains("host:gpu-extra-2"), "Wave3: 3+ unmanaged remote cards must expand first 2 and collapse 3rd by default (got \(w3AccountsPage.collapsedRemoteEnvIds))")
+            if w3AccountsPage.remoteCardsStack.arrangedSubviews.count >= 3 {
+                let thirdCard = w3AccountsPage.remoteCardsStack.arrangedSubviews[2]
+                let thirdRefreshBtn = collectViews(thirdCard, as: InlineRefreshButton.self).first
+                check(thirdRefreshBtn?.isHidden == true, "Wave3: Collapsed 3rd remote card must hide singleRefreshBtn")
+                check(visibleTextValues(thirdCard).contains { $0.contains("48%") }, "Wave3: Collapsed 3rd remote card must display inline quota summary 48% (got \(visibleTextValues(thirdCard)))")
+                if let toggleBtn = collectViews(thirdCard, as: NSButton.self).first(where: { $0.identifier?.rawValue == "host:gpu-extra-2" }) {
+                    toggleBtn.performClick(nil)
+                    pump()
+                    check(!w3AccountsPage.collapsedRemoteEnvIds.contains("host:gpu-extra-2") && thirdRefreshBtn?.isHidden == false, "Wave3: Clicking 3rd remote card collapse button must expand it and reveal refresh button")
+                } else {
+                    check(false, "Wave3: 3rd remote card must expose collapse button with identifier host:gpu-extra-2")
+                }
+            }
+
+            w3Commands.removeAll()
+            if let remoteRefreshBtn = collectViews(w3AccountsPage.remoteCardsStack.arrangedSubviews[1], as: InlineRefreshButton.self).first {
+                remoteRefreshBtn.performClick(nil)
+                waitUntil(step: 0.01, description: "Wave3 single remote card refresh") {
+                    !w3Host.remoteQuotaRefreshing && w3Commands.contains { ($0["command"] as? String) == "remote_quota_refresh" }
+                }
+                let remoteReq = w3Commands.last { ($0["command"] as? String) == "remote_quota_refresh" }
+                check(remoteReq?["remoteKey"] as? String == "rk-unmanaged-1", "Wave3: Remote card refresh must pass host.primaryRemoteKey (got \(String(describing: remoteReq)))")
+            } else {
+                check(false, "Wave3: Unmanaged remote card gpu-err must mount InlineRefreshButton")
+            }
+
+            w3Commands.removeAll()
+            w3AccountsPage.refreshAllQuotas()
+            waitUntil(step: 0.01, description: "Wave3 refreshAllQuotas concurrent local + remote") {
+                w3Commands.contains { ($0["command"] as? String) == "quota_refresh_start" }
+                    && w3Commands.contains { ($0["command"] as? String) == "remote_quota_refresh" }
+            }
+            let allRemoteReq = w3Commands.last { ($0["command"] as? String) == "remote_quota_refresh" }
+            check(allRemoteReq?["remoteKey"] == nil, "Wave3: refreshAllQuotasIncludingRemotes must trigger global remote_quota_refresh without single remoteKey")
+
+            // 切号确认弹窗：目标账号被在线 SSH 占用时追加共享提示
+            w3Host.confirmSwitchForTesting = nil
+            w3Host.requestInteractiveAccountSwitch(id: "acc-b", email: "bob@example.invalid", name: "Bob")
+            waitUntil(step: 0.01, description: "Wave3 shared switch confirmation sheet") {
+                w3Win.attachedSheet != nil
+            }
+            if let sheetWin = w3Win.attachedSheet, let sheetContent = sheetWin.contentView {
+                let sheetTexts = allTextValues(sheetContent).joined(separator: "\n")
+                check(sheetTexts.contains("bob-1") && sheetTexts.contains("不会修改远端登录态"), "Wave3: Switch confirmation alert must append shared SSH usage note (got: \(sheetTexts))")
+                w3Win.endSheet(sheetWin, returnCode: .alertSecondButtonReturn)
+                waitForSheetDetach(on: w3Win, description: "Wave3 shared switch confirmation sheet detach")
+            }
+
+            // 菜单栏：多主机顶栏 EnvironmentContextPill 分组菜单 + Tab 0 <-> Tab 1 对称联动 + 历史主机回退 + Tab 2 隐藏顶栏 Pill / 同号融合 / 跳转行 & +N台按钮跳 Tab 1
+            w3Menu.selectTab(0, persist: false); pump()
+            check(!w3Menu.contextPill.isHidden && !w3Menu.headerContextDivider.isHidden && w3Menu.contextPill.frame.width <= 154.5, "Wave3: MenuPanel Tab 0 with 8 SSH hosts must show contextPill <= 154pt")
+            let multiOverflowTitles = w3Menu.contextPill.buildMenu().items.map { $0.attributedTitle?.string ?? $0.title }
+            check(multiOverflowTitles.contains(L10n.t("ssh.picker.group.online", fallback: "在线 SSH")) && multiOverflowTitles.contains(L10n.t("ssh.picker.group.offline", fallback: "离线 / 历史 SSH")), "Wave3: Multi-host MenuPanel contextPill NSMenu must contain online and offline group headers: \(multiOverflowTitles)")
+            check(multiOverflowTitles.allSatisfy { !$0.contains("SSH:") && !$0.contains("SSH ·") }, "Wave3: Multi-host MenuPanel contextPill NSMenu must strip SSH prefix: \(multiOverflowTitles)")
+
+            // Tab 0 选 gpu-err -> 切到 Tab 1 自动同步 host:gpu-err
+            w3Menu.selectUsageEnvironment("host:gpu-err", persist: false); pump()
+            w3Menu.selectTab(1, persist: false); pump()
+            check(w3Host.selectedMenuQuotaHost()?.environmentId == "host:gpu-err", "Wave3: Switching from Tab 0 (host:gpu-err) to Tab 1 must sync quota host to host:gpu-err (got \(w3Host.selectedMenuQuotaHost()?.environmentId ?? "nil"))")
+            check(w3Menu.quotaFooterLabel.stringValue.contains("2 个窗口"), "Wave3: MenuPanel Tab 1 must show multi-window count in footer (got \(w3Menu.quotaFooterLabel.stringValue))")
+
+            // Tab 1 选 host:alice-dev -> 切到 Tab 0 同步 selectedEnvironmentId；Tab 1 切回 local -> Tab 0 对称切回 local
+            w3Host.selectMenuQuotaHost("host:alice-dev", userInitiated: true); pump()
+            w3Menu.selectTab(0, persist: false); pump()
+            check(w3Menu.selectedEnvironmentId == "host:alice-dev", "Wave3: Switching from Tab 1 (pinned host:alice-dev) to Tab 0 must sync selectedEnvironmentId to host:alice-dev (got \(w3Menu.selectedEnvironmentId))")
+            w3Menu.selectTab(1, persist: false); pump()
+            w3Host.setActiveNodeScope(.local, userInitiated: true); pump()
+            w3Menu.selectTab(0, persist: false); pump()
+            check(w3Menu.selectedEnvironmentId == "local", "Wave3: Switching from Tab 1 (pinned local) to Tab 0 must symmetrically sync selectedEnvironmentId to local (got \(w3Menu.selectedEnvironmentId))")
+
+            // Tab 0 切回 all -> 切到 Tab 1 回落本机
+            w3Menu.selectUsageEnvironment("all", persist: false); pump()
+            w3Menu.selectTab(1, persist: false); pump()
+            check(w3Host.selectedMenuQuotaHost() == nil && w3Host.selectedContextKey == "local", "Wave3: Switching from Tab 0 (all) to Tab 1 must fall back to local when focusedContextKey is local (got \(w3Host.selectedContextKey))")
+
+            // Tab 0 选中 historical_only 主机 -> 切到 Tab 1 安全回退到本机并展示 fallback 提示
+            w3Menu.selectTab(0, persist: false); pump()
+            w3Host.setUsageFilterScope(.remote(environmentId: "host:hist-legacy"), persist: false, syncOverview: false, syncUsagePage: false, syncMenuPanel: true)
+            pump()
+            w3Menu.selectTab(1, persist: false); pump()
+            check(w3Host.activeNodeScope == .local && !w3Menu.quotaWarningLabel.isHidden && w3Menu.quotaWarningLabel.stringValue.contains(L10n.t("usage.env.historical_fallback_notice", fallback: "历史主机暂无实时配额，已切回本机配额。")), "Wave3: Switching from Tab 0 (historical_only) to Tab 1 must fall back to local with historical_fallback_notice (got \(w3Menu.quotaWarningLabel.stringValue))")
+
+            // Tab 2：顶栏隐藏 Pill 与竖线 + 同号融合配额(85%) + 本机当前微标 + SshHostTagBadge(.compact) + 前 2 台跳转行 + 第 3 台 accountsRemoteMoreHostsButton 可达
+            w3Menu.selectTab(2, persist: false); pump()
+            check(w3Menu.contextPill.isHidden && w3Menu.headerContextDivider.isHidden, "Wave3: MenuPanel Tab 2 must hide top bar contextPill and headerContextDivider")
+            check(!w3Menu.accountsLocalOnlyNoteLabel.isHidden && w3Menu.accountsLocalOnlyNoteLabel.stringValue == "· 切换仅作用于本机", "Wave3: MenuPanel Tab 2 must show compact single-line local-only note")
+            let menuCards = w3Menu.accountsCardsStack.arrangedSubviews.compactMap { $0 as? MenuExpandableAccountCardView }
+            let menuAlice = menuCards.first { $0.accountId == "acc-a" }
+            let menuBob = menuCards.first { $0.accountId == "acc-b" }
+            check(menuAlice?.sshPresenceBadge.isHidden == false && menuAlice?.sshPresenceBadge.scale == .compact && menuAlice?.sshPresenceBadge.title == "alice-dev", "Wave3: MenuPanel Tab 2 Alice card must show compact SshHostTagBadge alice-dev (got \(menuAlice?.sshPresenceBadge.title ?? "nil"))")
+            check(menuAlice.map { visibleTextValues($0).contains { $0.contains("85%") } } == true, "Wave3: MenuPanel Tab 2 Alice card must show fused fresher remote quota 85%")
+            check(menuAlice.map { visibleTextValues($0).contains(L10n.t("ssh.presence.current_local", fallback: "本机当前")) } == true, "Wave3: MenuPanel Tab 2 active card must show 本机当前 badge")
+            check(menuBob?.sshPresenceBadge.isHidden == false && menuBob?.sshPresenceBadge.scale == .compact && menuBob?.sshPresenceBadge.title == "bob-1 +2", "Wave3: MenuPanel Tab 2 Bob card must collapse 3 active/offlineRecent SSH hosts to bob-1 +2 (got \(menuBob?.sshPresenceBadge.title ?? "nil"))")
+
+            check(!w3Menu.accountsRemoteSectionStack.isHidden, "Wave3: MenuPanel Tab 2 must show accountsRemoteSectionStack for unmanaged hosts")
+            let jumpRows = collectViews(w3Menu.accountsRemoteSectionStack, as: MenuRemoteHostJumpRow.self)
+            check(jumpRows.count == 2 && jumpRows.map(\.environmentId) == ["host:gpu-extra-1", "host:gpu-err"], "Wave3: MenuPanel Tab 2 must render 2 MenuRemoteHostJumpRow items sorted by state priority (got \(jumpRows.map(\.environmentId)))")
+            check(!w3Menu.accountsRemoteMoreHostsButton.isHidden && w3Menu.accountsRemoteMoreHostsButton.title.contains("+1"), "Wave3: MenuPanel Tab 2 must render accountsRemoteMoreHostsButton for 3rd+ unmanaged host (got \(w3Menu.accountsRemoteMoreHostsButton.title))")
+            let moreHostsMenu = w3Menu.accountsRemoteMoreHostsButton.buildMenu()
+            if let extraItem = moreHostsMenu.items.first(where: { ($0.representedObject as? String) == "host:gpu-extra-2" }),
+               let action = extraItem.action {
+                NSApp.sendAction(action, to: extraItem.target, from: extraItem)
+                pump()
+                check(w3Menu.selectedTab == 1 && w3Host.selectedMenuQuotaHost()?.environmentId == "host:gpu-extra-2", "Wave3: Selecting 3rd+ unmanaged host from accountsRemoteMoreHostsButton must jump to Tab 1 and select host:gpu-extra-2")
+            } else {
+                check(false, "Wave3: accountsRemoteMoreHostsButton menu must include 3rd unmanaged host host:gpu-extra-2")
+            }
+
+            w3Menu.selectTab(2, persist: false); pump()
+            let jumpRowsAfter = collectViews(w3Menu.accountsRemoteSectionStack, as: MenuRemoteHostJumpRow.self)
+            if let gpuErrJump = jumpRowsAfter.first(where: { $0.environmentId == "host:gpu-err" }),
+               let jumpBtn = collectViews(gpuErrJump, as: NSButton.self).first {
+                jumpBtn.performClick(nil); pump()
+                check(w3Menu.selectedTab == 1 && w3Host.selectedMenuQuotaHost()?.environmentId == "host:gpu-err", "Wave3: Clicking MenuRemoteHostJumpRow must jump to Tab 1 and select host:gpu-err")
+            } else {
+                check(false, "Wave3: MenuPanel Tab 2 must expose MenuRemoteHostJumpRow button for host:gpu-err after returning from Tab 1")
+            }
+
+            // 断开全部 SSH 后恢复单机干净状态（无残留控件、无残留 tooltip）
+            w3Host.syncRemoteSessionsFromPayload([], focusedKey: "local")
+            pump()
+            w3Win.contentView?.layoutSubtreeIfNeeded()
+            check(w3Overview.contextPill.isHidden && w3Overview.contextMetaLabel.isHidden && w3Overview.heroRemoteHostBadge.isHidden && w3Overview.companionMoreButton.isHidden, "Wave3: Disconnecting all SSH must hide Overview contextPill, meta, and badges")
+            if let heroBox = findEnclosingBox(w3Overview.refreshQuotaButton) {
+                check(!visibleTextValues(heroBox).contains("查看"), "Wave3: Disconnecting all SSH must hide Overview companion rows")
+            }
+            check(w3AccountsPage.localSectionHeaderRow.isHidden && w3AccountsPage.remoteSectionStack.isHidden, "Wave3: Disconnecting all SSH must hide AccountsPage local section header and remote section")
+            check(!visibleTextValues(w3AccountsPage.cardsStack).contains(L10n.t("ssh.presence.active_locally", fallback: "本机使用中")), "Wave3: Disconnecting all SSH must hide 本机使用中 badge")
+            check(firstEmptyTooltipViolation(w3AccountsPage.view) == nil, "Wave3: Disconnecting all SSH must leave zero static tooltips on AccountsPage")
+            check(w3Menu.contextPill.isHidden && w3Menu.headerContextDivider.isHidden && w3Menu.accountsLocalOnlyNoteLabel.isHidden && w3Menu.accountsRemoteSectionStack.isHidden, "Wave3: Disconnecting all SSH must hide MenuPanel SSH controls")
+            check(firstEmptyTooltipViolation(w3Menu.view) == nil, "Wave3: Disconnecting all SSH must leave zero static tooltips on MenuPanel (found: \(firstEmptyTooltipViolation(w3Menu.view) ?? ""))")
+            }
+            pump()
+        }
+
+        // P1-4 & P0-1 回归验证：菜单栏配额页 SSH 主机「打开总览页」同步环境 + 缓存合成总览不误用今日值填充累计字段
+        do {
+            L10n.shared.setLanguage("zh-Hans", notify: false)
+            let p14State = state.appendingPathComponent("p14-p01-contracts", isDirectory: true)
+            try? FileManager.default.removeItem(at: p14State)
+            let p14Host = Assistant(state: p14State)
+            p14Host.configuration = try ConfigurationStore(state: p14State)
+            p14Host.bridge = BackendBridge(resources: state, state: p14State)
+            p14Host.reachable = true
+            p14Host.cachedAccounts = accounts
+            p14Host.activeAccountId = "a"
+            p14Host.statusValue = LiveStatus([
+                "mode": "connected",
+                "running": true,
+                "runningChannel": "stable",
+                "activeAccountEmail": "alex@example.invalid",
+                "liveAccountEmail": "alex@example.invalid",
+                "accountsRevision": "r-p14"
+            ])
+            let remoteSession: [String: Any] = [
+                "remoteKey": "rk-p14",
+                "environmentId": "host:p14-gpu",
+                "hostLabel": "p14-gpu",
+                "state": "connected",
+                "email": "remote-p14@example.invalid",
+                "name": "RemoteGPU",
+                "tier": "PRO",
+                "quotaGroups": [
+                    ["key": "gemini", "displayName": "Gemini", "summaryLabel": "Gemini", "brands": ["gemini"], "isStandalone": false, "availability": "available", "quotaState": "known", "windows": [["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.72, "stale": false, "resetCountdown": "2 小时后重置"]]]
+                ]
+            ]
+            p14Host.syncRemoteSessionsFromPayload([remoteSession], focusedKey: "local", notifyUI: false)
+            p14Host.cachedUsageReportsByPeriod["today|env=host:p14-gpu|acc=all"] = [
+                "ok": true,
+                "period": "today",
+                "summary": [
+                    "totalTokens": 6000,
+                    "estimatedUsd": 0.08,
+                    "requestCount": 3,
+                    "pricedModels": 1,
+                    "unpricedModels": 0,
+                    "databasesScanned": 1,
+                    "databasesDiscovered": 1,
+                    "availability": "complete"
+                ],
+                "byModel": [["model": "gemini-3.8-flash-n", "totalTokens": 6000, "requestCount": 3, "estimatedUsd": 0.08, "priced": true]],
+                "todayHourly": []
+            ]
+            p14Host.bridge.fixtureReply = { payload in
+                let cmd = payload["command"] as? String ?? ""
+                if cmd == "dashboard_summary" {
+                    // Return usageError when explicitly queried later only if needed; for synchronous synthetic check we assert before async update arrives
+                    return [
+                        "ok": true,
+                        "accounts": accounts[0].merging(["activeName": "Alex", "activeEmail": "alex@example.invalid", "activeTier": "PRO", "isLiveVerified": true]) { _, n in n },
+                        "usageError": "simulated pending",
+                        "remoteSessions": p14Host.remoteSessions,
+                        "focusedContextKey": "local"
+                    ]
+                }
+                return ["ok": true]
+            }
+
+            // 1. P1-4: 菜单栏配额 Tab 选中 SSH 主机，点击「打开总览页 ↗」后 overviewEnvironmentKey 应切至 env:host:p14-gpu（即使 overview 尚未创建）
+            autoreleasepool {
+            let p14Menu = p14Host.ensureMenuPanelController()
+            let p14MenuWin = makeHeadlessHostWindow(width: MenuPanelController.panelWidth, height: MenuPanelController.defaultPanelHeight)
+            p14MenuWin.contentViewController = p14Menu
+            p14Menu.panelWillOpen()
+            defer {
+                p14Host.bridge.fixtureReply = nil
+                p14Host.accountsPage = nil
+                p14Host.overview = nil
+                p14Host.menuPanelController = nil
+                p14Host.window?.orderOut(nil)
+                p14Host.window = nil
+                p14MenuWin.contentViewController = nil
+                p14MenuWin.orderOut(nil)
+            }
+            p14Menu.selectTab(1, persist: false)
+            p14Host.selectMenuQuotaHost("host:p14-gpu", userInitiated: true)
+            pump()
+            check(p14Menu.openMainBtn.title == L10n.t("menu_panel.footer.open_overview", fallback: "打开总览页 ↗"), "P1-4: Quota tab footer button must show 打开总览页 ↗")
+            p14Menu.openMainBtn.performClick(nil)
+            check(p14Host.overviewEnvironmentKey == "env:host:p14-gpu", "P1-4: Clicking 打开总览页 from Quota tab with SSH host selected must set overviewEnvironmentKey to env:host:p14-gpu (got \(p14Host.overviewEnvironmentKey))")
+            check(p14Host.currentPage == 0, "P1-4: Clicking 打开总览页 must switch main window to Overview page 0")
+
+            // 2. P0-1: 仅有 today 缓存而无 all 缓存时，syntheticSummaryFromUsageCache 不得将今日值填入累计字段
+            let p14Overview = p14Host.overview ?? DashboardPage(app: p14Host)
+            p14Host.overview = p14Overview
+            p14Overview.handleOverviewEnvironmentChanged()
+            check(p14Overview.todayTokensMetric.stringValue == "6K", "P0-1: Synthetic cache fallback must still render today tokens (6K, got \(p14Overview.todayTokensMetric.stringValue))")
+            check(p14Overview.usageMetric.stringValue == "$0.08", "P0-1: Synthetic cache fallback must still render today cost ($0.08, got \(p14Overview.usageMetric.stringValue))")
+            check(p14Overview.todayRequestsMetric.stringValue == "3", "P0-1: Synthetic cache fallback must still render today requests (3, got \(p14Overview.todayRequestsMetric.stringValue))")
+            check(p14Overview.todayTokensDetail.stringValue == "累计 — Token" && !p14Overview.todayTokensDetail.stringValue.contains("6K"), "P0-1: Missing all-time cache must show pending '累计 — Token' instead of today's 6K (got \(p14Overview.todayTokensDetail.stringValue))")
+            check(p14Overview.usageDetail.stringValue == "累计 —" && !p14Overview.usageDetail.stringValue.contains("0.08"), "P0-1: Missing all-time cache must show pending '累计 —' instead of today's $0.08 (got \(p14Overview.usageDetail.stringValue))")
+            check(p14Overview.todayRequestsDetail.stringValue == "累计 — 次" && !p14Overview.todayRequestsDetail.stringValue.contains("3"), "P0-1: Missing all-time cache must show pending '累计 — 次' instead of today's 3 (got \(p14Overview.todayRequestsDetail.stringValue))")
+
+            // 3. P0-1: 补充真实 all 缓存后（且验证 max(total, today)），应正确渲染真实累计数值
+            p14Host.cachedUsageReportsByPeriod["all|env=host:p14-gpu|acc=all"] = [
+                "ok": true,
+                "period": "all",
+                "summary": [
+                    "totalTokens": 120000,
+                    "estimatedUsd": 1.50,
+                    "requestCount": 2, // intentionally < today(3) to test max(total, today)
+                    "pricedModels": 1,
+                    "unpricedModels": 0
+                ]
+            ]
+            p14Overview.handleOverviewEnvironmentChanged()
+            check(p14Overview.todayTokensDetail.stringValue == "累计 120K Token", "P0-1: With all-time cache present, total tokens detail must show 累计 120K Token (got \(p14Overview.todayTokensDetail.stringValue))")
+            check(p14Overview.usageDetail.stringValue == "累计 $1.50", "P0-1: With all-time cache present, total cost detail must show 累计 $1.50 (got \(p14Overview.usageDetail.stringValue))")
+            check(p14Overview.todayRequestsDetail.stringValue == "累计 3 次", "P0-1: Total requests must clamp to max(total, today) = 3 (got \(p14Overview.todayRequestsDetail.stringValue))")
+
+            // 4. P1-4: 存在 SSH 时切回本机配额再点「打开总览页 ↗」应沿用本机视角（carryLocalToOverview=true）；断开 SSH 后自动回落 all
+            p14Host.setActiveNodeScope(.local, userInitiated: true)
+            p14Menu.openMainBtn.performClick(nil)
+            check(p14Host.overviewEnvironmentKey == "local", "P1-4: Clicking 打开总览页 from Quota tab with local selected while SSH exists must carry local scope to Overview (got \(p14Host.overviewEnvironmentKey))")
+            p14Host.syncRemoteSessionsFromPayload([], focusedKey: "local")
+            check(p14Host.overviewEnvironmentKey == "all", "P1-4: Disconnecting SSH must reset Overview overviewEnvironmentKey back to all (got \(p14Host.overviewEnvironmentKey))")
+            }
+            pump()
+        }
+
+        // Wave 1 专项验收：EnvironmentContextPill 自绘胶囊/菜单保留、MenuFloatingPanel & First-Mouse、顶栏三控件显隐保活、以及 UsagePage/UsageLogController 单账号+未关联自动隐藏
+        do {
+            L10n.shared.setLanguage("zh-Hans", notify: false)
+
+            // 1. EnvironmentContextPill .headerPill (26pt) vs .menuHeaderPill (24pt)、displayTitle 纯净度、菜单保留百分比和邮箱、selectItem(id:notify:) 与 buildMenu() 动作触发
+            let headerPill = EnvironmentContextPill(style: .headerPill, compact: false, minWidth: 68, maxWidth: 168)
+            let menuPill = EnvironmentContextPill(style: .menuHeaderPill, compact: true, minWidth: 68, maxWidth: 154)
+            check(headerPill.style == .headerPill && headerPill.pillHeight == 26, "Wave1: headerPill default height must be 26pt (got \(headerPill.pillHeight))")
+            check(menuPill.style == .menuHeaderPill && menuPill.pillHeight == 24, "Wave1: menuHeaderPill default height must be 24pt (got \(menuPill.pillHeight))")
+
+            let pillItems: [EnvironmentContextPill.Item] = [
+                EnvironmentContextPill.Item(scope: .all, hostLabel: "全部", secondaryText: "100%"),
+                EnvironmentContextPill.Item(scope: .local, hostLabel: "本机", secondaryText: "64%"),
+                EnvironmentContextPill.Item(
+                    scope: .remote(environmentId: "ssh:gpu-node"),
+                    hostLabel: "SSH · gpu-node-01",
+                    state: .online,
+                    windowCount: 2,
+                    email: "alice@example.com",
+                    secondaryText: "36%"
+                )
+            ]
+            var scopeEvents: [EnvironmentScope] = []
+            var idEvents: [String] = []
+            menuPill.onSelectScope = { scopeEvents.append($0) }
+            menuPill.onSelectId = { idEvents.append($0) }
+
+            menuPill.update(items: pillItems, selectedScope: .all, isActive: false)
+            check(menuPill.displayTitle == "全部" && !menuPill.displayTitle.contains("100%") && !menuPill.displayTitle.contains("●"), "Wave1: Selecting 全部 with secondaryText=100% must keep displayTitle == 全部 (got \(menuPill.displayTitle))")
+            check(menuPill.triggerButton.itemKind == .all && menuPill.triggerButton.acceptsFirstMouse(for: nil), "Wave1: all-scope TriggerButton must use .all kind and acceptsFirstMouse")
+
+            let builtMenu = menuPill.buildMenu()
+            let builtTitles = builtMenu.items.map { $0.attributedTitle?.string ?? $0.title }
+            check(builtTitles.contains { $0.contains("全部") && $0.contains("100%") }, "Wave1: buildMenu() must retain 100% secondary text for 全部: \(builtTitles)")
+            check(builtTitles.contains { $0.contains("gpu-node-01") && $0.contains("alice@example.com") && $0.contains("36%") }, "Wave1: buildMenu() must retain email and 36% for SSH item: \(builtTitles)")
+
+            if let sshMenuItem = builtMenu.items.first(where: { ($0.representedObject as? String) == "ssh:gpu-node" }),
+               let action = sshMenuItem.action {
+                NSApp.sendAction(action, to: sshMenuItem.target, from: sshMenuItem)
+            } else {
+                check(false, "Wave1: buildMenu() must expose actionable ssh:gpu-node menu item")
+            }
+            check(menuPill.selectedScope == .remote(environmentId: "ssh:gpu-node") && menuPill.isActive, "Wave1: buildMenu() item action must select ssh:gpu-node and activate pill")
+            check(menuPill.displayTitle == "gpu-node-01" && !menuPill.displayTitle.contains("●") && !menuPill.displayTitle.contains("alice@example.com") && !menuPill.displayTitle.contains("36%"), "Wave1: SSH collapsed displayTitle must be pure hostname gpu-node-01 without dot/email/pct (got \(menuPill.displayTitle))")
+            check(menuPill.triggerButton.itemKind == .ssh, "Wave1: SSH TriggerButton must have itemKind == .ssh")
+            check(scopeEvents == [.remote(environmentId: "ssh:gpu-node")] && idEvents == ["ssh:gpu-node"], "Wave1: buildMenu() action must notify onSelectScope and onSelectId")
+
+            check(menuPill.selectItem(id: "local", notify: false), "Wave1: selectItem(id: local, notify: false) must succeed")
+            check(menuPill.selectedScope == .local && menuPill.displayTitle == "本机" && scopeEvents.count == 1 && idEvents.count == 1, "Wave1: selectItem(notify: false) must update displayTitle without firing callbacks")
+            check(menuPill.selectItem(id: "all", notify: true), "Wave1: selectItem(id: all, notify: true) must succeed")
+            check(menuPill.selectedScope == .all && !menuPill.isActive && menuPill.displayTitle == "全部" && scopeEvents.last == .all && idEvents.last == "all", "Wave1: selectItem(notify: true) must reset to all and fire callbacks")
+
+            // 2. First-Mouse 全控件校验 + MenuFloatingPanel.worksWhenModal + 菜单栏顶栏三控件在 Tab 切换与显隐后全部 isEnabled == true && alphaValue == 1.0
+            let testDesignBtn = DesignButton(title: "Test", target: nil, action: nil)
+            let testSegTabs = MenuSegmentedTabsView(items: ["A", "B"], style: .primaryTabs, accessibilityLabel: "Wave1TestTabs")
+            let segButtons = findButtons(testSegTabs).compactMap { $0 as? MenuSegmentedTabsView.SegmentItemButton }
+            let testPlainBtn = MenuPlainClickButton(frame: .zero)
+            check(testDesignBtn.acceptsFirstMouse(for: nil), "Wave1: DesignButton must return acceptsFirstMouse == true")
+            check(!segButtons.isEmpty && segButtons.allSatisfy { $0.acceptsFirstMouse(for: nil) }, "Wave1: SegmentItemButton must return acceptsFirstMouse == true")
+            check(testPlainBtn.acceptsFirstMouse(for: nil), "Wave1: MenuPlainClickButton must return acceptsFirstMouse == true")
+
+            let w1Host = Assistant(state: state.appendingPathComponent("wave1-menu-topbar-audit"))
+            w1Host.configuration = try ConfigurationStore(state: w1Host.state)
+            w1Host.bridge = BackendBridge(resources: state, state: w1Host.state)
+            w1Host.reachable = true
+            w1Host.cachedAccounts = [
+                ["id": "acc-1", "name": "User", "email": "user@example.invalid", "subscription_tier": "PRO"]
+            ]
+            w1Host.activeAccountId = "acc-1"
+            w1Host.statusValue = LiveStatus(["mode": "connected", "running": true, "runningChannel": "stable", "remoteSyncRevision": 1])
+            w1Host.cachedUsageReportsByPeriod["today"] = [
+                "ok": true,
+                "period": "today",
+                "selectedEnvironmentId": "all",
+                "selectedAccountId": "all",
+                "availableEnvironments": [
+                    ["id": "all", "kind": "all", "label": "全部", "online": true, "total_tokens": 2000],
+                    ["id": "local", "kind": "local", "label": "本机", "online": true, "total_tokens": 1000],
+                    ["id": "ssh:w1-host", "kind": "ssh", "label": "w1-host", "online": true, "total_tokens": 1000]
+                ],
+                "summary": ["availability": "complete", "totalTokens": 2000, "requestCount": 2, "estimatedUsd": 0.02],
+                "byModel": []
+            ]
+            w1Host.syncRemoteSessionsFromPayload([
+                [
+                    "remoteKey": "rk-w1",
+                    "environmentId": "ssh:w1-host",
+                    "hostLabel": "w1-host",
+                    "state": "connected",
+                    "email": "user@example.invalid",
+                    "matchedLocalAccountId": "acc-1",
+                    "focused": true,
+                    "quota": ["models": ["gemini": ["remaining": 90]]]
+                ]
+            ], focusedKey: "remote:rk-w1", notifyUI: false)
+
+            let w1Ctrl = w1Host.ensureMenuPanelController()
+            let w1Panel = w1Host.ensureMenuPanel(hosting: w1Ctrl)
+            Assistant.configureHeadlessWindowIfNeeded(w1Panel)
+            defer {
+                w1Host.bridge.fixtureReply = nil
+                w1Host.menuPanelController = nil
+                w1Panel.contentView = nil
+                w1Panel.orderOut(nil)
+                w1Host.window?.orderOut(nil)
+            }
+            check(w1Panel.worksWhenModal, "Wave1: MenuFloatingPanel must set worksWhenModal == true")
+            check(w1Ctrl.headerRefreshButton.acceptsFirstMouse(for: nil) && w1Ctrl.moreButton.acceptsFirstMouse(for: nil) && w1Ctrl.contextPill.triggerButton.acceptsFirstMouse(for: nil), "Wave1: MenuPanel top bar 3 controls must all accept first mouse")
+
+            w1Ctrl.panelWillOpen()
+            pump()
+            for tab in [0, 2, 0, 1, 2, 0] {
+                w1Ctrl.selectTab(tab, persist: false)
+                pump()
+                check(w1Ctrl.headerRefreshButton.isEnabled && w1Ctrl.headerRefreshButton.alphaValue == 1.0 && !w1Ctrl.headerRefreshButton.isHidden, "Wave1: Tab \(tab) must keep headerRefreshButton enabled and alphaValue == 1.0")
+                check(w1Ctrl.moreButton.isEnabled && w1Ctrl.moreButton.alphaValue == 1.0 && !w1Ctrl.moreButton.isHidden, "Wave1: Tab \(tab) must keep moreButton enabled and alphaValue == 1.0")
+                check(w1Ctrl.contextPill.isEnabled && w1Ctrl.contextPill.alphaValue == 1.0, "Wave1: Tab \(tab) must keep contextPill enabled and alphaValue == 1.0")
+                if tab == 2 {
+                    check(w1Ctrl.contextPill.isHidden, "Wave1: Tab 2 must hide contextPill without disabling it")
+                } else {
+                    check(!w1Ctrl.contextPill.isHidden, "Wave1: Tab \(tab) with SSH present must show contextPill")
+                }
+            }
+
+            // 3. UsagePage 与 UsageLogController 在仅单真实账号且 unattributedRequests > 0 时自动隐藏 accountPopup，且彻底无未关联账号项
+            let w1UsageHost = Assistant(state: state.appendingPathComponent("wave1-single-account-hide"))
+            w1UsageHost.configuration = try ConfigurationStore(state: w1UsageHost.state)
+            w1UsageHost.bridge = BackendBridge(resources: state, state: w1UsageHost.state)
+            w1UsageHost.reachable = true
+            w1UsageHost.cachedAccounts = [
+                ["id": "acc-only", "name": "Only", "email": "only@example.invalid", "subscription_tier": "PRO"]
+            ]
+            w1UsageHost.usageSelectedAccount = "unattributed"
+            w1UsageHost.statusValue = LiveStatus(["mode": "connected", "running": true, "runningChannel": "stable"])
+            let w1UsageWin = makeHeadlessHostWindow(width: 900, height: 600)
+            w1UsageHost.window = w1UsageWin
+            defer {
+                w1UsageHost.bridge.fixtureReply = nil
+                w1UsageHost.window = nil
+                w1UsageWin.orderOut(nil)
+            }
+            w1UsageHost.bridge.fixtureReply = { payload in
+                let cmd = payload["command"] as? String ?? ""
+                let singleAccs: [[String: Any]] = [
+                    ["id": "all", "email": "全部账号", "label": "全部账号", "total_tokens": 5000, "request_count": 2],
+                    ["id": "acc-only", "email": "only@example.invalid", "label": "only@example.invalid", "total_tokens": 2000, "request_count": 1]
+                ]
+                let envs: [[String: Any]] = [
+                    ["id": "all", "kind": "all", "label": "全部", "online": true, "total_tokens": 5000, "request_count": 2],
+                    ["id": "local", "kind": "local", "label": "本机", "online": true, "total_tokens": 3000, "request_count": 1],
+                    ["id": "ssh:only-ssh", "kind": "ssh", "label": "only-ssh", "online": true, "total_tokens": 2000, "request_count": 1]
+                ]
+                if cmd == "usage_summary" {
+                    return [
+                        "ok": true,
+                        "period": "today",
+                        "snapshotId": "w1-single-acc",
+                        "selectedEnvironmentId": payload["environmentId"] as? String ?? "all",
+                        "selectedAccountId": payload["accountId"] as? String ?? "all",
+                        "unattributedRequests": 5,
+                        "unattributedTokens": 3000,
+                        "availableEnvironments": envs,
+                        "availableAccounts": singleAccs,
+                        "environmentBreakdown": ["local_tokens": 3000, "ssh_tokens": 2000, "local_share_pct": 60, "ssh_share_pct": 40, "has_ssh_data": true],
+                        "summary": ["availability": "complete", "totalTokens": 5000, "requestCount": 2, "estimatedUsd": 0.05, "unattributedRequests": 5, "unattributedTokens": 3000],
+                        "byModel": [],
+                        "hourly": [],
+                        "daily": []
+                    ]
+                }
+                if cmd == "usage_events" {
+                    return [
+                        "ok": true,
+                        "snapshot_id": "w1-single-ev",
+                        "generated_at": Int(Date().timeIntervalSince1970),
+                        "period": "today",
+                        "selectedEnvironmentId": payload["environmentId"] as? String ?? "all",
+                        "selectedAccountId": payload["accountId"] as? String ?? "all",
+                        "total": 0,
+                        "rows": [],
+                        "availableEnvironments": envs,
+                        "availableAccounts": singleAccs
+                    ]
+                }
+                return ["ok": true]
+            }
+
+            let w1UsagePage = UsagePage(app: w1UsageHost)
+            _ = w1UsagePage.view
+            w1UsageHost.usagePage = w1UsagePage
+            w1UsageWin.contentView = w1UsagePage.view
+            w1UsagePage.update(force: true)
+            waitUntil(step: 0.01, description: "Wave1 single-account UsagePage fetch") { !w1UsagePage.loading && !w1UsagePage.environmentPill.isHidden }
+            check(w1UsagePage.selectedAccountId == "all" && w1UsageHost.usageSelectedAccount == "all", "Wave1: Legacy unattributed in UsagePage must normalize to all")
+            let w1PageAccIds = (w1UsagePage.accountPopup.menu?.items ?? []).compactMap { $0.representedObject as? String }
+            check(w1PageAccIds == ["all", "acc-only"] && !w1UsagePage.accountPopup.itemTitles.contains(L10n.t("usage.account.unattributed")), "Wave1: Single-account UsagePage accountPopup must only have all + real account without unattributed (got \(w1PageAccIds))")
+            check(w1UsagePage.accountPopup.isHidden, "Wave1: UsagePage with only 1 real account must hide accountPopup even when unattributedRequests > 0")
+            let w1PageCell = w1UsagePage.accountPopup.cell as? DesignPopUpCell
+            check(w1PageCell?.visualStyle == .headerPill && w1PageCell?.customHeight == 26 && w1PageCell?.fitsSelectedTitleOnly == true, "Wave1: Single-account UsagePage accountPopup cell must still configure .headerPill 26pt fitsSelectedTitleOnly")
+
+            let w1LogCtrl = UsageLogController(app: w1UsageHost, period: "today", environmentId: "all", accountId: "unattributed")
+            w1LogCtrl.show(in: w1UsageWin) {}
+            waitUntil(step: 0.01, description: "Wave1 single-account UsageLogController fetch") { !w1LogCtrl.loading }
+            check(w1LogCtrl.selectedAccountId == "all", "Wave1: UsageLogController with accountId=unattributed must normalize to all")
+            let w1LogAccIds = (w1LogCtrl.accountPopup.menu?.items ?? []).compactMap { $0.representedObject as? String }
+            check(w1LogAccIds == ["all", "acc-only"] && !w1LogCtrl.accountPopup.itemTitles.contains(L10n.t("usage.account.unattributed")), "Wave1: Single-account UsageLogController accountPopup must exclude unattributed (got \(w1LogAccIds))")
+            check(w1LogCtrl.accountPopup.isHidden, "Wave1: UsageLogController with only 1 real account must hide accountPopup even when unattributedRequests > 0")
+            let w1LogCell = w1LogCtrl.accountPopup.cell as? DesignPopUpCell
+            check(w1LogCell?.visualStyle == .headerPill && w1LogCell?.customHeight == 26 && w1LogCell?.fitsSelectedTitleOnly == true, "Wave1: Single-account UsageLogController accountPopup cell must configure .headerPill 26pt fitsSelectedTitleOnly")
+            w1LogCtrl.closeSheet()
+            waitForSheetDetach(on: w1UsageWin, description: "Wave1 single-account UsageLogController detach")
+        }
+
+        // 4. Online SSH standby account must never leak "切换后同步 / 切换后更新 / 预计已重置 · 切换后更新"
+        do {
+            L10n.shared.setLanguage("zh-Hans", notify: false)
+            let remoteQuotaGroups: [[String: Any]] = [[
+                "key": "gemini", "displayName": "Gemini", "summaryLabel": "Gemini", "brands": ["gemini"], "isStandalone": false, "availability": "available", "quotaState": "known",
+                "windows": [[
+                    "id": "weekly", "period": "weekly", "label": "每周", "known": true, "remaining": 0.97, "stale": false,
+                    "resetTime": ISO8601DateFormatter().string(from: Date().addingTimeInterval(-600)),
+                    "resetCountdown": "已过"
+                ]]
+            ]]
+            let equalStamp = Double(Int(Date().timeIntervalSince1970))
+            let rawSshStandbyAccount: [String: Any] = [
+                "id": "acc-ssh-standby",
+                "name": "SSH Standby User",
+                "email": "ssh-standby@example.invalid",
+                "subscription_tier": "FREE",
+                "quota_last_updated": equalStamp,
+                "quota": ["last_updated": equalStamp],
+                "quotaGroups": remoteQuotaGroups,
+                "standbyRefreshStatus": ["mode": "snapshot_cooling"]
+            ]
+            let onlineSshHost = CanonicalHostEnvironment(
+                environmentId: "ssh:remote-ssh-node",
+                hostLabel: "SSH: remote-ssh-node",
+                primaryRemoteKey: "rk-node",
+                windowCount: 1,
+                state: .online,
+                email: "ssh-standby@example.invalid",
+                name: "SSH Standby User",
+                tier: "FREE",
+                matchedLocalAccountId: "acc-ssh-standby",
+                lastError: "",
+                quotaLastUpdated: equalStamp,
+                observedAt: equalStamp,
+                lastFocusedAt: equalStamp,
+                rawSession: ["quotaGroups": remoteQuotaGroups, "quota_last_updated": equalStamp, "quota": ["last_updated": equalStamp]],
+                quotaFreshness: .fresh
+            )
+            let fusedTie = SshEnvironmentResolver.fuseAccountQuota(account: rawSshStandbyAccount, hosts: [onlineSshHost])
+            check(fusedTie["standbyRefreshStatus"] == nil, "fuseAccountQuota tie-break with online SSH must strip standbyRefreshStatus")
+            check((fusedTie["quotaSourceEnvironmentId"] as? String) == "ssh:remote-ssh-node", "fuseAccountQuota tie-break must attach remote quotaSourceEnvironmentId (got \(String(describing: fusedTie["quotaSourceEnvironmentId"])))")
+
+            var contractWithActiveRemote = rawSshStandbyAccount
+            contractWithActiveRemote["standbyRefreshStatus"] = ["mode": "snapshot_cooldown_elapsed"]
+            contractWithActiveRemote["activeRemoteEnvIds"] = ["ssh:remote-ssh-node"]
+            let suppressedContract = QuotaPresentation.contract(contractWithActiveRemote)
+            check(suppressedContract.standbyMode == nil, "QuotaPresentation.contract with activeRemoteEnvIds must suppress standbyMode")
+            let overdueResetText = suppressedContract.displayGroups.first?.windows.first?.effectiveResetText(at: Date(), compact: false) ?? ""
+            check(!overdueResetText.contains("切换后更新") && !overdueResetText.contains("预计已重置"), "Overdue window on online SSH account must not show 预计已重置 · 切换后更新 (got \(overdueResetText))")
+
+            let sshMenuCard = MenuExpandableAccountCardView(accountId: "acc-ssh-standby")
+            sshMenuCard.apply(
+                account: rawSshStandbyAccount,
+                isCurrent: false,
+                isLiveVerified: false,
+                isRecommended: false,
+                isExpanded: true,
+                reachable: true,
+                switchInFlight: false,
+                globalBusy: false,
+                singleBusy: false,
+                singleError: nil,
+                matchingSshHosts: [onlineSshHost],
+                hasSshHosts: true
+            )
+            check(sshMenuCard.timestampLabel.stringValue.contains("同步自 remote-ssh-node"), "MenuExpandableAccountCardView for online SSH standby must display 同步自 remote-ssh-node (got \(sshMenuCard.timestampLabel.stringValue))")
+            check(!sshMenuCard.timestampLabel.stringValue.contains("切换后同步") && !sshMenuCard.timestampLabel.stringValue.contains("切换后更新"), "MenuExpandableAccountCardView for online SSH standby must not show 切换后同步/更新 (got \(sshMenuCard.timestampLabel.stringValue))")
+
+            let offlineMenuCard = MenuExpandableAccountCardView(accountId: "acc-ssh-standby")
+            offlineMenuCard.apply(
+                account: rawSshStandbyAccount,
+                isCurrent: false,
+                isLiveVerified: false,
+                isRecommended: false,
+                isExpanded: true,
+                reachable: true,
+                switchInFlight: false,
+                globalBusy: false,
+                singleBusy: false,
+                singleError: nil,
+                matchingSshHosts: [],
+                hasSshHosts: true
+            )
+            check(offlineMenuCard.timestampLabel.stringValue.contains("切换后同步"), "MenuExpandableAccountCardView for truly offline standby must retain 切换后同步 (got \(offlineMenuCard.timestampLabel.stringValue))")
+        }
+
+        // MARK: - P0-1 & P0-6 Regression Guards (Breathing Pulse Reduce-Motion Safety & Proxy URL Redaction)
+        do {
+            // P0-1: startBreathingPulse must never infinitely recurse when animations are disabled or button has no window
+            let detachedStatusBtn = NSButton(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
+            detachedStatusBtn.alphaValue = 0.55
+            assistant.triggerBreathingPulseForTesting(baseAlpha: 1.0, button: detachedStatusBtn)
+            check(!assistant.isBreathing, "P0-1: startBreathingPulse must reset isBreathing when button has no window or animations are disabled")
+            check(abs(detachedStatusBtn.alphaValue - 1.0) < 0.001, "P0-1: startBreathingPulse must restore baseAlpha on non-animated exit (got \(detachedStatusBtn.alphaValue))")
+
+            let attachedStatusBtn = NSButton(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
+            attachedStatusBtn.alphaValue = 0.40
+            window.contentView?.addSubview(attachedStatusBtn)
+            defer { attachedStatusBtn.removeFromSuperview() }
+            assistant.triggerBreathingPulseForTesting(baseAlpha: 0.85, button: attachedStatusBtn)
+            check(!assistant.isBreathing, "P0-1: startBreathingPulse must not recurse when Design.shouldAnimate is false")
+            check(abs(attachedStatusBtn.alphaValue - 0.85) < 0.001, "P0-1: attached button must restore baseAlpha when Design.shouldAnimate is false (got \(attachedStatusBtn.alphaValue))")
+
+            // P0-6: Proxy URL redaction for UI display while preserving launchEnvironment credentials
+            check(SystemProxyResolver.redactProxyUrl("http://127.0.0.1:7890") == "http://127.0.0.1:7890", "P0-6: credential-free HTTP proxy must remain unchanged")
+            check(SystemProxyResolver.redactProxyUrl("https://proxy.local:8443") == "https://proxy.local:8443", "P0-6: credential-free HTTPS proxy must remain unchanged")
+            check(SystemProxyResolver.redactProxyUrl("http://[::1]:7890") == "http://[::1]:7890", "P0-6: IPv6 credential-free proxy must remain unchanged")
+            check(SystemProxyResolver.redactProxyUrl("http://alice:s3cr3t@127.0.0.1:7890") == "http://alice:[REDACTED]@127.0.0.1:7890", "P0-6: user:pass must redact password")
+            check(SystemProxyResolver.redactProxyUrl("http://alice:p@ss:123@127.0.0.1:8080") == "http://alice:[REDACTED]@127.0.0.1:8080", "P0-6: password containing @ and : must redact cleanly")
+            check(SystemProxyResolver.redactProxyUrl("http://tok_xyz@127.0.0.1:7890") == "http://[REDACTED]@127.0.0.1:7890", "P0-6: bare token userinfo must be redacted")
+            check(SystemProxyResolver.redactProxyUrl("http://:secret@127.0.0.1:7890") == "http://[REDACTED]@127.0.0.1:7890", "P0-6: empty-user password must be redacted")
+            check(SystemProxyResolver.redactProxyUrl("socks5://bob:pw@127.0.0.1:1080") == "socks5://bob:[REDACTED]@127.0.0.1:1080", "P0-6: socks5 credentials must be redacted")
+
+            let emptySnap = SystemProxyResolver.readSystemProxySnapshot(rawSettings: [:])
+            let credRes = SystemProxyResolver.resolve(mode: .manual, manualUrl: "http://alice:s3cr3t@127.0.0.1:7890", snapshot: emptySnap)
+            if case .active(let httpUrl, let httpsUrl, _, let displayUrl) = credRes {
+                check(httpUrl == "http://alice:s3cr3t@127.0.0.1:7890" && httpsUrl == "http://alice:s3cr3t@127.0.0.1:7890", "P0-6: launch URLs must preserve full credentials for env injection")
+                check(displayUrl == "http://alice:[REDACTED]@127.0.0.1:7890" && !displayUrl.contains("s3cr3t"), "P0-6: displayUrl must redact password (got \(displayUrl))")
+                let env = SystemProxyResolver.launchEnvironment(for: credRes)
+                check(env["HTTP_PROXY"] == "http://alice:s3cr3t@127.0.0.1:7890" && env["HTTPS_PROXY"] == "http://alice:s3cr3t@127.0.0.1:7890", "P0-6: launchEnvironment must keep real credentials")
+            } else {
+                check(false, "P0-6: expected .active resolution for manual proxy with credentials (got \(credRes))")
+            }
+
+            let matchedState = SystemProxyResolver.classifyRunningProxyState(
+                expectedHttp: "http://alice:s3cr3t@127.0.0.1:7890",
+                expectedHttps: "http://alice:s3cr3t@127.0.0.1:7890",
+                appEnv: ["HTTPS_PROXY": "http://alice:s3cr3t@127.0.0.1:7890"],
+                languageServerEnvs: [["HTTPS_PROXY": "http://alice:s3cr3t@127.0.0.1:7890"]]
+            )
+            if case .matched(let activeUrl) = matchedState {
+                check(activeUrl == "http://alice:[REDACTED]@127.0.0.1:7890" && !activeUrl.contains("s3cr3t"), "P0-6: .matched activeUrl must be redacted (got \(activeUrl))")
+            } else {
+                check(false, "P0-6: expected .matched state (got \(matchedState))")
+            }
+
+            let overrideState = SystemProxyResolver.classifyRunningProxyState(
+                expectedHttp: "http://alice:s3cr3t@127.0.0.1:7890",
+                expectedHttps: "http://alice:s3cr3t@127.0.0.1:7890",
+                appEnv: ["HTTPS_PROXY": "http://alice:s3cr3t@127.0.0.1:7890"],
+                languageServerEnvs: [["HTTPS_PROXY": "http://shelluser:shellpass@127.0.0.1:9999"]]
+            )
+            if case .overriddenByShell(let lsActualUrl, let appInjectedUrl, let expectedUrl) = overrideState {
+                check(!lsActualUrl.contains("shellpass") && lsActualUrl.contains("[REDACTED]"), "P0-6: overriddenByShell lsActualUrl must be redacted (got \(lsActualUrl))")
+                check(!appInjectedUrl.contains("s3cr3t") && appInjectedUrl.contains("[REDACTED]"), "P0-6: overriddenByShell appInjectedUrl must be redacted (got \(appInjectedUrl))")
+                check(!expectedUrl.contains("s3cr3t") && expectedUrl.contains("[REDACTED]"), "P0-6: overriddenByShell expectedUrl must be redacted (got \(expectedUrl))")
+            } else {
+                check(false, "P0-6: expected .overriddenByShell state (got \(overrideState))")
+            }
+        }
+
+        // MARK: - P1-16 ~ P1-29 Regression Guards (Menu Consistency, Focus Rings, Accessibility, Error States & Update State)
+        do {
+            // P1-16: Disabled / validation_blocked account card must disable stateButton and block clicks
+            let disabledCard = MenuExpandableAccountCardView(accountId: "acc-disabled-p1")
+            var triggeredDisabledSwitch = false
+            disabledCard.onSwitchAccount = { _ in triggeredDisabledSwitch = true }
+            disabledCard.apply(
+                account: ["id": "acc-disabled-p1", "email": "disabled@example.invalid", "disabled": true],
+                isCurrent: false,
+                isLiveVerified: false,
+                isRecommended: false,
+                isExpanded: true,
+                reachable: true,
+                switchInFlight: false,
+                globalBusy: false,
+                singleBusy: false,
+                singleError: nil
+            )
+            check(!disabledCard.stateButton.isEnabled && !disabledCard.switchButton.isEnabled, "P1-16: disabled account must disable both stateButton and switchButton")
+            disabledCard.stateButton.performClick(nil)
+            check(!triggeredDisabledSwitch, "P1-16: clicking stateButton on disabled account must not trigger switch")
+
+            let blockedCard = MenuExpandableAccountCardView(accountId: "acc-blocked-p1")
+            var triggeredBlockedSwitch = false
+            blockedCard.onSwitchAccount = { _ in triggeredBlockedSwitch = true }
+            blockedCard.apply(
+                account: ["id": "acc-blocked-p1", "email": "blocked@example.invalid", "validation_blocked": true],
+                isCurrent: false,
+                isLiveVerified: false,
+                isRecommended: false,
+                isExpanded: true,
+                reachable: true,
+                switchInFlight: false,
+                globalBusy: false,
+                singleBusy: false,
+                singleError: nil
+            )
+            check(!blockedCard.stateButton.isEnabled && !blockedCard.switchButton.isEnabled, "P1-16: validation_blocked account must disable both stateButton and switchButton")
+            blockedCard.stateButton.performClick(nil)
+            check(!triggeredBlockedSwitch, "P1-16: clicking stateButton on validation_blocked account must not trigger switch")
+
+            // P1-17: Shared UsageMetricsPresentation contract (empty cache hit, folded unpriced cost, missing priced fallback)
+            check(UsageMetricsPresentation.formatCacheHitRate(denom: 0, cacheHitRate: 0) == "—", "P1-17: zero-denominator cache hit rate must format as —")
+            check(UsageMetricsPresentation.formatCacheHitRate(denom: 100, cacheHitRate: 42.5) == "42.5%", "P1-17: positive-denominator cache hit rate must format with 1 decimal")
+            check(!UsageMetricsPresentation.isModelRowPriced(["model": "m1", "estimatedUsd": 0.0]), "P1-17: missing priced key with 0 USD must evaluate unpriced")
+            check(UsageMetricsPresentation.isModelRowPriced(["model": "m1", "estimatedUsd": 1.25]), "P1-17: missing priced key with positive USD must evaluate priced")
+            let foldedCost = UsageMetricsPresentation.evaluateCost(
+                foldedModels: [["model": "m1", "priced": false, "estimatedUsd": 0.0]],
+                pricedCount: 0,
+                unpricedCount: 0,
+                usd: 0.0
+            )
+            check(foldedCost.displayUnpricedCount == 1 && foldedCost.isAllUnpriced && !foldedCost.isPartialCost, "P1-17: evaluateCost must derive isAllUnpriced from folded models even when summary unpricedCount is 0")
+            let zeroTotalUnpriced = UsageMetricsPresentation.evaluateCost(
+                foldedModels: [],
+                pricedCount: 0,
+                unpricedCount: 1,
+                usd: 0.0
+            )
+            check(zeroTotalUnpriced.isAllUnpriced && !zeroTotalUnpriced.isPartialCost, "P1-17: unpricedCount>0 with pricedCount==0 and usd==0 must be isAllUnpriced, not partial")
+
+            // P1-19: MenuSegmentedTabsView VoiceOver children & MenuPanel focus rings
+            let p19Tabs = MenuSegmentedTabsView(items: ["Usage", "Quota", "Accounts"], style: .primaryTabs, accessibilityLabel: "P19Tabs")
+            check(!p19Tabs.isAccessibilityElement(), "P1-19: MenuSegmentedTabsView container must not block VoiceOver traversal of child buttons")
+            let a11yChildren = p19Tabs.accessibilityChildren() ?? []
+            check(a11yChildren.count == 3, "P1-19: MenuSegmentedTabsView accessibilityChildren must expose all 3 tab buttons (got \(a11yChildren.count))")
+            check(disabledCard.headerButton.focusRingType == .exterior && disabledCard.stateButton.focusRingType == .exterior, "P1-19: account card headerButton and stateButton must use .exterior focus rings")
+
+            // P1-24: DesignSwitch exterior focus ring inside bounds, NSPopUpButton single focus ring, custom button accessibilityPerformPress
+            let p24Switch = DesignSwitch(frame: NSRect(x: 0, y: 0, width: 34, height: 20))
+            check(p24Switch.focusRingType == .exterior, "P1-24: DesignSwitch must use .exterior focusRingType")
+            check(p24Switch.bounds.contains(p24Switch.focusRingMaskBounds), "P1-24: DesignSwitch focusRingMaskBounds must stay within bounds (got \(p24Switch.focusRingMaskBounds))")
+
+            let p24Popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 120, height: 28), pullsDown: false)
+            p24Popup.addItems(withTitles: ["One", "Two"])
+            Design.applyControls(p24Popup)
+            check(p24Popup.focusRingType == .none && p24Popup.cell?.focusRingType == NSFocusRingType.none, "P1-24: Design.applyControls must disable system square focus ring on NSPopUpButton")
+
+            final class P24PressTarget: NSObject {
+                var pressed = false
+                @objc func handlePress(_ sender: Any?) { pressed = true }
+            }
+            let pressTarget = P24PressTarget()
+            let p24Card = MetricCardBox()
+            p24Card.clickTarget = pressTarget
+            p24Card.clickAction = #selector(P24PressTarget.handlePress(_:))
+            check(p24Card.accessibilityPerformPress() && pressTarget.pressed, "P1-24: MetricCardBox.accessibilityPerformPress must forward click action")
+
+            var groupActivated = false
+            let p24Group = MaintenanceInteractiveGroup(content: NSView(), accessibilityLabel: "P24Group") { _ in
+                groupActivated = true
+            }
+            check(p24Group.focusRingType == .exterior && p24Group.accessibilityPerformPress() && groupActivated, "P1-24: MaintenanceInteractiveGroup must support .exterior focus ring and accessibilityPerformPress")
+            let p24InfoBtn = MaintenanceInfoButton(accessibilityLabel: "P24Info", target: pressTarget, action: #selector(P24PressTarget.handlePress(_:)))
+            check(p24InfoBtn.focusRingType == .exterior, "P1-24: MaintenanceInfoButton must use .exterior focus ring")
+
+            // P1-25: AccountsPage must keep error banner visible at top when cached accounts are non-empty
+            let p25State = state.appendingPathComponent("p25-accounts-error", isDirectory: true)
+            try? FileManager.default.removeItem(at: p25State)
+            let p25Host = Assistant(state: p25State)
+            p25Host.configuration = try ConfigurationStore(state: p25State)
+            p25Host.bridge = BackendBridge(resources: state, state: p25State)
+            p25Host.reachable = true
+            var p25ShouldFail = false
+            p25Host.bridge.fixtureReply = { payload in
+                if (payload["command"] as? String) == "account_list" {
+                    if p25ShouldFail {
+                        return ["ok": false, "error": "Simulated read failure"]
+                    }
+                    return ["ok": true, "accounts": [["id": "acc-p25", "email": "cached@example.invalid", "name": "Cached"]], "activeId": "acc-p25", "currentAccountId": "acc-p25"]
+                }
+                return ["ok": true]
+            }
+            let p25Page = AccountsPage(app: p25Host)
+            p25Page.fetch()
+            pump(0.05)
+            check(p25Page.cardsStack.arrangedSubviews.count == 1, "P1-25: initial cached account list must render 1 account card")
+            p25ShouldFail = true
+            p25Page.fetch()
+            pump(0.05)
+            check(p25Page.cardsStack.arrangedSubviews.count == 2, "P1-25: AccountsPage with cached accounts + read error must keep error card AND account card (got \(p25Page.cardsStack.arrangedSubviews.count))")
+            if let firstCard = p25Page.cardsStack.arrangedSubviews.first {
+                func collectLabels(_ v: NSView) -> [String] {
+                    let own = (v as? NSTextField).map { [$0.stringValue] } ?? []
+                    return own + v.subviews.flatMap { collectLabels($0) }
+                }
+                let errTexts = collectLabels(firstCard)
+                check(errTexts.contains(where: { $0.contains("Simulated read failure") }), "P1-25: first card in cardsStack must display accountReadError (got \(errTexts))")
+            }
+
+            // P1-26: Silent checkForUpdates must preserve valid .readyToInstall state on failure
+            let p26State = state.appendingPathComponent("p26-update-ready", isDirectory: true)
+            try? FileManager.default.removeItem(at: p26State)
+            try FileManager.default.createDirectory(at: p26State, withIntermediateDirectories: true)
+            let p26Host = Assistant(state: p26State)
+            p26Host.configuration = try ConfigurationStore(state: p26State)
+            p26Host.bridge = BackendBridge(resources: state, state: p26State)
+            let p26Mgr = AppUpdateManager(app: p26Host)
+            let fakeDmg = p26State.appendingPathComponent("GravityBox-9.9.9-arm64.dmg")
+            try Data("dmg".utf8).write(to: fakeDmg)
+            let fakeRelease = AppReleaseInfo(
+                version: "9.9.9",
+                tagName: "v9.9.9",
+                title: "GravityBox 9.9.9",
+                changelog: "Test",
+                publishedDate: "2026-11-22",
+                htmlURL: AppUpdateManager.releasesPageURL,
+                dmgURL: nil,
+                sha256URL: nil
+            )
+            p26Mgr.simulateReadyToInstall(fakeRelease, dmgURL: fakeDmg)
+            var sawCheckingState = false
+            p26Mgr.onStateChanged = { [weak p26Mgr] in
+                if let s = p26Mgr?.state, case .checking = s {
+                    sawCheckingState = true
+                }
+            }
+            p26Mgr.checkTransport = { _, completion in
+                completion(nil, nil, NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet))
+            }
+            p26Mgr.checkForUpdates(silent: true)
+            pump(0.05)
+            check(!sawCheckingState, "P1-26: silent checkForUpdates must not transition to .checking when valid .readyToInstall is active")
+            if case .readyToInstall(let rel, let dmg) = p26Mgr.state {
+                check(rel.version == "9.9.9" && dmg.path == fakeDmg.path, "P1-26: silent failure must preserve .readyToInstall state")
+            } else {
+                check(false, "P1-26: expected .readyToInstall to be preserved after silent check failure (got \(p26Mgr.state))")
+            }
+
+            // MARK: - P2-10 ~ P2-16 Regression Guards (Dynamic a11y labels, ms timestamp normalization, Sidebar badge a11y)
+            let dynBtn = button("初始标题", target: nil, action: #selector(Assistant.quit))
+            check(dynBtn.accessibilityLabel() == "初始标题", "P2-10: DesignButton accessibilityLabel must reflect initial title")
+            dynBtn.title = "动态更新标题"
+            check(dynBtn.accessibilityLabel() == "动态更新标题", "P2-10: DesignButton accessibilityLabel must track dynamic title changes (got \(String(describing: dynBtn.accessibilityLabel())))")
+
+            let sidebarUpdateBtn = SidebarLaunchButton(title: "安装更新", symbolName: "arrow.down.circle", isUpdatePrompt: true, target: nil, action: #selector(Assistant.quit))
+            sidebarUpdateBtn.badgeText = "v1.2.0"
+            check(sidebarUpdateBtn.accessibilityLabel()?.contains("v1.2.0") == true, "P2-10: SidebarLaunchButton accessibilityLabel must include badgeText (got \(String(describing: sidebarUpdateBtn.accessibilityLabel())))")
+
+            let p212State = state.appendingPathComponent("p212-ms-stamp", isDirectory: true)
+            try? FileManager.default.removeItem(at: p212State)
+            let p212Host = Assistant(state: p212State)
+            p212Host.configuration = try ConfigurationStore(state: p212State)
+            p212Host.bridge = BackendBridge(resources: state, state: p212State)
+            let nowSec = Date().timeIntervalSince1970
+            p212Host.cachedAccounts = [[
+                "id": "acc-ms",
+                "email": "ms@example.invalid",
+                "persisted_quota_last_updated": (nowSec - 120.0) * 1000.0
+            ]]
+            if let oldest = p212Host.oldestEnabledAccountQuotaTimestamp() {
+                check(abs(oldest - (nowSec - 120.0)) < 2.0, "P2-12: oldestEnabledAccountQuotaTimestamp must normalize millisecond timestamps to seconds (got \(oldest))")
+            } else {
+                check(false, "P2-12: oldestEnabledAccountQuotaTimestamp must return normalized timestamp")
+            }
         }
 
         let result:[String:Any] = ["stableOnlySelectionPassed":true,"nativeLayouts":captures.count,"captures":captures,"enCaptures":enCaptures,"enExtraCaptures":enExtraCaptures,"menuCaptures":6,"safeSwitchSharedFlowPassed":true,"emailWidthPassed":true,"partialPricingPassed":true,"headlessNoVisibleWindowLeaksPassed":true,"nativeAssertions":assertionCount,"scope":"isolated synthetic AppKit fixture; not installed-app acceptance"]

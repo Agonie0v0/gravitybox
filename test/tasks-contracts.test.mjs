@@ -93,4 +93,23 @@ test('异步任务立即返回 ID，可取消并保留结果记录', async () =>
   try { const id = tasks.begin('synthetic', '模拟任务', signal => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))); assert.equal(typeof id, 'string'); assert.equal(tasks.list()[0].state, 'running'); tasks.cancel(id); await tasks.stop(); assert.equal(tasks.list()[0].state, 'cancelled'); const saved = JSON.parse(await readFile(join(directory, 'activity.json'))); assert.equal(saved[0].state, 'cancelled'); }
   finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('P0-7: 任务持久化链尾部写盘失败后 stop() 仍正常 resolve，不阻塞优雅退出', async () => {
+  const directory = await state();
+  const tasks = new Tasks(directory, () => {});
+  await tasks.start();
+  try {
+    // 将 activity.json 占位为目录，触发 atomicJson 写盘抛错
+    await mkdir(join(directory, 'activity.json'), { recursive: true });
+    tasks.begin('synthetic-fail-persist', '写盘失败容错', async () => ({ ok: true }));
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline && tasks.list()[0]?.state !== 'succeeded') {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(tasks.list()[0]?.state, 'succeeded');
+    await assert.doesNotReject(() => tasks.stop());
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 });

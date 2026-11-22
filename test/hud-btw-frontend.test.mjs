@@ -189,7 +189,7 @@ class FakeElement {
     if (p.startsWith('.')) {
       return this.classList.contains(p.slice(1));
     }
-    const attrMatches = [...p.matchAll(/\[([a-zA-Z0-9_-]+)(?:="([^"]*)")?\]/g)];
+    const attrMatches = [...p.matchAll(/\[([a-zA-Z0-9_-]+)(?:([\*\^]?=)"([^"]*)")?\]/g)];
     const tagMatch = p.match(/^([a-zA-Z][a-zA-Z0-9-]*)/);
     if (tagMatch && this.tagName !== tagMatch[1].toUpperCase()) {
       return false;
@@ -197,9 +197,14 @@ class FakeElement {
     if (attrMatches.length > 0) {
       for (const m of attrMatches) {
         const attrName = m[1];
-        const expected = m[2];
+        const op = m[2];
+        const expected = m[3];
         if (expected === undefined) {
           if (!this.hasAttribute(attrName)) return false;
+        } else if (op === '*=') {
+          if (!String(this.getAttribute(attrName) || '').includes(expected)) return false;
+        } else if (op === '^=') {
+          if (!String(this.getAttribute(attrName) || '').startsWith(expected)) return false;
         } else if (this.getAttribute(attrName) !== expected) {
           return false;
         }
@@ -860,5 +865,240 @@ describe('HUD BTW (/btw side-question) 前端生命周期与隔离性', { concur
     const bounds = resolveVisibleHorizontalBounds(anchor, { innerWidth: 1440, innerHeight: 900 });
     assert.equal(bounds.left, 940);
     assert.equal(bounds.right, 1420);
+  });
+
+  it('P0-4 回归：同一 subpane 存在多个子智能体/BTW Tab 时，始终优先绑定当前可见 Tab 与其 composer，避免锁死首个隐藏 Tab', () => {
+    const mainUuid = 'aaaaaaaa-1111-4111-8111-111111111111';
+    const sub1Uuid = 'bbbbbbbb-2222-4222-8222-222222222222';
+    const sub2Uuid = 'cccccccc-3333-4333-8333-333333333333';
+    const btwUuid = 'dddddddd-4444-4444-8444-444444444444';
+    const { doc, win } = createFakeDomEnv(`/c/${mainUuid}`, '');
+
+    const main = createMainPane(doc, { convId: mainUuid });
+    doc.body.appendChild(main.view);
+
+    const subpane = new FakeElement('div', doc);
+    subpane.setAttribute('data-media-drop-scope', 'subpane');
+    subpane._rect = { left: 920, top: 48, width: 500, height: 820, right: 1420, bottom: 868 };
+
+    // Tab 1 (隐藏的子智能体 Tab，位于 DOM 最前)
+    const tab1 = new FakeElement('div', doc);
+    tab1.setAttribute('data-testid', 'subagent-tab-conversation');
+    tab1.setAttribute('data-cascade-id', sub1Uuid);
+    tab1.setAttribute('hidden', '');
+    const tab1Input = new FakeElement('div', doc);
+    tab1Input.setAttribute('data-testid', 'agent-input-box');
+    const tab1Composer = new FakeElement('div', doc);
+    tab1Composer.className = 'surface-composer';
+    tab1Input.appendChild(tab1Composer);
+    tab1.appendChild(tab1Input);
+
+    // Tab 2 (当前可见的子智能体 Tab，位于 DOM 较后位置)
+    const tab2 = new FakeElement('div', doc);
+    tab2.setAttribute('data-testid', 'subagent-tab-conversation');
+    tab2.setAttribute('data-cascade-id', sub2Uuid);
+    const tab2Input = new FakeElement('div', doc);
+    tab2Input.setAttribute('data-testid', 'agent-input-box');
+    const tab2Composer = new FakeElement('div', doc);
+    tab2Composer.className = 'surface-composer';
+    tab2Input.appendChild(tab2Composer);
+    tab2.appendChild(tab2Input);
+
+    // Tab 3 (隐藏的 BTW Tab)
+    const tabBtw = new FakeElement('div', doc);
+    tabBtw.setAttribute('data-testid', 'side-question-tab-conversation');
+    tabBtw.setAttribute('data-cascade-id', btwUuid);
+    tabBtw.setAttribute('hidden', '');
+    const btwInput = new FakeElement('div', doc);
+    btwInput.setAttribute('data-testid', 'agent-input-box');
+    const btwComposer = new FakeElement('div', doc);
+    btwComposer.className = 'surface-composer';
+    btwInput.appendChild(btwComposer);
+    tabBtw.appendChild(btwInput);
+
+    subpane.appendChild(tab1);
+    subpane.appendChild(tab2);
+    subpane.appendChild(tabBtw);
+    doc.body.appendChild(subpane);
+
+    const mgr = new AntigravityHudManager({});
+    withFakeDom(doc, win, () => {
+      mgr.reconcileMounts();
+      const subInst = [...mgr.instances.values()].find((i) => i.isSubpane);
+      assert.ok(subInst, '应挂载子分栏 HUD 实例');
+      assert.equal(subInst.getCurrentConvId(), sub2Uuid, '应绑定到当前可见的 Tab 2 而非首个隐藏 Tab 1');
+      assert.equal(subInst.paneKind, 'subagent');
+      assert.equal(subInst.targetComposer, tab2Composer, 'HUD 必须挂载在可见 Tab 2 的 composer 下');
+      assert.equal(mgr.resolveConversationId(subpane, null, 2, true), sub2Uuid);
+      assert.equal(mgr.inferPaneContext(subpane).paneKind, 'subagent');
+
+      // 切换为 BTW Tab 可见、Tab 2 隐藏
+      tab2.setAttribute('hidden', '');
+      tabBtw.removeAttribute('hidden');
+      mgr.reconcileMounts();
+      assert.equal(subInst.getCurrentConvId(), btwUuid, '切到 BTW Tab 后应即时切换会话 ID');
+      assert.equal(subInst.paneKind, 'btw');
+      assert.equal(subInst.targetComposer, btwComposer, '切到 BTW Tab 后 HUD 应迁移到 BTW composer 下');
+      assert.equal(mgr.inferPaneContext(subpane).paneKind, 'btw');
+
+      // 切换为 Tab 1 可见、BTW 隐藏
+      tabBtw.setAttribute('hidden', '');
+      tab1.removeAttribute('hidden');
+      mgr.reconcileMounts();
+      assert.equal(subInst.getCurrentConvId(), sub1Uuid, '切回 Tab 1 后应正确切换回 sub-1');
+      assert.equal(subInst.paneKind, 'subagent');
+      assert.equal(subInst.targetComposer, tab1Composer);
+    });
+
+    mgr.dispose();
+  });
+
+  it('P1-4 回归：MutationObserver 普通正文流式 childList 合并至 140ms 节流，结构/按钮节点保持 20ms 紧急响应', () => {
+    const observers = [];
+    const scheduledDelays = [];
+    const OrigMO = globalThis.MutationObserver;
+    const origSetTimeout = globalThis.setTimeout;
+    const origClearTimeout = globalThis.clearTimeout;
+
+    const { doc, win } = createFakeDomEnv('/c/11111111-1111-4111-8111-111111111111', '');
+    const main = createMainPane(doc, { convId: '11111111-1111-4111-8111-111111111111' });
+    const markdownBody = new FakeElement('div', doc);
+    markdownBody.className = 'prose';
+    main.view.appendChild(markdownBody);
+    doc.body.appendChild(main.view);
+
+    globalThis.MutationObserver = class {
+      constructor(cb) {
+        this.cb = cb;
+        this.targets = [];
+        observers.push(this);
+      }
+      observe(target, opts) {
+        this.targets.push({ target, opts });
+      }
+      disconnect() {}
+    };
+    globalThis.setTimeout = (fn, ms) => {
+      scheduledDelays.push(ms);
+      return { fn, ms };
+    };
+    globalThis.clearTimeout = () => {};
+
+    const mgr = new AntigravityHudManager({});
+    try {
+      withFakeDom(doc, win, () => {
+        mgr.start();
+        const bodyObs = observers.find((o) =>
+          o.targets.some((t) => t.target === doc.body && t.opts?.subtree === true)
+        );
+        assert.ok(bodyObs, '应创建 document.body subtree MutationObserver');
+
+        // 1. 普通正文 Markdown 流式节点插入 -> 140ms 非紧急节流
+        const streamSpan = new FakeElement('span', doc);
+        streamSpan.textContent = 'token chunk';
+        scheduledDelays.length = 0;
+        mgr.reconcileTimer = null;
+        bodyObs.cb([{ type: 'childList', target: markdownBody, addedNodes: [streamSpan], removedNodes: [] }]);
+        assert.equal(scheduledDelays[0], 140, '普通正文流式 childList 应走 140ms 合并节流');
+
+        // 2. 插入按钮/状态结构节点 -> 20ms 紧急响应
+        const cancelBtn = new FakeElement('button', doc);
+        cancelBtn.setAttribute('data-testid', 'input-cancel-button');
+        scheduledDelays.length = 0;
+        mgr.reconcileTimer = null;
+        bodyObs.cb([{ type: 'childList', target: markdownBody, addedNodes: [cancelBtn], removedNodes: [] }]);
+        assert.equal(scheduledDelays[0], 20, '按钮/状态结构 childList 应保持 20ms 紧急响应');
+      });
+    } finally {
+      mgr.dispose();
+      globalThis.MutationObserver = OrigMO;
+      globalThis.setTimeout = origSetTimeout;
+      globalThis.clearTimeout = origClearTimeout;
+    }
+  });
+
+  it('P1-6 回归：单主栏与子分栏/BTW 共存时，主分栏模型全局回退跳过子分栏 DOM，杜绝串取子分栏模型与窗口容量', () => {
+    const mainUuid = '11111111-1111-4111-8111-111111111111';
+    const btwUuid = '22222222-2222-4222-8222-222222222222';
+    const { doc, win } = createFakeDomEnv(`/c/${mainUuid}`, '');
+
+    // 构造主分栏（暂时缺少局部模型选择器）+ 右侧 BTW 分栏（自带模型选择器与容量）
+    const mainView = new FakeElement('div', doc);
+    mainView.setAttribute('data-testid', 'conversation-view');
+    mainView.setAttribute('data-cascade-id', mainUuid);
+    const mainInput = new FakeElement('div', doc);
+    mainInput.setAttribute('data-testid', 'agent-input-box');
+    const mainComposer = new FakeElement('div', doc);
+    mainComposer.className = 'surface-composer';
+    mainInput.appendChild(mainComposer);
+    mainView.appendChild(mainInput);
+    doc.body.appendChild(mainView);
+
+    const btw = createBtwSidePane(doc, { convId: btwUuid, modelId: 'gemini-3.8-flash', capacity: 1000000 });
+    doc.body.appendChild(btw.wrapper);
+
+    const mgr = new AntigravityHudManager({});
+    withFakeDom(doc, win, () => {
+      assert.equal(mgr.resolveActiveModel(mainView, 1), '', '主分栏无局部模型按钮时不得串取 BTW 子分栏模型');
+      assert.equal(mgr.resolveActiveModelCapacity(mainView, 1), undefined, '主分栏不得串取 BTW 子分栏窗口容量');
+      assert.equal(mgr.resolveActiveModel(btw.subpane, 2), 'gemini-3.8-flash', 'BTW 子分栏自身模型读取不受影响');
+      assert.equal(mgr.resolveActiveModelCapacity(btw.subpane, 2), 1000000);
+    });
+    mgr.dispose();
+  });
+
+  it('P2-1 回归：主分栏内嵌子智能体卡片的 spinner/shimmer 不误把前台纯文本生成拉偏为 executing，前台工具仍保持 executing', () => {
+    const mainUuid = '11111111-1111-4111-8111-111111111111';
+    const { doc, win } = createFakeDomEnv(`/c/${mainUuid}`, '');
+    const main = createMainPane(doc, { convId: mainUuid });
+    doc.body.appendChild(main.view);
+
+    // 主会话前台处于流式生成（存在 input-cancel-button）
+    const cancelBtn = new FakeElement('button', doc);
+    cancelBtn.setAttribute('data-testid', 'input-cancel-button');
+    main.composer.appendChild(cancelBtn);
+
+    // 1. 内嵌子智能体卡片（data-testid*="subagent-card" 与 aria-label^="Open Subagent:"）自带 spinner 与 shimmer
+    const subCard1 = new FakeElement('div', doc);
+    subCard1.setAttribute('data-testid', 'subagent-card');
+    const subSpinner1 = new FakeElement('span', doc);
+    subSpinner1.setAttribute('data-testid', 'status-loading-spinner');
+    const subShimmer1 = new FakeElement('span', doc);
+    subShimmer1.className = 'animate-shimmer-text';
+    subShimmer1.textContent = 'Running shell command';
+    subCard1.appendChild(subSpinner1);
+    subCard1.appendChild(subShimmer1);
+    main.view.appendChild(subCard1);
+
+    const subCard2 = new FakeElement('div', doc);
+    subCard2.setAttribute('aria-label', 'Open Subagent: worker-1');
+    const subSpinner2 = new FakeElement('span', doc);
+    subSpinner2.setAttribute('data-testid', 'status-loading-spinner');
+    subCard2.appendChild(subSpinner2);
+    main.view.appendChild(subCard2);
+
+    const mgr = new AntigravityHudManager({});
+    withFakeDom(doc, win, () => {
+      assert.equal(
+        mgr.resolveActivityPhase(main.view, { isSubpane: false, paneKind: 'main' }),
+        'generating',
+        '内嵌子智能体卡片内的 spinner/shimmer 不得把主会话前台生成误判为 executing'
+      );
+
+      // 2. 主会话前台普通工具卡片存在 spinner 时，仍应准确识别为 executing
+      const toolCard = new FakeElement('div', doc);
+      toolCard.setAttribute('data-testid', 'tool-call');
+      const toolSpinner = new FakeElement('span', doc);
+      toolSpinner.setAttribute('data-testid', 'status-loading-spinner');
+      toolCard.appendChild(toolSpinner);
+      main.view.appendChild(toolCard);
+
+      assert.equal(
+        mgr.resolveActivityPhase(main.view, { isSubpane: false, paneKind: 'main' }),
+        'executing',
+        '主会话前台普通工具卡片的 spinner 仍应识别为 executing'
+      );
+    });
+    mgr.dispose();
   });
 });

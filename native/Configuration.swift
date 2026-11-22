@@ -25,7 +25,8 @@ struct DesktopApplicationTarget {
 
     func matches(_ app: NSRunningApplication) -> Bool { matchesStrict(app) }
     func matchesStrict(_ app: NSRunningApplication) -> Bool {
-        app.bundleIdentifier == bundleIdentifier && app.bundleURL?.standardizedFileURL.path == URL(fileURLWithPath: path).standardizedFileURL.path
+        app.bundleIdentifier == bundleIdentifier
+            && app.bundleURL?.resolvingSymlinksInPath().standardizedFileURL.path == URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
     }
     static func matchesAny(_ app: NSRunningApplication) -> Bool { DesktopApplicationTarget().matchesStrict(app) }
     static func isRegisteredRunning() -> Bool {
@@ -42,7 +43,7 @@ struct AppConfiguration: Codable {
     var quotaRefreshMinutes = 0
     var hudEnabled = true
     var autoPricingSyncEnabled = false
-    var syncAntigravityLifecycle = false
+    var launchAntigravityOnStart = false
     var autoUpdateEnabled = false
     var lastCleanedVersion = ""
     var accountsCollapsed = false
@@ -52,9 +53,11 @@ struct AppConfiguration: Codable {
     var menuTrendMetric = "tokens"
     var applicationChannel = "stable"
     var appLanguage: String? = nil
+    var antigravityProxyMode = "off"
+    var antigravityProxyManualUrl = ""
 
     enum CodingKeys: String, CodingKey {
-        case autoPricingSyncEnabled, hudEnabled, quotaRefreshMinutes, schema, lastPage, navigationVersion, syncAntigravityLifecycle, autoUpdateEnabled, lastCleanedVersion, accountsCollapsed, menuSelectedTab, menuUsagePeriod, menuUsageEnvironmentId, menuTrendMetric, applicationChannel, appLanguage
+        case autoPricingSyncEnabled, hudEnabled, quotaRefreshMinutes, schema, lastPage, navigationVersion, launchAntigravityOnStart, autoUpdateEnabled, lastCleanedVersion, accountsCollapsed, menuSelectedTab, menuUsagePeriod, menuUsageEnvironmentId, menuTrendMetric, applicationChannel, appLanguage, antigravityProxyMode, antigravityProxyManualUrl
     }
 
     init() {}
@@ -67,7 +70,7 @@ struct AppConfiguration: Codable {
         schema = (try? container.decode(Int.self, forKey: .schema)) ?? 2
         lastPage = (try? container.decode(Int.self, forKey: .lastPage)) ?? 0
         navigationVersion = try? container.decode(Int.self, forKey: .navigationVersion)
-        syncAntigravityLifecycle = (try? container.decode(Bool.self, forKey: .syncAntigravityLifecycle)) ?? false
+        launchAntigravityOnStart = (try? container.decode(Bool.self, forKey: .launchAntigravityOnStart)) ?? false
         autoUpdateEnabled = (try? container.decode(Bool.self, forKey: .autoUpdateEnabled)) ?? false
         lastCleanedVersion = (try? container.decode(String.self, forKey: .lastCleanedVersion)) ?? ""
         accountsCollapsed = (try? container.decode(Bool.self, forKey: .accountsCollapsed)) ?? false
@@ -88,6 +91,14 @@ struct AppConfiguration: Codable {
             let trimmed = rawLang.trimmingCharacters(in: .whitespacesAndNewlines)
             appLanguage = trimmed.isEmpty ? nil : trimmed
         }
+        if let rawProxyMode = try? container.decodeIfPresent(String.self, forKey: .antigravityProxyMode) {
+            let trimmedMode = rawProxyMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            antigravityProxyMode = ["off", "system", "manual"].contains(trimmedMode) ? trimmedMode : "off"
+        } else {
+            antigravityProxyMode = "off"
+        }
+        antigravityProxyManualUrl = ((try? container.decodeIfPresent(String.self, forKey: .antigravityProxyManualUrl)) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     mutating func migrateNavigation() {

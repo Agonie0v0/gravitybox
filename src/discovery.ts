@@ -1,11 +1,12 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, readFile, stat as fsStat, writeFile } from 'node:fs/promises';
+import { readFile, stat as fsStat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { openAsarArchive } from './asar.js';
 import { assertLoopback } from './cdp.js';
 import { targetForApp } from './application-target.js';
+import { atomicJson } from './files.js';
 import { bt } from './i18n.js';
 const execFileRaw = promisify(execFile);
 const execute = (file: string, args: string[], timeout = 3000) => execFileRaw(file, args, { timeout });
@@ -74,8 +75,7 @@ async function saveDiskBundleCache(): Promise<void> {
       const { expiresAt: _e, hardExpiresAt: _h, ...persisted } = entry;
       entries[k] = persisted;
     }
-    await mkdir(dirname(BUNDLE_DISK_CACHE_PATH), { recursive: true, mode: 0o700 });
-    await writeFile(BUNDLE_DISK_CACHE_PATH, JSON.stringify({ schema: 1, entries }) + '\n', { mode: 0o600 });
+    await atomicJson(BUNDLE_DISK_CACHE_PATH, { schema: 1, entries }, undefined, { durability: 'relaxed' });
   } catch {}
 }
 

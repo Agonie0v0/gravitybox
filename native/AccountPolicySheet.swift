@@ -75,6 +75,7 @@ final class AccountPolicySheet: NSObject {
     private var candidateSubLabel: NSTextField!
     private let initialRawMonitoredModel: String
     private var userChangedMonitoredScope = false
+    private var saving = false
     private let cancelButton = button(L10n.t("common.cancel", fallback: "取消"), target: nil, action: #selector(cancel))
     let saved: () -> Void
     var onDismiss: (() -> Void)?
@@ -354,10 +355,12 @@ final class AccountPolicySheet: NSObject {
     }
 
     @objc func cancel() {
+        guard !saving else { return }
         window.sheetParent?.endSheet(window)
     }
 
     @objc func save() {
+        guard !saving else { return }
         guard let low = Int(reserve.stringValue.trimmingCharacters(in: .whitespaces)), (1...98).contains(low) else {
             errorLabel.stringValue = L10n.t("policy.error.reserve_range", fallback: "触发阈值请输入 1–98 之间的整数。")
             errorLabel.isHidden = false
@@ -382,7 +385,10 @@ final class AccountPolicySheet: NSObject {
         let strat = strategyPopup.selectedItem?.representedObject as? String ?? "priority"
         let selectedModel = modelPopup.selectedItem?.representedObject as? String ?? "all"
         let model = (!userChangedMonitoredScope && !initialRawMonitoredModel.isEmpty) ? initialRawMonitoredModel : selectedModel
+        saving = true
         saveButton.isEnabled = false
+        cancelButton.isEnabled = false
+        let onSaved = self.saved
         app.bridge.send([
             "command": "auto_switch_set",
             "config": [
@@ -392,13 +398,19 @@ final class AccountPolicySheet: NSObject {
                 "monitored_model": model
             ]
         ]) { [weak self] response in
-            guard let self else { return }
-            self.saveButton.isEnabled = true
             switch response {
             case .success:
-                self.saved()
+                onSaved()
+                guard let self else { return }
+                self.saving = false
+                self.saveButton.isEnabled = true
+                self.cancelButton.isEnabled = true
                 self.cancel()
             case .failure(let error):
+                guard let self else { return }
+                self.saving = false
+                self.saveButton.isEnabled = true
+                self.cancelButton.isEnabled = true
                 self.errorLabel.stringValue = error.localizedDescription
                 self.errorLabel.isHidden = false
                 self.resizeSheetToFit()

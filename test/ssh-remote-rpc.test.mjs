@@ -721,3 +721,146 @@ test('SshRemoteRpcClient 分页拉取 steps/gen_metadata、GetCascadeTrajectoryE
   assert.equal(localCallCount, 2, '排队中的强制刷新应在首个请求完成后补跑一次');
   bridge.dispose();
 });
+
+test('getAllCascadeTrajectories 透传 /btw fork 元数据并拒绝自引用、非法索引与敏感字段泄漏', async () => {
+  const { cdp } = createInPageHarness({
+    routes: {
+      GetAllCascadeTrajectories: {
+        status: 200,
+        body: {
+          trajectorySummaries: {
+            'conv-btw-camel': {
+              trajectoryId: 'traj-btw-camel',
+              trajectoryType: 22,
+              stepCount: 6,
+              lastModifiedTime: '2026-11-22T09:00:00Z',
+              title: 'SECRET_PROMPT_TITLE_SHOULD_NOT_LEAK',
+              parentReferences: [
+                {
+                  parentCascadeId: 'conv-main-1',
+                  parentTrajectoryId: 'traj-main-1',
+                  forkStepIndex: 2,
+                  referenceType: 1,
+                  prompt: 'SECRET_REF_PROMPT_LEAK',
+                },
+                {
+                  parentCascadeId: 'conv-main-1',
+                  parentTrajectoryId: 'traj-main-1',
+                  forkStepIndex: '5',
+                  referenceType: 'FORK',
+                },
+              ],
+            },
+            'conv-btw-snake': {
+              trajectory_id: 'traj-btw-snake',
+              trajectory_type: 'CORTEX_TRAJECTORY_TYPE_SIDE_QUESTION',
+              stepCount: 4,
+              trajectoryMetadata: {
+                parent_conversation_id: 'conv-main-2',
+                parent_references: [
+                  {
+                    parent_cascade_id: 'conv-main-2',
+                    fork_step_index: 3,
+                    reference_type: 2,
+                  },
+                ],
+              },
+            },
+            'conv-btw-direct': {
+              trajectoryId: 'traj-btw-direct',
+              trajectoryType: 22,
+              stepCount: 4,
+              parentConversationId: 'conv-main-3',
+              fork_step_index: '7',
+            },
+            'conv-self-and-invalid': {
+              trajectoryId: 'traj-self-invalid',
+              trajectoryType: 2,
+              stepCount: 10,
+              parentReferences: [
+                { parentCascadeId: 'conv-self-and-invalid', forkStepIndex: 4 },
+                { parentCascadeId: 'traj-self-invalid', forkStepIndex: 6 },
+                { parentCascadeId: 'conv-other', forkStepIndex: -1 },
+                { parentCascadeId: 'conv-other', forkStepIndex: '18446744073709551615' },
+                { parentCascadeId: 'conv-other', forkStepIndex: 10000000 },
+              ],
+            },
+          },
+        },
+      },
+    },
+  });
+
+  const client = new SshRemoteRpcClient({ cdp, getContextId: () => 42, timeoutMs: 2000 });
+  const res = await client.getAllCascadeTrajectories();
+  assert.equal(res.ok, true);
+  assert.equal(res.data.length, 4);
+
+  const byId = new Map(res.data.map((item) => [item.cascadeId, item]));
+  const camel = byId.get('conv-btw-camel');
+  assert.equal(camel.forkStepIndex, 5, '多条有效 parentReferences 应取最大 forkStepIndex');
+  assert.equal(camel.forkParentCascadeId, 'conv-main-1');
+  assert.equal(camel.parentReferences.length, 2);
+  assert.equal(camel.parentReferences[0].forkStepIndex, 2);
+  assert.equal(camel.parentReferences[1].forkStepIndex, 5);
+
+  const snake = byId.get('conv-btw-snake');
+  assert.equal(snake.trajectoryId, 'traj-btw-snake');
+  assert.equal(snake.parentConversationId, 'conv-main-2');
+  assert.equal(snake.forkStepIndex, 3);
+  assert.equal(snake.forkParentCascadeId, 'conv-main-2');
+
+  const direct = byId.get('conv-btw-direct');
+  assert.equal(direct.forkStepIndex, 7);
+  assert.equal(direct.forkParentCascadeId, 'conv-main-3');
+
+  const invalid = byId.get('conv-self-and-invalid');
+  assert.equal(invalid.forkStepIndex, undefined, '自引用及非法/超大 forkStepIndex 必须全部拒绝');
+  assert.equal(invalid.forkParentCascadeId, undefined);
+
+  const serialized = JSON.stringify(res.data);
+  assert.equal(serialized.includes('SECRET_PROMPT_TITLE_SHOULD_NOT_LEAK'), false, '禁止透传标题敏感字段');
+  assert.equal(serialized.includes('SECRET_REF_PROMPT_LEAK'), false, '禁止透传 parentReference 敏感字段');
+});
+
+test('P1-14: getGeneratorMetadata 提取 chatStartMetadata 原生时间戳', async () => {
+  const { cdp } = createInPageHarness({
+    routes: {
+      GetCascadeTrajectoryGeneratorMetadata: {
+        status: 200,
+        body: {
+          generatorMetadata: [
+            {
+              stepIndices: [0],
+              executionId: 'exec-ts-1',
+              chatModel: {
+                responseModel: 'gemini-3.8-flash',
+                usage: { inputTokens: '120', outputTokens: '30' },
+                chatStartMetadata: {
+                  createdAt: '2026-11-20T08:15:00Z',
+                },
+              },
+            },
+            {
+              stepIndices: [2],
+              executionId: 'exec-ts-2',
+              chatModel: {
+                responseModel: 'gemini-3.8-flash',
+                usage: { inputTokens: '200', outputTokens: '40' },
+                chatStartMetadata: {
+                  start_time: { seconds: 1795200000, nanos: 0 },
+                },
+              },
+            },
+          ],
+        },
+      },
+    },
+  });
+  const client = new SshRemoteRpcClient({ cdp, getContextId: () => 42, timeoutMs: 2000 });
+  const res = await client.getGeneratorMetadata('conv-ts', 0);
+  assert.equal(res.ok, true);
+  assert.equal(res.data.length, 2);
+  assert.equal(res.data[0].createdAt, '2026-11-20T08:15:00Z');
+  assert.deepEqual(res.data[1].createdAt, { seconds: 1795200000, nanos: 0 });
+});

@@ -602,3 +602,36 @@ test('v3 三卡片双开关: scan 双桶聚合、smartClear 免令牌清理、�
   }
 });
 
+test('P1-43: restore() Schema v2 预检拦截指向 User/state.vscdb 等核心敏感路径段的篡改清单', async () => {
+  const temp = await realpath(await mkdtemp(join(tmpdir(), 'gb-maint-p1-43-')));
+  const profile = join(temp, 'profile');
+  const trash = join(temp, 'trash');
+  const geminiDir = join(temp, 'gemini');
+  await Promise.all([mkdir(profile), mkdir(trash), mkdir(geminiDir)]);
+  try {
+    const snapId = `GravityBox-缓存-${Date.now()}`;
+    const snapDir = join(trash, snapId);
+    const fakePayload = join(snapDir, 'items', 'PartitionsCache', '1-state.vscdb');
+    await mkdir(join(snapDir, 'items', 'PartitionsCache'), { recursive: true });
+    await writeFile(fakePayload, 'tampered');
+
+    const forbiddenTarget = join(profile, 'User', 'globalStorage', 'state.vscdb');
+    await writeFile(
+      join(snapDir, '恢复清单.json'),
+      JSON.stringify({
+        schema: 2,
+        at: new Date().toISOString(),
+        moved: [{ entryName: 'PartitionsCache', from: forbiddenTarget, to: fakePayload }],
+        totalBytes: 8,
+        fileCount: 1,
+        scope: ['PartitionsCache'],
+      })
+    );
+
+    const m = new CacheMaintenance(profile, trash, async () => false, { geminiDir });
+    await assert.rejects(() => m.restore(snapId), /受保护的核心数据路径|核心保护路径|protected/i);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+

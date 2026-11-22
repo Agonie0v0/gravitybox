@@ -112,14 +112,124 @@ enum UsageFilterSupport {
         return hosts
     }
 
+    static func strippedOfflineSuffix(_ raw: String) -> String {
+        var result = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        for suffix in ["（离线）", " (Offline)", "(Offline)"] {
+            if result.hasSuffix(suffix) {
+                result = String(result.dropLast(suffix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return result
+    }
+
     static func strippedSshPrefix(_ raw: String) -> String {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        for prefix in ["SSH: ", "SSH · ", "ssh: ", "ssh · "] {
+        var trimmed = strippedOfflineSuffix(raw)
+        for prefix in ["SSH: ", "SSH · ", "ssh: ", "ssh · ", "ssh:", "host:"] {
             if trimmed.hasPrefix(prefix) {
-                return String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                trimmed = String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                break
             }
         }
         return trimmed
+    }
+
+    static func cleanedHostLabel(
+        from row: [String: Any],
+        environments: [[String: Any]] = [],
+        canonicalHosts: [CanonicalHostEnvironment] = []
+    ) -> String {
+        let envId = ((row["environment_id"] as? String) ?? (row["environmentId"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawLabel = ((row["environment_label"] as? String) ?? (row["environmentLabel"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !rawLabel.isEmpty {
+            let cleaned = strippedSshPrefix(rawLabel)
+            if !cleaned.isEmpty { return cleaned }
+        }
+        if !envId.isEmpty {
+            if let live = canonicalHosts.first(where: { $0.environmentId == envId }) {
+                return live.hostLabel
+            }
+            if let envItem = environments.first(where: { ($0["id"] as? String) == envId }) {
+                let candidate = ((envItem["host_label"] as? String)
+                    ?? (envItem["hostLabel"] as? String)
+                    ?? (envItem["label"] as? String)
+                    ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let cleaned = strippedSshPrefix(candidate)
+                if !cleaned.isEmpty { return cleaned }
+            }
+            let cleanedId = strippedSshPrefix(envId)
+            if !cleanedId.isEmpty { return cleanedId }
+        }
+        return "SSH"
+    }
+
+    static func localSharePercent(environments: [[String: Any]], breakdown: [String: Any]?) -> Int? {
+        if let breakdown {
+            if breakdown["local_share_pct"] != nil || breakdown["localSharePct"] != nil {
+                let rawLocal = doubleVal(breakdown, "local_share_pct", fallback: doubleVal(breakdown, "localSharePct"))
+                return max(0, min(100, Int(round(rawLocal))))
+            }
+            let localTokens = intVal(breakdown, "local_tokens", fallback: intVal(breakdown, "localTokens"))
+            let sshTokens = intVal(breakdown, "ssh_tokens", fallback: intVal(breakdown, "sshTokens"))
+            let total = localTokens + sshTokens
+            if total > 0 {
+                return max(0, min(100, Int(round((Double(localTokens) / Double(total)) * 100.0))))
+            }
+        }
+        var localTokens = 0
+        var totalEnvTokens = 0
+        for env in environments {
+            let id = (env["id"] as? String) ?? ""
+            let kind = (env["kind"] as? String) ?? ""
+            if id == "all" || kind == "all" { continue }
+            let tokens = max(0, intVal(env, "total_tokens", fallback: intVal(env, "totalTokens")))
+            if id == "local" || kind == "local" {
+                localTokens += tokens
+            }
+            totalEnvTokens += tokens
+        }
+        guard totalEnvTokens > 0 else { return nil }
+        return max(0, min(100, Int(round((Double(localTokens) / Double(totalEnvTokens)) * 100.0))))
+    }
+
+    static func sshSharePercentText(
+        for environmentId: String,
+        environments: [[String: Any]],
+        breakdown: [String: Any]?,
+        sshCount: Int
+    ) -> String? {
+        var totalEnvTokens = 0
+        var hostTokens: Int?
+        for env in environments {
+            let id = (env["id"] as? String) ?? ""
+            let kind = (env["kind"] as? String) ?? ""
+            if id == "all" || kind == "all" { continue }
+            let tokens = max(0, intVal(env, "total_tokens", fallback: intVal(env, "totalTokens")))
+            totalEnvTokens += tokens
+            if id == environmentId {
+                hostTokens = tokens
+            }
+        }
+        if totalEnvTokens <= 0, let breakdown {
+            let localT = max(0, intVal(breakdown, "local_tokens", fallback: intVal(breakdown, "localTokens")))
+            let sshT = max(0, intVal(breakdown, "ssh_tokens", fallback: intVal(breakdown, "sshTokens")))
+            totalEnvTokens = localT + sshT
+        }
+        if let hostTokens, hostTokens > 0, totalEnvTokens > 0 {
+            let pct = max(0, min(100, Int(round((Double(hostTokens) / Double(totalEnvTokens)) * 100.0))))
+            return pct == 0 ? "<1%" : "\(pct)%"
+        }
+        if sshCount == 1, let breakdown {
+            if breakdown["ssh_share_pct"] != nil || breakdown["sshSharePct"] != nil {
+                let rawSsh = doubleVal(breakdown, "ssh_share_pct", fallback: doubleVal(breakdown, "sshSharePct"))
+                let pct = max(0, min(100, Int(round(rawSsh))))
+                return pct > 0 ? "\(pct)%" : nil
+            }
+            if let localPct = localSharePercent(environments: environments, breakdown: breakdown) {
+                let sshPct = max(0, 100 - localPct)
+                return sshPct > 0 ? "\(sshPct)%" : nil
+            }
+        }
+        return nil
     }
 
     static func environmentShareNote(breakdown: [String: Any]?, selectedEnvironmentId: String) -> String? {
@@ -151,122 +261,27 @@ enum UsageFilterSupport {
         return L10n.t("usage.env.share_note", ["localPct": localPct, "sshPct": sshPct])
     }
 
-    static func displayTitleForEnvironment(id: String, item: [String: Any]?, allTitle: String, localTitle: String, sshFormatKey: String) -> String {
-        let kind = (item?["kind"] as? String) ?? (id == "all" ? "all" : (id == "local" ? "local" : (id.hasPrefix("ssh:") ? "ssh" : "")))
-        if id == "all" || kind == "all" {
-            return allTitle
-        }
-        if id == "local" || kind == "local" {
-            return localTitle
-        }
-        let rawHost = ((item?["host_label"] as? String)
-            ?? (item?["hostLabel"] as? String)
-            ?? (item?["label"] as? String)
-            ?? id).trimmingCharacters(in: .whitespacesAndNewlines)
-        let host = strippedSshPrefix(rawHost)
-        let baseTitle = L10n.t(sshFormatKey, ["host": host.isEmpty ? id : host])
-        if (item?["online"] as? Bool) == false {
-            return L10n.t("usage.env.offline_suffix", ["label": baseTitle])
-        }
-        return baseTitle
-    }
-
-    static func extractUnattributedStats(from report: [String: Any]) -> (requests: Int, tokens: Int) {
-        let summary = report["summary"] as? [String: Any] ?? [:]
-        let reqs = intVal(
-            report,
-            "unattributedRequests",
-            fallback: intVal(
-                report,
-                "unattributed_requests",
-                fallback: intVal(summary, "unattributedRequests", fallback: intVal(summary, "unattributed_requests"))
-            )
-        )
-        let toks = intVal(
-            report,
-            "unattributedTokens",
-            fallback: intVal(
-                report,
-                "unattributed_tokens",
-                fallback: intVal(summary, "unattributedTokens", fallback: intVal(summary, "unattributed_tokens"))
-            )
-        )
-        return (max(0, reqs), max(0, toks))
-    }
-
-    static func buildEnvironmentItems(
-        environments: [[String: Any]],
-        selectedId: String,
-        allTitle: String,
-        localTitle: String,
-        sshFormatKey: String
-    ) -> [(id: String, title: String)] {
-        var items: [(id: String, title: String)] = [("all", allTitle)]
-        var seen = Set<String>(["all"])
-        for env in environments {
-            guard let rawId = env["id"] as? String else { continue }
-            let id = rawId.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !id.isEmpty, !seen.contains(id) else { continue }
-            seen.insert(id)
-            items.append((id, displayTitleForEnvironment(id: id, item: env, allTitle: allTitle, localTitle: localTitle, sshFormatKey: sshFormatKey)))
-        }
-        let normalizedSelected = selectedId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "all" : selectedId.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !seen.contains(normalizedSelected) {
-            items.append((normalizedSelected, displayTitleForEnvironment(id: normalizedSelected, item: nil, allTitle: allTitle, localTitle: localTitle, sshFormatKey: sshFormatKey)))
-        }
-        return items
-    }
-
-    static func syncEnvironmentPopup(
-        _ popup: NSPopUpButton,
-        environments: [[String: Any]],
-        selectedId: String,
-        allTitle: String,
-        localTitle: String,
-        sshFormatKey: String,
-        maxWidth: CGFloat = 220
-    ) {
-        if !(popup.cell is DesignPopUpCell) {
-            Design.applyControls(popup)
-        }
-        let normalizedSelected = selectedId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "all" : selectedId.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let cell = popup.cell as? DesignPopUpCell {
-            if normalizedSelected == "local" {
-                cell.leadingSymbolName = "desktopcomputer"
-            } else if normalizedSelected.hasPrefix("ssh:") {
-                cell.leadingSymbolName = "server.rack"
-            } else {
-                cell.leadingSymbolName = "square.stack.3d.up"
-            }
-        }
-        let items = buildEnvironmentItems(
-            environments: environments,
-            selectedId: normalizedSelected,
-            allTitle: allTitle,
-            localTitle: localTitle,
-            sshFormatKey: sshFormatKey
-        )
-        applyPopupItems(popup, items: items, selectedId: normalizedSelected, maxWidth: maxWidth)
-    }
-
+    @discardableResult
     static func syncAccountPopup(
         _ popup: NSPopUpButton,
         accounts: [[String: Any]],
         cachedAccounts: [[String: Any]] = [],
         selectedId: String,
         allTitle: String,
-        unattributedRequests: Int = 0,
-        unattributedTitle: String? = nil,
-        maxWidth: CGFloat = 220
-    ) {
+        maxWidth: CGFloat = 220,
+        fitsSelectedTitleOnly: Bool = true
+    ) -> String {
         if !(popup.cell is DesignPopUpCell) {
             Design.applyControls(popup)
         }
         if let cell = popup.cell as? DesignPopUpCell {
+            cell.leadingImage = nil
             cell.leadingSymbolName = "person.crop.circle"
+            cell.visualStyle = .headerPill
+            cell.customHeight = 26
         }
         var items: [(id: String, title: String)] = [("all", allTitle)]
-        var seen = Set<String>(["all"])
+        var seen = Set<String>(["all", "unattributed"])
         let source = accounts.isEmpty ? cachedAccounts : accounts
         for acc in source {
             guard let rawId = (acc["id"] as? String) ?? (acc["email"] as? String) else { continue }
@@ -279,40 +294,110 @@ enum UsageFilterSupport {
             let title = !email.isEmpty ? email : (!label.isEmpty ? label : (!name.isEmpty ? name : id))
             items.append((id, title))
         }
-        let normalizedSelected = selectedId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "all" : selectedId.trimmingCharacters(in: .whitespacesAndNewlines)
-        if (unattributedRequests > 0 || normalizedSelected == "unattributed") && !seen.contains("unattributed") {
-            seen.insert("unattributed")
-            items.append(("unattributed", unattributedTitle ?? L10n.t("usage.account.unattributed", fallback: "未关联账号")))
+        let trimmedSelected = selectedId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedSelected: String
+        if trimmedSelected.isEmpty
+            || trimmedSelected == "unattributed"
+            || !items.contains(where: { $0.id == trimmedSelected }) {
+            normalizedSelected = "all"
+        } else {
+            normalizedSelected = trimmedSelected
         }
-        if !seen.contains(normalizedSelected) {
-            items.append((normalizedSelected, normalizedSelected))
-        }
-        applyPopupItems(popup, items: items, selectedId: normalizedSelected, maxWidth: maxWidth)
+        applyPopupItems(
+            popup,
+            items: items,
+            selectedId: normalizedSelected,
+            maxWidth: maxWidth,
+            fitsSelectedTitleOnly: fitsSelectedTitleOnly,
+            isActiveState: normalizedSelected != "all"
+        )
+        return normalizedSelected
     }
 
-    private static func applyPopupItems(_ popup: NSPopUpButton, items: [(id: String, title: String)], selectedId: String, maxWidth: CGFloat) {
-        popup.removeAllItems()
-        for entry in items {
-            let item = NSMenuItem(title: entry.title, action: nil, keyEquivalent: "")
-            item.representedObject = entry.id
-            popup.menu?.addItem(item)
+    private static func applyPopupItems(
+        _ popup: NSPopUpButton,
+        items: [(id: String, title: String)],
+        selectedId: String,
+        maxWidth: CGFloat,
+        fitsSelectedTitleOnly: Bool = true,
+        isActiveState: Bool = false
+    ) {
+        let existingCell = popup.cell as? DesignPopUpCell
+        let oldFits = existingCell?.fitsSelectedTitleOnly ?? false
+        let oldStyle = existingCell?.visualStyle ?? .form
+        let oldCustomHeight = existingCell?.customHeight
+        let oldActive = existingCell?.isActiveState ?? false
+        let currentItems: [(id: String, title: String)] = (popup.menu?.items ?? []).map {
+            (id: ($0.representedObject as? String) ?? "", title: $0.title)
         }
-        if let idx = items.firstIndex(where: { $0.id == selectedId }) {
-            popup.selectItem(at: idx)
+        var itemsMatch = currentItems.count == items.count
+        if itemsMatch {
+            for idx in 0..<items.count {
+                if currentItems[idx].id != items[idx].id || currentItems[idx].title != items[idx].title {
+                    itemsMatch = false
+                    break
+                }
+            }
+        }
+        let targetIdx = items.firstIndex(where: { $0.id == selectedId }) ?? 0
+        let targetId = items.indices.contains(targetIdx) ? items[targetIdx].id : ""
+        let currentSelectedId = popup.selectedItem?.representedObject as? String
+        let currentMaxWidth = popup.constraints.first(where: { $0.identifier == "usage-popup-max-width" })?.constant
+        let currentDesignMax = popup.constraints.first(where: { $0.identifier == "design-control-max-width" })?.constant
+        let currentHeightConstraint = popup.constraints.first(where: { $0.identifier == "design-control-height" })?.constant
+        let effectiveFits = true
+        let designMaxMatches = currentDesignMax == maxWidth
+
+        if itemsMatch
+            && currentSelectedId == targetId
+            && oldFits == effectiveFits
+            && oldStyle == .headerPill
+            && oldCustomHeight == 26
+            && oldActive == isActiveState
+            && currentHeightConstraint == 26
+            && currentMaxWidth == maxWidth
+            && designMaxMatches {
+            return
+        }
+
+        if let cell = popup.cell as? DesignPopUpCell {
+            cell.visualStyle = .headerPill
+            cell.customHeight = 26
+            cell.fitsSelectedTitleOnly = true
+            cell.isActiveState = isActiveState
+        }
+        if let existingH = popup.constraints.first(where: { $0.identifier == "design-control-height" }) {
+            existingH.constant = 26
         } else {
-            popup.selectItem(at: 0)
+            let hConstraint = popup.heightAnchor.constraint(equalToConstant: 26)
+            hConstraint.identifier = "design-control-height"
+            hConstraint.isActive = true
         }
-        let fitted = Design.syncPopUpWidth(popup)
+        if !itemsMatch {
+            popup.removeAllItems()
+            for entry in items {
+                let item = NSMenuItem(title: entry.title, action: nil, keyEquivalent: "")
+                item.representedObject = entry.id
+                popup.menu?.addItem(item)
+            }
+        }
+        if popup.numberOfItems > targetIdx {
+            popup.selectItem(at: targetIdx)
+        }
+        let fitted = Design.syncPopUpWidth(popup, maxWidth: maxWidth)
         if let widthConstraint = popup.constraints.first(where: { $0.identifier == "design-control-width" }) {
             widthConstraint.constant = min(maxWidth, fitted)
         }
-        if !popup.constraints.contains(where: { $0.identifier == "usage-popup-max-width" }) {
+        if let existingMax = popup.constraints.first(where: { $0.identifier == "usage-popup-max-width" }) {
+            existingMax.constant = maxWidth
+        } else {
             let maxConstraint = popup.widthAnchor.constraint(lessThanOrEqualToConstant: maxWidth)
             maxConstraint.identifier = "usage-popup-max-width"
             maxConstraint.priority = NSLayoutConstraint.Priority(999)
             maxConstraint.isActive = true
         }
         popup.invalidateIntrinsicContentSize()
+        popup.needsDisplay = true
     }
 
     static func breakdownFingerprint(_ breakdown: [String: Any]?, environments: [[String: Any]]) -> String {
@@ -333,26 +418,23 @@ final class UsagePage: NSObject {
     unowned let app: Assistant
     let view: NSView
 
-    let periodSegment = DesignSegmentedControl(labels: [L10n.t("usage.period.today"), L10n.t("usage.period.7d"), L10n.t("usage.period.30d"), L10n.t("usage.period.all")], trackingMode: .selectOne, target: nil, action: nil)
-    let environmentSegment = DesignSegmentedControl(
-        labels: [L10n.t("usage.env.all"), L10n.t("usage.env.local_label")],
+    let periodSegment = DesignSegmentedControl(
+        labels: [L10n.t("usage.period.today"), L10n.t("usage.period.7d"), L10n.t("usage.period.30d"), L10n.t("usage.period.all")],
         trackingMode: .selectOne,
         target: nil,
         action: nil,
-        compact: false,
-        equalWidthSegments: false,
-        maxSegmentWidth: 185
+        equalWidthSegments: false
     )
-    private var environmentSegmentIds: [String] = ["all", "local"]
-    let environmentPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private var remoteSessionsObserver: NSObjectProtocol?
+    let environmentPill = EnvironmentContextPill(style: .headerPill, compact: false, minWidth: 68, maxWidth: 180, height: 26)
+    let shareNoteLabel = text("", size: 11.5, color: .secondaryLabelColor)
     let accountPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    let offlineSshBadge = pillBadge("", color: accessibleWarningColor())
-    let filterBarRow: NSStackView
-    let unattributedNoticeBox = DesignCardBox()
-    let unattributedNoticeLabel = text("", size: 11.5, color: .secondaryLabelColor, wrap: true)
-    let switchUnattributedButton = button(L10n.t("usage.account.switch_unattributed_btn", fallback: "查看未关联"), target: nil, action: #selector(switchToUnattributedPressed))
+    let contextBarRow: NSStackView
+    let historicalEnvNoticeBox = DesignCardBox()
+    let historicalEnvNoticeLabel = text("", size: 11.5, color: .secondaryLabelColor, wrap: true)
+    let historicalEnvBadge = pillBadge(L10n.t("usage.env.historical_badge", fallback: "历史已归档"), color: Design.blue)
     let refreshButton: InlineRefreshButton
-    let exportButton = button(L10n.t("usage.export_btn"), target: nil, action: #selector(exportUsage))
+    let exportButton = DesignButton(title: L10n.t("usage.export_btn"), target: nil, action: #selector(exportUsage))
 
     // 顶部 4 张 KPI 指标卡
     let totalTokensMetric = metricValue()
@@ -385,15 +467,15 @@ final class UsagePage: NSObject {
     var logController: UsageLogController?
     var loading = false
     private var requestGeneration: Int = 0
+    private var pendingFilterFetchGeneration: Int = 0
     var selectedEnvironmentId: String = "all"
     var selectedAccountId: String = "all"
     private var availableEnvironments: [[String: Any]] = []
     private var availableAccounts: [[String: Any]] = []
-    private var cachedUnattributedRequests: Int = 0
-    private var cachedUnattributedTokens: Int = 0
     // E02: 与总览页一致的 15s 节流指纹，避免每次 3s tick 都重拉 usage_summary 并重建图表。
     var metricsKey = ""
     private var renderedSnapshotKey = ""
+    private var lastFallbackRefetchKey = ""
     private var restoreScroll = true
     var lastFetchTime: Date = .distantPast
     var modelRows: [[String: Any]] = []
@@ -407,83 +489,140 @@ final class UsagePage: NSObject {
         Design.color(0xDB2777, 0xF472B6)
     ]
 
+    deinit {
+        if let remoteSessionsObserver {
+            NotificationCenter.default.removeObserver(remoteSessionsObserver)
+        }
+    }
+
     init(app: Assistant) {
         self.app = app
-        let initialEnv = app.usageSelectedEnvironment.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.selectedEnvironmentId = initialEnv.isEmpty ? "all" : initialEnv
+        let scopeEnv = app.usageFilterScope.rawEnvironmentId
+        let legacyEnv = app.usageSelectedEnvironment.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedInitialEnv = (scopeEnv != "all" || legacyEnv.isEmpty) ? scopeEnv : legacyEnv
+        self.selectedEnvironmentId = resolvedInitialEnv
+        if app.usageFilterScope.rawEnvironmentId != resolvedInitialEnv {
+            app.setUsageFilterScope(
+                EnvironmentScope(rawEnvironmentId: resolvedInitialEnv),
+                persist: false,
+                syncOverview: false,
+                syncUsagePage: false,
+                syncMenuPanel: false
+            )
+        }
         let initialAcc = app.usageSelectedAccount.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.selectedAccountId = initialAcc.isEmpty ? "all" : initialAcc
-        refreshButton = InlineRefreshButton(L10n.t("common.refresh"), width: 76, target: nil, action: #selector(refreshUsage))
+        let normalizedInitialAcc = (initialAcc.isEmpty || initialAcc == "unattributed") ? "all" : initialAcc
+        self.selectedAccountId = normalizedInitialAcc
+        if app.usageSelectedAccount != normalizedInitialAcc {
+            app.usageSelectedAccount = normalizedInitialAcc
+        }
+        refreshButton = InlineRefreshButton(
+            L10n.t("common.refresh"),
+            width: 78,
+            target: nil,
+            action: #selector(refreshUsage)
+        )
+        refreshButton.toolTip = nil
+        refreshButton.setAccessibilityLabel(L10n.t("common.refresh"))
+        refreshButton.setContentHuggingPriority(.required, for: .horizontal)
+        refreshButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        exportButton.bezelStyle = .rounded
+        exportButton.isBordered = false
+        exportButton.font = .systemFont(ofSize: 12, weight: .medium)
+        exportButton.controlSize = .regular
+        exportButton.toolTip = nil
+        exportButton.setAccessibilityLabel(L10n.t("usage.export_btn"))
+        exportButton.setContentHuggingPriority(.required, for: .horizontal)
+        exportButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+
         periodSegment.selectedSegment = app.usageSelectedPeriod
         periodSegment.controlSize = .regular
         periodSegment.setAccessibilityLabel(L10n.t("usage.period_a11y"))
+        periodSegment.setContentHuggingPriority(.required, for: .horizontal)
+        periodSegment.setContentCompressionResistancePriority(.required, for: .horizontal)
         periodSegment.translatesAutoresizingMaskIntoConstraints = false
         periodSegment.heightAnchor.constraint(equalToConstant: 28).isActive = true
 
-        environmentSegment.setAccessibilityLabel(L10n.t("usage.env.a11y"))
-        environmentSegment.translatesAutoresizingMaskIntoConstraints = false
-        environmentSegment.heightAnchor.constraint(equalToConstant: 28).isActive = true
-        environmentSegment.setContentHuggingPriority(.required, for: .horizontal)
-        environmentSegment.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        environmentPill.setAccessibilityLabel(L10n.t("usage.env.a11y", fallback: "按环境筛选用量"))
 
-        environmentPopup.controlSize = .regular
-        environmentPopup.setAccessibilityLabel(L10n.t("usage.env.a11y"))
-        environmentPopup.setContentHuggingPriority(.required, for: .horizontal)
-        environmentPopup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        environmentPopup.isHidden = true
+        shareNoteLabel.font = .monospacedDigitSystemFont(ofSize: 11.5, weight: .regular)
+        shareNoteLabel.maximumNumberOfLines = 1
+        shareNoteLabel.lineBreakMode = .byTruncatingTail
+        shareNoteLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        shareNoteLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        shareNoteLabel.isHidden = true
 
         accountPopup.controlSize = .regular
+        accountPopup.toolTip = nil
         accountPopup.setAccessibilityLabel(L10n.t("usage.account.a11y"))
         accountPopup.setContentHuggingPriority(.required, for: .horizontal)
-        accountPopup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        accountPopup.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        offlineSshBadge.label.font = .systemFont(ofSize: 10.5, weight: .semibold)
-        offlineSshBadge.isHidden = true
-        offlineSshBadge.toolTip = nil
-        offlineSshBadge.setContentHuggingPriority(.required, for: .horizontal)
-        offlineSshBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        contextBarRow = horizontal([environmentPill, shareNoteLabel, flexibleSpace(), accountPopup], spacing: 8)
+        contextBarRow.alignment = .centerY
+        contextBarRow.detachesHiddenViews = true
+        contextBarRow.identifier = NSUserInterfaceItemIdentifier("usage-context-bar")
+        contextBarRow.translatesAutoresizingMaskIntoConstraints = false
+        contextBarRow.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        contextBarRow.isHidden = true
 
-        filterBarRow = horizontal([environmentSegment, environmentPopup, accountPopup, offlineSshBadge, flexibleSpace()], spacing: 8)
-        filterBarRow.alignment = .centerY
-        filterBarRow.detachesHiddenViews = true
-        filterBarRow.identifier = NSUserInterfaceItemIdentifier("usage-filter-bar")
-        filterBarRow.isHidden = (selectedEnvironmentId == "all")
-
-        let noticeIcon = symbol("info.circle.fill", size: 13, color: Design.blue)
-        noticeIcon.setContentHuggingPriority(.required, for: .horizontal)
-        unattributedNoticeLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        unattributedNoticeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        switchUnattributedButton.controlSize = .small
-        switchUnattributedButton.setContentHuggingPriority(.required, for: .horizontal)
-        switchUnattributedButton.setContentCompressionResistancePriority(.required, for: .horizontal)
-        let noticeRow = horizontal([noticeIcon, unattributedNoticeLabel, flexibleSpace(), switchUnattributedButton], spacing: 8)
-        noticeRow.alignment = .centerY
-        unattributedNoticeBox.boxType = .custom
-        unattributedNoticeBox.cornerRadius = 10
-        unattributedNoticeBox.borderWidth = 0.75
-        unattributedNoticeBox.borderColor = Design.dynamicAlpha(Design.blue, 0.22, 0.30)
-        unattributedNoticeBox.fillColor = Design.dynamicAlpha(Design.blue, 0.05, 0.09)
-        unattributedNoticeBox.enablesHoverHighlight = false
-        unattributedNoticeBox.addSubview(noticeRow)
-        noticeRow.translatesAutoresizingMaskIntoConstraints = false
+        let histIcon = symbol("info.circle.fill", size: 13, color: Design.blue)
+        histIcon.setContentHuggingPriority(.required, for: .horizontal)
+        historicalEnvNoticeLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        historicalEnvNoticeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        historicalEnvBadge.label.font = .systemFont(ofSize: 10, weight: .semibold)
+        historicalEnvBadge.setContentHuggingPriority(.required, for: .horizontal)
+        historicalEnvBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let histRow = horizontal([histIcon, historicalEnvNoticeLabel, flexibleSpace(), historicalEnvBadge], spacing: 8)
+        histRow.alignment = .centerY
+        historicalEnvNoticeBox.boxType = .custom
+        historicalEnvNoticeBox.cornerRadius = 10
+        historicalEnvNoticeBox.borderWidth = 0.75
+        historicalEnvNoticeBox.borderColor = Design.dynamicAlpha(Design.blue, 0.22, 0.30)
+        historicalEnvNoticeBox.fillColor = Design.dynamicAlpha(Design.blue, 0.05, 0.09)
+        historicalEnvNoticeBox.enablesHoverHighlight = false
+        historicalEnvNoticeBox.addSubview(histRow)
+        histRow.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            noticeRow.leadingAnchor.constraint(equalTo: unattributedNoticeBox.leadingAnchor, constant: 12),
-            noticeRow.trailingAnchor.constraint(equalTo: unattributedNoticeBox.trailingAnchor, constant: -12),
-            noticeRow.topAnchor.constraint(equalTo: unattributedNoticeBox.topAnchor, constant: 9),
-            noticeRow.bottomAnchor.constraint(equalTo: unattributedNoticeBox.bottomAnchor, constant: -9)
+            histRow.leadingAnchor.constraint(equalTo: historicalEnvNoticeBox.leadingAnchor, constant: 12),
+            histRow.trailingAnchor.constraint(equalTo: historicalEnvNoticeBox.trailingAnchor, constant: -12),
+            histRow.topAnchor.constraint(equalTo: historicalEnvNoticeBox.topAnchor, constant: 9),
+            histRow.bottomAnchor.constraint(equalTo: historicalEnvNoticeBox.bottomAnchor, constant: -9)
         ])
-        unattributedNoticeBox.isHidden = true
+        historicalEnvNoticeBox.isHidden = true
+
+        let titleLabel = text(L10n.t("usage.title"), size: 24, weight: .semibold)
+        titleLabel.identifier = NSUserInterfaceItemIdentifier("page-title")
+        titleLabel.setContentHuggingPriority(.required, for: .horizontal)
+        titleLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        titleLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        let headerSpacer = NSView()
+        headerSpacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        headerSpacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
 
         let headerActions = horizontal([periodSegment, refreshButton, exportButton], spacing: 8)
         headerActions.alignment = .centerY
-        let root = pageStack(title: L10n.t("usage.title"), actions: headerActions)
-        root.spacing = Design.Spacing.roomy
+        headerActions.setContentHuggingPriority(.required, for: .horizontal)
+        headerActions.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let headerRow = horizontal([titleLabel, headerSpacer, headerActions], spacing: 12)
+        headerRow.alignment = .centerY
+        headerRow.detachesHiddenViews = true
+        headerRow.identifier = NSUserInterfaceItemIdentifier("usage-page-header")
+        headerRow.setCustomSpacing(0, after: headerSpacer)
+
+        let root = vertical([headerRow], spacing: Design.Spacing.roomy)
         root.detachesHiddenViews = true
-        root.addArrangedSubview(filterBarRow)
-        root.addArrangedSubview(unattributedNoticeBox)
+        root.addArrangedSubview(contextBarRow)
+        root.setCustomSpacing(10, after: contextBarRow)
+        root.addArrangedSubview(historicalEnvNoticeBox)
         totalTokensMetric.font = .monospacedDigitSystemFont(ofSize: 30, weight: .semibold)
         let trendHeader = horizontal([vertical([text(L10n.t("usage.section.token_usage"), size: 11, color: Design.secondary), totalTokensMetric, tokensDetail], spacing: 6), flexibleSpace(), trendTitleLabel])
+
         let trend = vertical([trendHeader, trendChart], spacing: 12)
+        trend.detachesHiddenViews = true
         fillWidth(trendHeader, in: trend); fillWidth(trendChart, in: trend)
         root.addArrangedSubview(group([trend]))
         costTitle.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -601,42 +740,200 @@ final class UsagePage: NSObject {
         super.init()
 
         exportButton.target = self
-        environmentSegment.target = self
-        environmentSegment.action = #selector(environmentSegmentChanged(_:))
-        environmentPopup.target = self
-        environmentPopup.action = #selector(environmentChanged(_:))
         accountPopup.target = self
         accountPopup.action = #selector(accountChanged(_:))
-        switchUnattributedButton.target = self
-        UsageFilterSupport.syncEnvironmentPopup(
-            environmentPopup,
-            environments: [],
-            selectedId: selectedEnvironmentId,
-            allTitle: L10n.t("usage.env.all"),
-            localTitle: L10n.t("usage.env.local_label"),
-            sshFormatKey: "usage.env.ssh_label"
-        )
+        environmentPill.onSelectScope = { [weak self] scope in
+            self?.applyEnvironmentSelection(scope.rawEnvironmentId)
+        }
         UsageFilterSupport.syncAccountPopup(
             accountPopup,
             accounts: [],
             selectedId: selectedAccountId,
-            allTitle: L10n.t("usage.account.all")
+            allTitle: L10n.t("usage.account.all"),
+            maxWidth: 210,
+            fitsSelectedTitleOnly: true
         )
+        accountPopup.toolTip = nil
+        refreshEnvironmentContextBarFromCurrentState()
+        syncContextBarVisibility()
         func connect(_ view: NSView) { if let control = view as? NSButton, control.target == nil { control.target = self }; for child in view.subviews { connect(child) } }; connect(view)
         refreshButton.target = self
         periodSegment.target = self
         periodSegment.action = #selector(periodChanged(_:))
 
+        remoteSessionsObserver = NotificationCenter.default.addObserver(
+            forName: Assistant.remoteSessionsDidChangeNotification,
+            object: app,
+            queue: .main
+        ) { [weak self, weak app] _ in
+            guard let self, let _ = app else { return }
+            if !self.latestReport.isEmpty {
+                self.updateFilterBar(from: self.latestReport)
+            } else {
+                self.refreshEnvironmentContextBarFromCurrentState()
+                self.syncContextBarVisibility()
+            }
+        }
+
         fetch()
     }
 
-    private func syncEnvironmentControlSelections(to normalized: String) {
-        if let menuIdx = environmentPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == normalized }) {
-            environmentPopup.selectItem(at: menuIdx)
+    private func scheduleFilterFetch() {
+        pendingFilterFetchGeneration &+= 1
+        let scheduledGen = pendingFilterFetchGeneration
+        // Invalidate any older in-flight fetch immediately and expose loading state
+        // right away while deferring heavy IPC + chart work until the menu/segment animation settles.
+        requestGeneration += 1
+        loading = true
+        refreshButton.setBusy(true, available: app.reachable)
+        exportButton.isEnabled = false
+        DispatchQueue.main.async { [weak self, weak app = self.app] in
+            guard let self, let _ = app, scheduledGen == self.pendingFilterFetchGeneration else { return }
+            self.fetch(force: false, interruptInFlight: true)
         }
-        if let segIdx = environmentSegmentIds.firstIndex(of: normalized) {
-            environmentSegment.selectedSegment = segIdx
+    }
+
+    private func applyEnvironmentSelection(_ raw: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = trimmed.isEmpty ? "all" : trimmed
+        guard normalized != selectedEnvironmentId else { return }
+        selectedEnvironmentId = normalized
+        let scope = EnvironmentScope(rawEnvironmentId: normalized)
+        app.setUsageFilterScope(
+            scope,
+            persist: true,
+            syncOverview: true,
+            syncUsagePage: false,
+            syncMenuPanel: true
+        )
+        refreshEnvironmentContextBarFromCurrentState()
+        syncContextBarVisibility()
+        lastFallbackRefetchKey = ""
+        renderedSnapshotKey = ""
+        scheduleFilterFetch()
+    }
+
+    private func resolvedEnvironmentPillItems(
+        environments: [[String: Any]],
+        breakdown: [String: Any]?
+    ) -> [EnvironmentContextPill.Item] {
+        var baseItems = app.buildContextPillItems(
+            includeAll: true,
+            includeHistorical: true,
+            includeSharePct: true
+        )
+        var seenIds = Set(baseItems.map(\.id))
+
+        for env in environments {
+            let id = ((env["environmentId"] as? String) ?? (env["id"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !id.isEmpty, !seenIds.contains(id) else { continue }
+            let kindStr = ((env["kind"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard kindStr == "ssh" || id.hasPrefix("ssh:") || id.hasPrefix("host:") else { continue }
+            seenIds.insert(id)
+            let rawHost = ((env["host_label"] as? String)
+                ?? (env["hostLabel"] as? String)
+                ?? (env["label"] as? String)
+                ?? id).trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanHost = SshEnvironmentResolver.cleanHostLabel(rawHost)
+            let hostLabel = cleanHost.isEmpty ? id : cleanHost
+            let rawState = (env["lifecycleState"] as? String) ?? (env["state"] as? String)
+            let state: SshHostState
+            if let rawState, !rawState.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                state = SshHostState(rawSessionState: rawState)
+            } else if (env["online"] as? Bool) == true {
+                state = .online
+            } else {
+                state = .historicalOnly
+            }
+            let winCount = state.isOfflineLike ? 0 : ((env["windowCount"] as? Int) ?? (env["window_count"] as? Int) ?? 1)
+            baseItems.append(EnvironmentContextPill.Item(
+                scope: .remote(environmentId: id),
+                hostLabel: hostLabel,
+                state: state,
+                windowCount: winCount
+            ))
         }
+
+        let currentScope = EnvironmentScope(rawEnvironmentId: selectedEnvironmentId)
+        if case .remote(let remoteEnvId) = currentScope, !seenIds.contains(currentScope.rawEnvironmentId) {
+            let fallbackHost = SshEnvironmentResolver.cleanHostLabel(remoteEnvId)
+            baseItems.append(EnvironmentContextPill.Item(
+                scope: currentScope,
+                hostLabel: fallbackHost.isEmpty ? remoteEnvId : fallbackHost,
+                state: .historicalOnly,
+                windowCount: 0
+            ))
+        }
+
+        let sshItemsCount = max(
+            baseItems.filter { $0.kind == .ssh }.count,
+            environments.filter { (($0["kind"] as? String) ?? "") == "ssh" || (($0["id"] as? String) ?? "").hasPrefix("ssh:") }.count
+        )
+        let localSharePct = UsageFilterSupport.localSharePercent(environments: environments, breakdown: breakdown)
+        let hasReportShare = !environments.isEmpty || breakdown != nil
+
+        return baseItems.map { item in
+            let reportSecondary: String?
+            if hasReportShare {
+                switch item.kind {
+                case .all:
+                    reportSecondary = (localSharePct != nil || sshItemsCount > 0) ? "100%" : nil
+                case .local:
+                    reportSecondary = localSharePct.map { "\($0)%" }
+                case .ssh:
+                    reportSecondary = UsageFilterSupport.sshSharePercentText(
+                        for: item.id,
+                        environments: environments,
+                        breakdown: breakdown,
+                        sshCount: max(1, sshItemsCount)
+                    )
+                }
+            } else {
+                reportSecondary = nil
+            }
+            let resolvedSecondary = reportSecondary ?? item.secondaryText
+            guard resolvedSecondary != item.secondaryText else { return item }
+            return EnvironmentContextPill.Item(
+                scope: item.scope,
+                hostLabel: item.hostLabel,
+                state: item.state,
+                windowCount: item.windowCount,
+                email: item.email,
+                secondaryText: resolvedSecondary
+            )
+        }
+    }
+
+    @discardableResult
+    private func refreshEnvironmentContextBarFromCurrentState() -> [EnvironmentContextPill.Item] {
+        let breakdown = UsageFilterSupport.extractEnvironmentBreakdown(from: latestReport)
+        let items = resolvedEnvironmentPillItems(environments: availableEnvironments, breakdown: breakdown)
+        let selectedScope = EnvironmentScope(rawEnvironmentId: selectedEnvironmentId)
+        environmentPill.update(items: items, selectedScope: selectedScope)
+
+        if !environmentPill.isHidden,
+           selectedScope == .all,
+           let shareNote = UsageFilterSupport.environmentShareNote(breakdown: breakdown, selectedEnvironmentId: "all") {
+            shareNoteLabel.stringValue = shareNote
+            shareNoteLabel.isHidden = false
+        } else {
+            shareNoteLabel.stringValue = ""
+            shareNoteLabel.isHidden = true
+        }
+        return items
+    }
+
+    private func syncContextBarVisibility() {
+        let realAccountIds = Set(
+            (accountPopup.menu?.items ?? [])
+                .compactMap { $0.representedObject as? String }
+                .filter { !$0.isEmpty && $0 != "all" && $0 != "unattributed" }
+        )
+        let showEnvPill = !environmentPill.isHidden
+        let showAccountPopup = realAccountIds.count > 1 || selectedAccountId != "all"
+        accountPopup.isHidden = !showAccountPopup
+        contextBarRow.isHidden = (!showEnvPill && !showAccountPopup)
     }
 
     func applyExternalFilter(period: Int? = nil, environmentId: String? = nil) {
@@ -644,78 +941,87 @@ final class UsagePage: NSObject {
             let clamped = max(0, min(periods.count - 1, period))
             periodSegment.selectedSegment = clamped
             app.usageSelectedPeriod = clamped
+            trendTitleLabel.stringValue = clamped == 0 ? L10n.t("usage.trend_title.today") : (clamped == 1 ? L10n.t("usage.trend_title.7d") : (clamped == 2 ? L10n.t("usage.trend_title.30d") : L10n.t("usage.trend_title.all")))
         }
         if let environmentId {
             let trimmed = environmentId.trimmingCharacters(in: .whitespacesAndNewlines)
             let normalized = trimmed.isEmpty ? "all" : trimmed
             selectedEnvironmentId = normalized
-            app.usageSelectedEnvironment = normalized
-            syncEnvironmentControlSelections(to: normalized)
+            let scope = EnvironmentScope(rawEnvironmentId: normalized)
+            if app.usageFilterScope != scope || app.usageSelectedEnvironment != normalized {
+                app.setUsageFilterScope(
+                    scope,
+                    persist: false,
+                    syncOverview: false,
+                    syncUsagePage: false,
+                    syncMenuPanel: true
+                )
+            }
+            refreshEnvironmentContextBarFromCurrentState()
+            syncContextBarVisibility()
         }
+        lastFallbackRefetchKey = ""
         renderedSnapshotKey = ""
         fetch(force: false, interruptInFlight: true)
     }
 
     @objc func periodChanged(_ sender: DesignSegmentedControl) {
         app.usageSelectedPeriod = sender.selectedSegment
-        fetch(force: false, interruptInFlight: true)
-    }
-
-    @objc func environmentSegmentChanged(_ sender: DesignSegmentedControl) {
-        let idx = sender.selectedSegment
-        guard environmentSegmentIds.indices.contains(idx) else { return }
-        let normalized = environmentSegmentIds[idx]
-        guard normalized != selectedEnvironmentId else { return }
-        selectedEnvironmentId = normalized
-        app.usageSelectedEnvironment = normalized
-        syncEnvironmentControlSelections(to: normalized)
-        renderedSnapshotKey = ""
-        fetch(force: false, interruptInFlight: true)
-    }
-
-    @objc func environmentChanged(_ sender: NSPopUpButton) {
-        let next = ((sender.selectedItem?.representedObject as? String) ?? "all").trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalized = next.isEmpty ? "all" : next
-        guard normalized != selectedEnvironmentId else { return }
-        selectedEnvironmentId = normalized
-        app.usageSelectedEnvironment = normalized
-        syncEnvironmentControlSelections(to: normalized)
-        renderedSnapshotKey = ""
-        fetch(force: false, interruptInFlight: true)
+        let segIdx = max(0, min(periods.count - 1, sender.selectedSegment))
+        trendTitleLabel.stringValue = segIdx == 0 ? L10n.t("usage.trend_title.today") : (segIdx == 1 ? L10n.t("usage.trend_title.7d") : (segIdx == 2 ? L10n.t("usage.trend_title.30d") : L10n.t("usage.trend_title.all")))
+        lastFallbackRefetchKey = ""
+        scheduleFilterFetch()
     }
 
     @objc func accountChanged(_ sender: NSPopUpButton) {
         let next = ((sender.selectedItem?.representedObject as? String) ?? "all").trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalized = next.isEmpty ? "all" : next
+        let normalized = (next.isEmpty || next == "unattributed") ? "all" : next
+        if let cell = sender.cell as? DesignPopUpCell {
+            cell.visualStyle = .headerPill
+            cell.customHeight = 26
+            cell.fitsSelectedTitleOnly = true
+            cell.isActiveState = (normalized != "all")
+        }
+        _ = Design.syncPopUpWidth(sender, maxWidth: 210)
+        sender.toolTip = nil
+        sender.needsDisplay = true
         guard normalized != selectedAccountId else { return }
         selectedAccountId = normalized
         app.usageSelectedAccount = normalized
+        syncContextBarVisibility()
+        lastFallbackRefetchKey = ""
         renderedSnapshotKey = ""
-        fetch(force: false, interruptInFlight: true)
-    }
-
-    @objc func switchToUnattributedPressed() {
-        selectedAccountId = "unattributed"
-        app.usageSelectedAccount = "unattributed"
-        if let idx = accountPopup.menu?.items.firstIndex(where: { ($0.representedObject as? String) == "unattributed" }) {
-            accountPopup.selectItem(at: idx)
-        }
-        renderedSnapshotKey = ""
-        fetch(force: false, interruptInFlight: true)
+        scheduleFilterFetch()
     }
 
     @objc func refreshUsage() {
         guard !loading else { return }
+        lastFallbackRefetchKey = ""
         fetch(force: true)
     }
 
     /// E02: 仅在数据/时间范围/任务状态变化或距上次刷新 ≥15s 时重新拉取；hover 与滚动不再每 3 秒被打断。
     func update(force: Bool = false) {
+        let appEnv = app.usageFilterScope.rawEnvironmentId
+        if appEnv != selectedEnvironmentId {
+            selectedEnvironmentId = appEnv
+            refreshEnvironmentContextBarFromCurrentState()
+            syncContextBarVisibility()
+            lastFallbackRefetchKey = ""
+            renderedSnapshotKey = ""
+            fetch(force: force, interruptInFlight: true)
+            return
+        }
+        if force {
+            pendingFilterFetchGeneration &+= 1
+            fetch(force: true, interruptInFlight: true)
+            return
+        }
         guard !loading else { return }
         let key = metricsKeyForCurrentPeriod()
         let timeExpired = Date().timeIntervalSince(lastFetchTime) >= 15.0
-        if !force && !timeExpired && key == metricsKey { return }
-        fetch(force: force)
+        if !timeExpired && key == metricsKey { return }
+        fetch(force: false)
     }
 
     private func metricsKeyForCurrentPeriod() -> String {
@@ -744,6 +1050,7 @@ final class UsagePage: NSObject {
 
     func fetch(force: Bool = false, interruptInFlight: Bool = false) {
         if loading && !interruptInFlight { return }
+        pendingFilterFetchGeneration &+= 1
         let requestKey = metricsKeyForCurrentPeriod()
         let segIdx = max(0, min(periods.count - 1, periodSegment.selectedSegment))
         let period = periods[segIdx]
@@ -755,6 +1062,9 @@ final class UsagePage: NSObject {
         trendTitleLabel.stringValue = segIdx == 0 ? L10n.t("usage.trend_title.today") : (segIdx == 1 ? L10n.t("usage.trend_title.7d") : (segIdx == 2 ? L10n.t("usage.trend_title.30d") : L10n.t("usage.trend_title.all")))
         if !force, let preloaded = app.cachedUsageReportsByPeriod[cacheKey], !identity.matches(latestReport), identity.matches(preloaded) {
             applyUsagePayload(preloaded, period: period, segIdx: segIdx, requestKey: requestKey, environmentId: requestedEnv, accountId: requestedAcc)
+            if selectedEnvironmentId != requestedEnv || selectedAccountId != requestedAcc {
+                return
+            }
         }
         requestGeneration += 1
         let gen = requestGeneration
@@ -762,8 +1072,8 @@ final class UsagePage: NSObject {
         refreshButton.setBusy(true, available: app.reachable)
         exportButton.isEnabled = false
 
-        app.fetchUsageSummary(period: period, environmentId: requestedEnv, accountId: requestedAcc, force: force, allowCached: !force) { [weak self] response in
-            guard let self else { return }
+        app.fetchUsageSummary(period: period, environmentId: requestedEnv, accountId: requestedAcc, force: force, allowCached: !force) { [weak self, weak app = self.app] response in
+            guard let self, let _ = app else { return }
             guard gen == self.requestGeneration else { return }
             self.loading = false
             self.refreshButton.setBusy(false, available: self.app.reachable)
@@ -778,8 +1088,20 @@ final class UsagePage: NSObject {
                 // 失败同样进入 15s 退避，避免每个 3s tick 反复请求。
                 self.metricsKey = requestKey
                 self.syncExportButtonState(for: period, environmentId: requestedEnv, accountId: requestedAcc)
-                let oldPeriod = self.latestReport["period"] as? String ?? ""
-                self.statusSummary.stringValue = L10n.t("usage.error.read_keep_cached", ["period": oldPeriod, "error": error.localizedDescription])
+                let rawOldPeriod = (self.latestReport["period"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !self.latestReport.isEmpty, !rawOldPeriod.isEmpty {
+                    let localizedOldPeriod: String
+                    switch rawOldPeriod {
+                    case "today": localizedOldPeriod = L10n.t("usage.period.today")
+                    case "7d": localizedOldPeriod = L10n.t("usage.period.7d")
+                    case "30d": localizedOldPeriod = L10n.t("usage.period.30d")
+                    case "all": localizedOldPeriod = L10n.t("usage.period.all")
+                    default: localizedOldPeriod = rawOldPeriod
+                    }
+                    self.statusSummary.stringValue = L10n.t("usage.error.read_keep_cached", ["period": localizedOldPeriod, "error": error.localizedDescription])
+                } else {
+                    self.statusSummary.stringValue = L10n.t("menu_panel.usage.read_failed", ["error": error.localizedDescription], fallback: "读取失败：\(error.localizedDescription)")
+                }
                 self.statusSummary.textColor = accessibleWarningColor()
                 self.footerBox.isHidden = false
             case .success(let value):
@@ -788,98 +1110,86 @@ final class UsagePage: NSObject {
         }
     }
 
-    private func updateFilterBar(from value: [String: Any]) {
+    @discardableResult
+    private func updateFilterBar(from value: [String: Any]) -> Bool {
+        let prevEnv = selectedEnvironmentId
+        let prevAcc = selectedAccountId
+        app.syncUsageEnvironmentsFromReport(value)
         let envs = UsageFilterSupport.extractAvailableEnvironments(from: value)
         let accounts = UsageFilterSupport.extractAvailableAccounts(from: value)
         let breakdown = UsageFilterSupport.extractEnvironmentBreakdown(from: value)
-        let unattributedStats = UsageFilterSupport.extractUnattributedStats(from: value)
         self.availableEnvironments = envs
         self.availableAccounts = accounts
-        self.cachedUnattributedRequests = unattributedStats.requests
-        self.cachedUnattributedTokens = unattributedStats.tokens
         let hasSsh = UsageFilterSupport.hasSshEnvironment(environments: envs, breakdown: breakdown)
+            || !app.canonicalAllEnvironments(includeLocal: false, includeHistorical: true).isEmpty
         if !hasSsh && selectedEnvironmentId != "all" {
             let stillExists = envs.contains { ($0["id"] as? String) == selectedEnvironmentId }
-            if !stillExists && envs.isEmpty == false {
+            if (!stillExists || selectedEnvironmentId == "local") && !envs.isEmpty {
                 selectedEnvironmentId = "all"
-                app.usageSelectedEnvironment = "all"
+                app.setUsageFilterScope(
+                    .all,
+                    persist: true,
+                    syncOverview: true,
+                    syncUsagePage: false,
+                    syncMenuPanel: true
+                )
             }
         }
-        let allEnvTitle = L10n.t("usage.env.all")
-        let localEnvTitle = L10n.t("usage.env.local_label")
-        UsageFilterSupport.syncEnvironmentPopup(
-            environmentPopup,
-            environments: envs,
-            selectedId: selectedEnvironmentId,
-            allTitle: allEnvTitle,
-            localTitle: localEnvTitle,
-            sshFormatKey: "usage.env.ssh_label"
-        )
-        let envItems = UsageFilterSupport.buildEnvironmentItems(
-            environments: envs,
-            selectedId: selectedEnvironmentId,
-            allTitle: allEnvTitle,
-            localTitle: localEnvTitle,
-            sshFormatKey: "usage.env.ssh_label"
-        )
-        let useSegmentEnv = envItems.count <= 4
-        if useSegmentEnv {
-            environmentSegmentIds = envItems.map(\.id)
-            let segIdx = environmentSegmentIds.firstIndex(of: selectedEnvironmentId) ?? 0
-            environmentSegment.updateSegments(
-                labels: envItems.map(\.title),
-                selectedIndex: segIdx,
-                animated: Design.shouldAnimate(in: environmentSegment)
-            )
-            environmentSegment.isHidden = false
-            environmentPopup.isHidden = true
-        } else {
-            environmentSegment.isHidden = true
-            environmentPopup.isHidden = false
-        }
-        UsageFilterSupport.syncAccountPopup(
+        let pillItems = refreshEnvironmentContextBarFromCurrentState()
+        let normalizedAcc = UsageFilterSupport.syncAccountPopup(
             accountPopup,
             accounts: accounts,
             selectedId: selectedAccountId,
             allTitle: L10n.t("usage.account.all"),
-            unattributedRequests: unattributedStats.requests,
-            unattributedTitle: L10n.t("usage.account.unattributed")
+            maxWidth: 210,
+            fitsSelectedTitleOnly: true
         )
-        let offlineHosts = UsageFilterSupport.offlineSshHosts(environments: envs, breakdown: breakdown, report: value)
-        if offlineHosts.isEmpty {
-            offlineSshBadge.isHidden = true
-            offlineSshBadge.toolTip = nil
-            offlineSshBadge.setAccessibilityHelp(nil)
-        } else {
-            let hostsJoined = offlineHosts.joined(separator: L10n.shared.isEnglish ? ", " : "、")
-            offlineSshBadge.title = L10n.t("usage.env.offline_badge", ["count": offlineHosts.count])
-            offlineSshBadge.tint = accessibleWarningColor()
-            let tip = L10n.t("usage.env.offline_tooltip", ["hosts": hostsJoined])
-            offlineSshBadge.toolTip = tip
-            offlineSshBadge.setAccessibilityHelp(tip)
-            offlineSshBadge.isHidden = false
+        if selectedAccountId == "unattributed" || (!accounts.isEmpty && normalizedAcc != selectedAccountId) {
+            selectedAccountId = normalizedAcc
+            app.usageSelectedAccount = normalizedAcc
         }
-        filterBarRow.isHidden = !(hasSsh || selectedEnvironmentId != "all")
+        accountPopup.toolTip = nil
+        syncContextBarVisibility()
+        let summaryDict = value["summary"] as? [String: Any] ?? [:]
+        let isAvailable = (summaryDict["availability"] as? String) != "unavailable"
+        syncHistoricalEnvNotice(items: pillItems, available: isAvailable)
+
+        let didFallback = (selectedEnvironmentId != prevEnv) || (selectedAccountId != prevAcc)
+        guard didFallback else { return false }
+        let reportPeriod = (value["period"] as? String)
+            ?? periods[max(0, min(periods.count - 1, periodSegment.selectedSegment))]
+        return !UsageQueryIdentity(period: reportPeriod, environmentId: selectedEnvironmentId, accountId: selectedAccountId).matches(value)
     }
 
-    private func syncUnattributedNotice(selectedEnv: String, selectedAcc: String, periodTokens: Int, periodRequests: Int, available: Bool = true) {
-        let shouldShow = available
-            && (selectedAcc != "all" && selectedAcc != "unattributed")
-            && periodTokens == 0
-            && periodRequests == 0
-            && cachedUnattributedRequests > 0
-        if shouldShow {
-            let tokStr = InterfaceText.formatCompactTokens(cachedUnattributedTokens, formatSmallWithLocale: true)
-            unattributedNoticeLabel.stringValue = L10n.t(
-                "usage.account.unattributed_hint",
-                ["requests": cachedUnattributedRequests, "tokens": tokStr]
-            )
-            switchUnattributedButton.title = L10n.t("usage.account.switch_unattributed_btn")
-            unattributedNoticeBox.isHidden = false
-        } else {
-            unattributedNoticeBox.isHidden = true
+    private func syncHistoricalEnvNotice(items: [EnvironmentContextPill.Item], available: Bool) {
+        guard available,
+              selectedEnvironmentId != "all",
+              selectedEnvironmentId != "local",
+              let selectedItem = items.first(where: { $0.id == selectedEnvironmentId }) else {
+            historicalEnvNoticeBox.isHidden = true
+            return
         }
-        let _ = selectedEnv
+        switch selectedItem.state {
+        case .historicalOnly:
+            historicalEnvNoticeLabel.stringValue = L10n.t(
+                "usage.env.historical_notice",
+                ["host": selectedItem.hostLabel],
+                fallback: "\(selectedItem.hostLabel) 当前未连接，以下为已同步的历史用量记录。"
+            )
+            historicalEnvBadge.title = L10n.t("usage.env.historical_badge", fallback: "历史已归档")
+            historicalEnvBadge.isHidden = false
+            historicalEnvNoticeBox.isHidden = false
+        case .offlineRecent:
+            historicalEnvNoticeLabel.stringValue = L10n.t(
+                "usage.env.offline_recent_notice",
+                ["host": selectedItem.hostLabel],
+                fallback: "\(selectedItem.hostLabel) 刚刚断开连接，以下为已同步的近期与历史用量。"
+            )
+            historicalEnvBadge.isHidden = true
+            historicalEnvNoticeBox.isHidden = false
+        case .online, .authExpired:
+            historicalEnvNoticeBox.isHidden = true
+        }
     }
 
     func applyUsagePayload(_ value: [String: Any], period: String, segIdx: Int, requestKey: String, environmentId: String? = nil, accountId: String? = nil) {
@@ -890,7 +1200,7 @@ final class UsagePage: NSObject {
             self.statusSummary.textColor = accessibleWarningColor()
             self.footerBox.isHidden = false
             self.exportButton.isEnabled = false
-            self.unattributedNoticeBox.isHidden = true
+            self.historicalEnvNoticeBox.isHidden = true
             return
         }
         self.metricsKey = requestKey
@@ -899,15 +1209,25 @@ final class UsagePage: NSObject {
         // Request state is independent of chart identity: a successful retry must
         // clear the old error even when the data snapshot itself did not change.
         self.updateReadStatus(summary)
-        self.updateFilterBar(from: value)
+        let didFallbackFilter = self.updateFilterBar(from: value)
+        if didFallbackFilter {
+            let fallbackKey = "\(period)|\(expectedEnv)|\(expectedAcc)->\(self.selectedEnvironmentId)|\(self.selectedAccountId)"
+            if self.lastFallbackRefetchKey != fallbackKey {
+                self.lastFallbackRefetchKey = fallbackKey
+                self.renderedSnapshotKey = ""
+                self.metricsKey = ""
+                self.fetch(force: false, interruptInFlight: true)
+                return
+            }
+        } else {
+            self.lastFallbackRefetchKey = ""
+        }
         let envs = UsageFilterSupport.extractAvailableEnvironments(from: value)
         let breakdown = UsageFilterSupport.extractEnvironmentBreakdown(from: value)
         let total = intVal(summary, "totalTokens")
-        let reqsForNotice = intVal(summary, "requestCount")
         let isUnavailable = (summary["availability"] as? String) == "unavailable"
-        self.syncUnattributedNotice(selectedEnv: expectedEnv, selectedAcc: expectedAcc, periodTokens: total, periodRequests: reqsForNotice, available: !isUnavailable)
         let envFingerprint = UsageFilterSupport.breakdownFingerprint(breakdown, environments: envs)
-        let snapshotKey = "\(value["snapshotId"] ?? ""):\(period):\(expectedEnv):\(expectedAcc):\(summary["availability"] ?? ""):\(summary["failedDatabasesCount"] ?? 0):\(summary["skippedLargeRecords"] ?? 0):\(summary["unknownTimeRecords"] ?? 0):\(total):\(cachedUnattributedRequests):\(envFingerprint)"
+        let snapshotKey = "\(value["snapshotId"] ?? ""):\(period):\(expectedEnv):\(expectedAcc):\(summary["availability"] ?? ""):\(summary["failedDatabasesCount"] ?? 0):\(summary["skippedLargeRecords"] ?? 0):\(summary["unknownTimeRecords"] ?? 0):\(total):\(envFingerprint)"
         if !snapshotKey.hasPrefix(":") && snapshotKey == self.renderedSnapshotKey {
             self.syncExportButtonState(for: period, environmentId: expectedEnv, accountId: expectedAcc)
             return
@@ -923,7 +1243,7 @@ final class UsagePage: NSObject {
             self.usdDetail.isHidden = false
             self.requestsDetail.stringValue = L10n.t("usage.unavailable.requests")
             self.cacheRateDetail.stringValue = L10n.t("usage.unavailable.cache")
-            self.cacheTrack.update(percent: 0)
+            self.cacheTrack.update(percent: .nan)
             self.modelRows = []; self.trendChart.points = []; self.donutChart.slices = []
             self.donutChart.isHidden = true
             self.modelsCountLabel.stringValue = ""
@@ -948,26 +1268,21 @@ final class UsagePage: NSObject {
             "cacheWrite": cacheWritePart,
             "output": self.formatCompactTokens(output)
         ])
-        if let shareNote = UsageFilterSupport.environmentShareNote(breakdown: breakdown, selectedEnvironmentId: expectedEnv) {
-            self.tokensDetail.stringValue = "\(baseTokensSummary) · \(shareNote)"
-        } else {
-            self.tokensDetail.stringValue = baseTokensSummary
-        }
+        self.tokensDetail.stringValue = baseTokensSummary
         let rawRows = (value["byModel"] as? [[String: Any]]) ?? (value["models"] as? [[String: Any]]) ?? []
         let rows = ModelUsageFold.sortByUsage(ModelUsageFold.foldThinkingVariants(rawRows))
-        let displayUnpricedCount: Int = rows.isEmpty
-            ? ((summary["unpricedModels"] as? Int) ?? (summary["unpriced_models"] as? Int) ?? (value["unpricedModels"] as? Int) ?? 0)
-            : rows.filter { row in
-                let usd = doubleVal(row, "estimatedUsd", fallback: doubleVal(row, "estimated_usd"))
-                let isPriced = (row["priced"] as? Bool) ?? (usd > 0)
-                return !isPriced
-            }.count
         let pricedCount = (summary["pricedModels"] as? Int) ?? (summary["priced_models"] as? Int) ?? (value["pricedModels"] as? Int) ?? 0
         let unpricedCount = (summary["unpricedModels"] as? Int) ?? (summary["unpriced_models"] as? Int) ?? (value["unpricedModels"] as? Int) ?? 0
-        let effectiveUnpricedCount = max(displayUnpricedCount, unpricedCount > 0 && rows.isEmpty ? unpricedCount : 0)
+        let costSummary = UsageMetricsPresentation.evaluateCost(
+            foldedModels: rows,
+            pricedCount: pricedCount,
+            unpricedCount: unpricedCount,
+            usd: usd
+        )
+        let effectiveUnpricedCount = costSummary.effectiveUnpricedCount
         self.costTitle.stringValue = L10n.t("usage.section.cost")
-        let isAllUnpriced = (unpricedCount > 0 || displayUnpricedCount > 0) && pricedCount == 0 && usd == 0
-        let isPartialCost = (unpricedCount > 0 || displayUnpricedCount > 0) && !isAllUnpriced
+        let isAllUnpriced = costSummary.isAllUnpriced
+        let isPartialCost = costSummary.isPartialCost
         self.usdMetric.stringValue = isAllUnpriced ? L10n.t("menu_panel.usage.unpriced") : self.formatUsd(usd)
         self.costStatusBadge.isHidden = !isPartialCost
         if isPartialCost {
@@ -977,8 +1292,8 @@ final class UsagePage: NSObject {
         self.usdDetail.stringValue = ""
         self.usdDetail.isHidden = true
 
-        self.cacheRateMetric.stringValue = String(format: "%.1f%%", locale: Locale(identifier: "en_US_POSIX"), cacheHit)
-        self.cacheTrack.update(percent: cacheHit)
+        self.cacheRateMetric.stringValue = UsageMetricsPresentation.formatCacheHitRate(denom: cacheDenom, cacheHitRate: cacheHit)
+        self.cacheTrack.update(percent: cacheDenom > 0 ? cacheHit : 0)
         self.cacheRateDetail.stringValue = L10n.t("usage.cache.read_detail", ["count": self.formatCompactTokens(cached)])
 
         self.requestsMetric.stringValue = L10n.t("usage.requests.value", ["count": InterfaceText.formatInteger(requests)])
@@ -1220,7 +1535,7 @@ final class UsagePage: NSObject {
             let rawRatio = totalTokens > 0 ? (Double(mTokens) / Double(totalTokens)) * 100.0 : 0.0
             let sharePct = totalTokens > 0 ? max(0, min(100, Int(round(rawRatio)))) : 0
             let shareText = (mTokens > 0 && sharePct == 0) ? "<1%" : "\(sharePct)%"
-            let isItemPriced = (item["priced"] as? Bool) ?? (mUsd > 0)
+            let isItemPriced = UsageMetricsPresentation.isModelRowPriced(item)
             var usdStr: String
             let isItemUnpriced = !(isItemPriced || (item["partiallyPriced"] as? Bool == true)) && mTokens > 0
             if isItemPriced || (item["partiallyPriced"] as? Bool == true) {

@@ -300,6 +300,45 @@ test('读取损坏账号明确失败，原件及索引不被当作不存在清�
   assert.equal(await readFile(file,'utf8'),'{broken');
   assert.equal((await manager.loadIndex()).accounts[0].id,account.id);
 });
+
+test('P1-39 & P1-41: 损坏账号文件可正常删除并归档；decodeTopicRow 遇到前置非 field 1 字段仍能前向兼容解码', async t => {
+  const dir = await fixture(t);
+  const manager = new AccountsManager(dir);
+  const account = await manager.upsertAccount({ email: 'corrupt-del@example.invalid', refreshToken: 'synthetic-refresh' });
+  const file = join(dir, 'accounts', `${account.id}.json`);
+  await writeFile(file, '{broken-json');
+
+  // 损坏的账号文件删除时不得因 JSON.parse 抛 SyntaxError 而卡死
+  const deleted = await manager.deleteAccount(account.id);
+  assert.equal(deleted, true);
+  assert.equal((await manager.loadIndex()).accounts.length, 0);
+  const { readdir } = await import('node:fs/promises');
+  const removedCopies = await readdir(join(dir, 'accounts-removed'));
+  assert.equal(removedCopies.length, 1);
+  const archived = JSON.parse(await readFile(join(dir, 'accounts-removed', removedCopies[0]), 'utf8'));
+  assert.deepEqual(archived.account, { parseError: true, redacted: true });
+
+  // P1-41: decodeTopicRow 面对前置 wire type 0 / 1 / 5 / 2 (非 field 1) 字段仍能跳过并提取目标 sentinel
+  const { decodeTopicRow } = await import('../dist/account-state.js');
+  const { ProtobufWriter } = await import('../dist/protobuf.js');
+  const targetPayload = Buffer.from('forward-compat-payload', 'utf8');
+  const rowMsg = ProtobufWriter.encodeString(1, targetPayload.toString('base64'));
+  const targetEntry = ProtobufWriter.encodeLengthDelimited(
+    1,
+    Buffer.concat([ProtobufWriter.encodeString(1, 'oauthTokenInfoSentinelKey'), ProtobufWriter.encodeLengthDelimited(2, rowMsg)])
+  );
+  // 构造前置未知字段：field 2 varint (tag 16), field 3 fixed64 (tag 25), field 4 fixed32 (tag 37), field 5 length-delimited (tag 42)
+  const leadingUnknown = Buffer.concat([
+    ProtobufWriter.encodeVarintField(2, 42),
+    Buffer.from([25, 1, 2, 3, 4, 5, 6, 7, 8]),
+    Buffer.from([37, 1, 2, 3, 4]),
+    ProtobufWriter.encodeString(5, 'ignored-other-field'),
+  ]);
+  const combinedB64 = Buffer.concat([leadingUnknown, targetEntry]).toString('base64');
+  const decoded = decodeTopicRow(combinedB64, 'oauthTokenInfoSentinelKey');
+  assert.ok(decoded, 'decodeTopicRow 必须跳过前置非 field 1 字段并解出目标载荷');
+  assert.equal(decoded.toString('utf8'), 'forward-compat-payload');
+});
 });
 
 // Fixture state and hooks are scoped to this group; child cases run serially.

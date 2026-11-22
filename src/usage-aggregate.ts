@@ -1,6 +1,7 @@
 import type { LedgerEvent } from './usage-ledger.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
+import { existsSync, lstatSync } from 'node:fs';
 import {
     normalizeEventEnvironment,
     resolveDatabaseModelFullName,
@@ -15,6 +16,7 @@ import { getEffectiveModelAliasKeys } from './model-catalog.js';
 import { normalizeModelId, THINKING_EFFORT_OR_LATEST_SUFFIX_RE } from './model-identity.js';
 import { DEFAULT_API_PRICES, resolveContextTierPricing, resolvePricingForTimestamp, matchPricingKeys, calculateEstimatedUsd, priceStatus, type ApiPricing, type ApiPricingEntry } from './pricing.js';
 import { bt, getActiveLocale } from './i18n.js';
+import { cleanHostLabel } from './ssh-context.js';
 
 export function envDisplayLabel(
     key: 'usage.all_environments' | 'usage.env.local' | 'usage.env.ssh',
@@ -117,12 +119,15 @@ export function buildAvailableEnvironments(
         const st = envStats.get(envId);
         const known = knownMap.get(envId);
         const online = known ? known.online !== false : false;
-        const hostLabel =
+        const rawHostLabel =
             known?.host_label?.trim() ||
             known?.label?.trim() ||
             (st?.hostLabel && st.hostLabel !== envId ? st.hostLabel : '') ||
             allSshEnvsSeen.get(envId) ||
             envId;
+        const hostLabel = cleanHostLabel(rawHostLabel) || rawHostLabel;
+        const lifecycleState = known?.lifecycle_state ?? (online ? 'online' : 'historical_only');
+        const windowCount = typeof known?.window_count === 'number' ? known.window_count : (online ? 1 : 0);
         const totalTokens = st?.totalTokens ?? 0;
         const requestCount = st?.requestCount ?? 0;
         const estimatedUsd = Math.round((st?.estimatedUsd ?? 0) * 1e8) / 1e8;
@@ -146,6 +151,8 @@ export function buildAvailableEnvironments(
             request_count: requestCount,
             estimated_usd: estimatedUsd,
             online,
+            lifecycle_state: lifecycleState,
+            window_count: windowCount,
             ...(lastSyncedAt !== undefined && lastSyncedAt > 0 ? { last_synced_at: lastSyncedAt } : {}),
         });
     }
@@ -174,6 +181,8 @@ export function buildAvailableEnvironments(
         request_count: localStat.requestCount,
         estimated_usd: Math.round(localStat.estimatedUsd * 1e8) / 1e8,
         online: localKnown ? localKnown.online !== false : true,
+        lifecycle_state: localKnown?.lifecycle_state ?? 'online',
+        ...(typeof localKnown?.window_count === 'number' ? { window_count: localKnown.window_count } : {}),
         ...(localKnown?.last_synced_at ? { last_synced_at: localKnown.last_synced_at } : {}),
     };
 
@@ -181,6 +190,14 @@ export function buildAvailableEnvironments(
         sshOptions.length > 0 ? [allOption, localOption, ...sshOptions] : [allOption, localOption];
 
     return { availableEnvironments, offlineSshHosts };
+}
+
+export function safeRollback(db: DatabaseSync): void {
+    try {
+        db.exec('ROLLBACK');
+    } catch {
+        // 事务可能已由 SQLite 自动回滚或未开启，吞掉二次异常以保留原始错误
+    }
 }
 
 export function isUnpricedZeroSentinel(price: ApiPricing | null | undefined): boolean {
@@ -223,6 +240,7 @@ export interface AggregateOptions {
     liveFiles?: string[];
     ignoreLegacyRates?: boolean;
     dryRunRateLocks?: Map<string, { unit_price: string; usd: number }>;
+    cacheKey?: string;
 }
 export interface LedgerSnapshot {
     revision: number;
@@ -249,26 +267,102 @@ interface CachedLedgerIndex {
     revision: number;
     rateRevision: number;
     ignoreLegacyRates: boolean;
+    locale: string;
     rows: IndexedLedgerRow[];
 }
 
-const aggregateIndexCache = new WeakMap<DatabaseSync, CachedLedgerIndex>();
+const MAX_AGGREGATE_INDEX_CACHE_ENTRIES = 2;
+const aggregateIndexCache = new Map<string, CachedLedgerIndex>();
+const memoryDbCacheIds = new WeakMap<DatabaseSync, number>();
+let nextMemoryDbCacheId = 1;
+let aggregateModelCatalogEpoch = 0;
+let aggregateIndexCacheHits = 0;
+let aggregateIndexCacheMisses = 0;
+
+export function bumpAggregateModelCatalogEpoch(): number {
+    aggregateModelCatalogEpoch += 1;
+    aggregateIndexCache.clear();
+    return aggregateModelCatalogEpoch;
+}
+
+export function invalidateAggregateIndexCache(dbIdentityPrefix?: string): void {
+    if (!dbIdentityPrefix) {
+        aggregateIndexCache.clear();
+        return;
+    }
+    for (const key of aggregateIndexCache.keys()) {
+        if (key === dbIdentityPrefix || key.startsWith(`${dbIdentityPrefix}|`)) {
+            aggregateIndexCache.delete(key);
+        }
+    }
+}
+
+export function getAggregateIndexCacheStats(): {
+    size: number;
+    maxSize: number;
+    epoch: number;
+    hits: number;
+    misses: number;
+    keys: string[];
+} {
+    return {
+        size: aggregateIndexCache.size,
+        maxSize: MAX_AGGREGATE_INDEX_CACHE_ENTRIES,
+        epoch: aggregateModelCatalogEpoch,
+        hits: aggregateIndexCacheHits,
+        misses: aggregateIndexCacheMisses,
+        keys: [...aggregateIndexCache.keys()],
+    };
+}
+
+function resolveAggregateIndexCacheKey(db: DatabaseSync, explicitCacheKey?: string): string {
+    const cleanExplicit = typeof explicitCacheKey === 'string' ? explicitCacheKey.trim() : '';
+    if (cleanExplicit) {
+        return `${cleanExplicit}|ep=${aggregateModelCatalogEpoch}`;
+    }
+    try {
+        const list = db.prepare('PRAGMA database_list').all() as Array<{ name?: string; file?: string }>;
+        const main = list.find(entry => entry.name === 'main') ?? list[0];
+        const filePath = typeof main?.file === 'string' ? main.file.trim() : '';
+        if (filePath) {
+            const stat = existsSync(filePath) ? lstatSync(filePath) : null;
+            const identity = stat ? `${filePath}|${stat.dev}:${stat.ino}` : filePath;
+            return `${identity}|ep=${aggregateModelCatalogEpoch}`;
+        }
+    } catch {
+        // fallback to in-memory database id
+    }
+    let memId = memoryDbCacheIds.get(db);
+    if (!memId) {
+        memId = nextMemoryDbCacheId++;
+        memoryDbCacheIds.set(db, memId);
+    }
+    return `memory:${memId}|ep=${aggregateModelCatalogEpoch}`;
+}
 
 function loadOrBuildLedgerIndex(
     db: DatabaseSync,
+    cacheKey: string,
     revision: number,
     rateRevision: number,
     ignoreLegacyRates: boolean
 ): CachedLedgerIndex {
-    const existing = aggregateIndexCache.get(db);
+    const locale = getActiveLocale();
+    const existing = aggregateIndexCache.get(cacheKey);
     if (
         existing &&
         existing.revision === revision &&
         existing.rateRevision === rateRevision &&
-        existing.ignoreLegacyRates === ignoreLegacyRates
+        existing.ignoreLegacyRates === ignoreLegacyRates &&
+        existing.locale === locale
     ) {
+        // Refresh MRU insertion order
+        aggregateIndexCache.delete(cacheKey);
+        aggregateIndexCache.set(cacheKey, existing);
+        aggregateIndexCacheHits += 1;
         return existing;
     }
+    aggregateIndexCacheMisses += 1;
     const priceJsonCache = new Map<string, ApiPricing>();
     const parseUnitPrice = (raw: string): ApiPricing => {
         const hit = priceJsonCache.get(raw);
@@ -296,8 +390,14 @@ function loadOrBuildLedgerIndex(
         const lockedUsd = hasRawLock && row.usd !== null && row.usd !== undefined ? Number(row.usd) : null;
         rows.push({ event, evEnv, isSynthetic, lockedPrice, lockedUsd, hasRawLock });
     }
-    const next: CachedLedgerIndex = { revision, rateRevision, ignoreLegacyRates, rows };
-    aggregateIndexCache.set(db, next);
+    const next: CachedLedgerIndex = { revision, rateRevision, ignoreLegacyRates, locale, rows };
+    aggregateIndexCache.delete(cacheKey);
+    while (aggregateIndexCache.size >= MAX_AGGREGATE_INDEX_CACHE_ENTRIES) {
+        const oldestKey = aggregateIndexCache.keys().next().value;
+        if (oldestKey === undefined) break;
+        aggregateIndexCache.delete(oldestKey);
+    }
+    aggregateIndexCache.set(cacheKey, next);
     return next;
 }
 
@@ -419,9 +519,10 @@ export function aggregateLedger(db: DatabaseSync, options: AggregateOptions): To
 
     const revision = Number(db.prepare('SELECT COALESCE(MAX(seq),0) AS revision FROM event_revisions').get()?.revision);
     let rateRevision = Number(db.prepare('SELECT COALESCE(MAX(version),0) AS version FROM rate_changes').get()?.version);
-    const indexedCache: CachedLedgerIndex | null = dryRunLocks
-        ? null
-        : loadOrBuildLedgerIndex(db, revision, rateRevision, Boolean(options.ignoreLegacyRates));
+    const resolvedCacheKey = dryRunLocks ? null : resolveAggregateIndexCacheKey(db, options.cacheKey);
+    const indexedCache: CachedLedgerIndex | null = resolvedCacheKey
+        ? loadOrBuildLedgerIndex(db, resolvedCacheKey, revision, rateRevision, Boolean(options.ignoreLegacyRates))
+        : null;
 
     const buildDryRowsIterable = (): Iterable<IndexedLedgerRow> => {
         const list: IndexedLedgerRow[] = [];
@@ -578,7 +679,10 @@ export function aggregateLedger(db: DatabaseSync, options: AggregateOptions): To
         }
     }
     catch (error) {
-        if (writeTxOpened) db.exec('ROLLBACK');
+        if (writeTxOpened) {
+            safeRollback(db);
+            if (resolvedCacheKey) aggregateIndexCache.delete(resolvedCacheKey);
+        }
         throw error;
     }
 

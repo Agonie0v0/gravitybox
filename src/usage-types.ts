@@ -69,6 +69,39 @@ export interface SyncReceipt {
   committed_at: number;
 }
 
+export type EnvironmentKind = 'local' | 'ssh';
+export type EnvironmentLifecycleState =
+  | 'online'
+  | 'auth_expired'
+  | 'offline_recent'
+  | 'historical_only';
+export type EnvironmentQuotaFreshness =
+  | 'fresh'
+  | 'stale'
+  | 'error_fallback'
+  | 'auth_expired'
+  | 'offline_snapshot';
+
+export interface EnvironmentNode {
+  environmentId: string;
+  machineId?: string;
+  kind: EnvironmentKind;
+  hostLabel: string;
+  lifecycleState: EnvironmentLifecycleState;
+  windowCount: number;
+  focused: boolean;
+  probing: boolean;
+  accountEmail: string;
+  accountName: string;
+  tier: string;
+  quota: Record<string, unknown> | null;
+  quotaFreshness: EnvironmentQuotaFreshness;
+  lastFocusedAt: number;
+  lastQuotaObservedAt: number | null;
+  lastUsageSyncedAt: number | null;
+  lastError: string;
+}
+
 export interface AvailableEnvironmentUsageOption {
   id: string;
   kind: 'all' | 'local' | 'ssh';
@@ -79,6 +112,8 @@ export interface AvailableEnvironmentUsageOption {
   estimated_usd?: number;
   online?: boolean;
   last_synced_at?: number;
+  lifecycle_state?: EnvironmentLifecycleState;
+  window_count?: number;
 }
 
 export interface KnownEnvironmentContext {
@@ -88,6 +123,8 @@ export interface KnownEnvironmentContext {
   label?: string;
   online?: boolean;
   last_synced_at?: number;
+  lifecycle_state?: EnvironmentLifecycleState;
+  window_count?: number;
 }
 
 export interface EnvironmentShareBreakdown {
@@ -148,6 +185,9 @@ export interface TokenUsageSummary {
   selected_environment_id?: string;
   environment_breakdown?: EnvironmentShareBreakdown;
   remote_sync_revision?: number;
+  environments?: EnvironmentNode[];
+  environments_revision?: number;
+  focused_environment_id?: string;
 }
 
 export interface AvailableAccountUsageOption {
@@ -404,9 +444,30 @@ export function resolveDynamicOrchestratorModel(
     const m = known.match(versionedRe);
     if (m) return `gemini-${m[1]}-${codename}`;
   }
-  // Only infer gemini-4-<codename> when the upstream ID itself explicitly starts with gemini-pro-orchestrator-
+  // Infer gemini-<highestMajor>-<codename> when the upstream ID itself explicitly starts with gemini-pro-orchestrator-
   if (idCodename) {
-    return `gemini-4-${codename}`;
+    let highestMajor = 0;
+    const majorRe = /^gemini-(\d+)-/i;
+    const considerMajor = (raw: string) => {
+      const cleaned = stripModelProviderPrefix(String(raw ?? '')).trim();
+      const match = cleaned.match(majorRe);
+      if (match) {
+        const major = Number.parseInt(match[1]!, 10);
+        if (Number.isSafeInteger(major) && major > highestMajor) {
+          highestMajor = major;
+        }
+      }
+    };
+    if (siblingModelIds) {
+      for (const raw of siblingModelIds) {
+        considerMajor(raw);
+      }
+    }
+    for (const known of getEffectiveModelAliasKeys()) {
+      considerMajor(known);
+    }
+    const major = highestMajor > 0 ? highestMajor : 4;
+    return `gemini-${major}-${codename}`;
   }
   return null;
 }

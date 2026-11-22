@@ -21,6 +21,7 @@ export const SUPPORTED_BUNDLES = new Map([
   ['2.32.1', '4c0a1ff5659e7dd92e6ad249a386c0dbce2c8e94b88522a2f366ff20b397081e'],
   ['2.32.2', '4c0a1ff5659e7dd92e6ad249a386c0dbce2c8e94b88522a2f366ff20b397081e'],
   ['2.33.0', 'f066a497c9c61198394cb3218e42ff61d85b03910d81282589c3ef066905f347'],
+  ['2.34.0', 'd52ce739c15044c02a32e1b9df62bfe39dd8164c70a2ab783540e6ed5e070251'],
 ]);
 export const VERIFIED_VERSIONS = new Set(SUPPORTED_BUNDLES.keys());
 export const ADDITIONAL_REMOTE_BUNDLES = new Map<string, Set<string>>();
@@ -180,7 +181,7 @@ export function looksLikeNoise(text: string): boolean {
   if (/^Invalid \w+ type\b/i.test(text)) return true;
   if (/^[A-Za-z]+_[A-Z0-9]+$/.test(text)) return true;
   if (/^[A-Z][a-z]+(?:[A-Z][a-z]+)+$/.test(text) && text.length < 26) return true;
-  if (/\s/.test(text) && text.trim().split(/\s+/).every(part => /^(?:[a-z-]+:)*[a-z][a-z0-9]*(?:-[a-z0-9./%[\]]+)*$/.test(part) && /-|:/.test(part))) return true;
+  if (/\s/.test(text) && text.trim().split(/\s+/).every(part => /^(?:[a-z0-9-/]+:)*[a-z][a-z0-9]*(?:-[a-z0-9./%[\]]+)*$/.test(part) && /-|:/.test(part))) return true;
   if (/^[),;\]]/.test(text) && /[(){}[\]]|\.(?:createElement|push|map)\b/.test(text)) return true;
   if (/createElement\(|\.prototype|\.startsWith\(|\.slice\(/.test(text)) return true;
   if (/^\[[A-Za-z][\w.]*\]$/.test(text)) return true;

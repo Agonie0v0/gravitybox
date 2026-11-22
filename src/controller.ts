@@ -36,6 +36,7 @@ import {
   type ExtractedString,
 } from './bundle.js';
 import {
+  cleanHostLabel,
   probeMainWorldSshRemote,
   supportsSshRemoteBridge,
   verifyRemotePageWindow,
@@ -44,16 +45,20 @@ import {
 } from './ssh-context.js';
 import { SshRemoteRpcClient, type RemoteRpcClientLike } from './ssh-remote-rpc.js';
 import { buildRemoteEnvironmentId } from './remote-usage-sync.js';
-import type { QuotaData } from './accounts.js';
+import type { LiveLanguageServerStatus, QuotaData } from './accounts.js';
 
 export type RemoteSessionConnectionState = 'connected' | 'disconnected' | 'auth_expired' | 'unverified';
 
 export interface RemoteSessionState {
   remoteKey: string;
+  environmentId: string;
+  machineId?: string;
   hostLabel: string;
   targetId: string;
   origin: string;
   state: RemoteSessionConnectionState;
+  windowCount?: number;
+  probing: boolean;
   email: string;
   name: string | null;
   tier: string;
@@ -62,6 +67,8 @@ export interface RemoteSessionState {
   quota: QuotaData | null;
   quotaOverview: Record<string, unknown> | null;
   observedAt: number | null;
+  lastIdentityVerifiedAt: number | null;
+  needsIdentityVerify?: boolean;
   disconnectedAt: number | null;
   lastError: string;
   lastFocusedAt: number;
@@ -78,6 +85,9 @@ export interface ConnectedRemoteRpcTarget {
   accountType: 'consumer' | 'enterprise_vertex' | 'unknown';
   matchedLocalAccountId: string | null;
   state: RemoteSessionConnectionState;
+  windowCount: number;
+  lastIdentityVerifiedAt: number;
+  reconnected: boolean;
 }
 
 export type AssistantStatus = {
@@ -115,6 +125,8 @@ export type PageSession = {
   detaching?: boolean;
   sourceKind?: WindowSourceKind;
   remoteKey?: string;
+  environmentId?: string;
+  machineId?: string;
   hostLabel?: string;
   browserContextId?: string;
   bundleSha256?: string;
@@ -142,7 +154,11 @@ export class Controller {
   private locale = 'zh-Hans';
   private configuredLanguage = 'zh-Hans';
   private hasTargetDictionary = true;
-  private get dormant() { return this.paused && !this.hudEnabled; }
+  private get observeOnly() { return this.paused && !this.hudEnabled; }
+  private get dormant() { return this.observeOnly; }
+  private focusPublishTimer?: NodeJS.Timeout;
+  private lastPublishedFocusKey = '';
+  private lastFocusPublishAt = 0;
   private effectiveStatusLocale(): string {
     return this.locale;
   }
@@ -317,7 +333,7 @@ export class Controller {
     for (const profileDir of [this.options.profile]) {
       try {
         const watcher = watch(profileDir, (_event, name) => {
-          if (String(name) === 'DevToolsActivePort' && !this.stopped && !this.dormant) {
+          if (String(name) === 'DevToolsActivePort' && !this.stopped) {
             clearTimeout(this.reconnection);
             this.reconnectionDelay = 1000;
             this.unverifiedWindowRetries = 0;
@@ -329,13 +345,35 @@ export class Controller {
       } catch { /* A missing profile uses bounded discovery retries. */ }
     }
   }
+  private scheduleFocusPublish(forceImmediate = false) {
+    if (this.stopped) return;
+    const nextFocusKey = `${this.getFocusedEnvironmentId()}|${this.getFocusedContextKey()}`;
+    const focusChanged = nextFocusKey !== this.lastPublishedFocusKey;
+    const now = Date.now();
+    if (forceImmediate || focusChanged || now - this.lastFocusPublishAt >= 200) {
+      if (this.focusPublishTimer) {
+        clearTimeout(this.focusPublishTimer);
+        this.focusPublishTimer = undefined;
+      }
+      this.lastPublishedFocusKey = nextFocusKey;
+      this.lastFocusPublishAt = now;
+      this.publish();
+      return;
+    }
+    if (!this.focusPublishTimer) {
+      this.focusPublishTimer = setTimeout(() => {
+        this.focusPublishTimer = undefined;
+        if (this.stopped) return;
+        this.lastPublishedFocusKey = `${this.getFocusedEnvironmentId()}|${this.getFocusedContextKey()}`;
+        this.lastFocusPublishAt = Date.now();
+        this.publish();
+      }, 150);
+      this.focusPublishTimer.unref?.();
+    }
+  }
   async start() {
     this.engine = await readFile(new URL('./engine.js', import.meta.url), 'utf8');this.runtimeId=createHash('sha256').update(this.engine).digest('hex');
     this.watchProfiles();
-    if(this.dormant) {
-      if(!this.options.fixture) { this.endpoint=await this.discoverEndpoint(this.options.appPath,this.options.profile);this.status.appVersion=this.endpoint?.appVersion; }
-      this.publish('paused', this.t('status.paused_keep'));return;
-    }
     await this.tryConnect();
   }
   private tryConnect(): Promise<void> {
@@ -345,7 +383,7 @@ export class Controller {
     return attempt.finally(() => { this.connecting = undefined; });
   }
   private async connectOnce() {
-    if (this.stopped || this.dormant) return;
+    if (this.stopped) return;
     try {
       if (this.browser) { await this.sync(); return; }
       if (this.options.fixture) {
@@ -356,18 +394,26 @@ export class Controller {
         if (Number(url.port) !== port) throw new Error(this.t('controller.err.fixture_port_mismatch'));
         this.endpoint = { port, browserURL: url.href, pid: 0, appVersion: 'fixture', legacyPatch: false };
       } else this.endpoint = await this.discoverEndpoint(this.options.appPath, this.options.profile);
-      if (this.stopped || this.dormant) return;
+      if (this.stopped) return;
       if (!this.endpoint) {
         if (!this.options.fixture && await this.checkAppRunning()) {
-          if (this.stopped || this.dormant) return;
+          if (this.stopped) return;
           const inspected = await this.inspectAppBundle(this.activeAppPath()).catch(() => undefined);
-          if (this.stopped || this.dormant) return;
+          if (this.stopped) return;
           if (inspected?.version) this.status.appVersion = inspected.version;
-          this.publish('debug-port-missing', this.t('status.debug_port_missing'));
+          if (this.observeOnly) {
+            this.publish('paused', this.t('status.paused_keep'));
+          } else {
+            this.publish('debug-port-missing', this.t('status.debug_port_missing'));
+          }
           this.retry(3000);
           return;
         }
-        this.publish('waiting', this.t('status.waiting_app'));
+        if (this.observeOnly) {
+          this.publish('paused', this.t('status.paused_keep'));
+        } else {
+          this.publish('waiting', this.t('status.waiting_app'));
+        }
         this.retry();
         return;
       }
@@ -467,7 +513,7 @@ export class Controller {
 
       for (const [id, session] of this.pages) {
         const target = permitted.find(target => target.id === id);
-        if (!target || this.dormant) {
+        if (!target) {
           this.markRemoteSessionDisconnected(session);
           await this.detach(session);
           this.pages.delete(id);
@@ -496,7 +542,7 @@ export class Controller {
                 if (nextOrigin) this.hudBridge.updateTargetOrigin(id, nextOrigin);
                 this.upsertConnectedRemoteSession(session);
               }
-              await this.refreshRegistration(session);
+              if (!this.observeOnly) await this.refreshRegistration(session);
             }
             await this.queueBootstrap(session, false);
           } catch {
@@ -509,14 +555,15 @@ export class Controller {
       this.status.errors = [];
       const activeApp = this.activeAppPath();
       let hasPendingRemoteProbe = false;
-      if (!this.dormant) for (const target of permitted) if (!this.pages.has(target.id)) {
-        if (this.dormant || this.stopped) break;
+      for (const target of permitted) if (!this.pages.has(target.id)) {
+        if (this.stopped) break;
         let tempCdp: CDP | undefined;
         try {
           const browserContextId = browserContextByTargetId.get(target.id);
           let sourceKind: WindowSourceKind = 'local';
           let remoteKey: string | undefined;
           let hostLabel: string | undefined;
+          let machineId: string | undefined;
 
           if (this.options.fixture) {
             sourceKind = 'local';
@@ -537,7 +584,7 @@ export class Controller {
               if (Number(socketURL.port) !== this.endpoint.port) throw new Error(this.t('controller.err.window_port_mismatch'));
               tempCdp = new CDP(socketURL.href);
               await tempCdp.connect();
-              if (this.dormant || this.stopped) { tempCdp.close(); tempCdp = undefined; break; }
+              if (this.stopped) { tempCdp.close(); tempCdp = undefined; break; }
               const verification = await this.verifyRemoteWindowTarget({
                 appVersion: this.endpoint.appVersion,
                 antigravityPid: this.endpoint.pid,
@@ -548,7 +595,8 @@ export class Controller {
               if (verification.status === 'verified') {
                 sourceKind = 'remote';
                 remoteKey = verification.identity.remoteKey;
-                hostLabel = verification.identity.hostLabel;
+                hostLabel = cleanHostLabel(verification.identity.hostLabel) || verification.identity.hostLabel;
+                machineId = verification.identity.machineId;
                 this.pendingRemoteTargets.delete(target.id);
               } else {
                 tempCdp.close();
@@ -568,13 +616,16 @@ export class Controller {
             }
           }
 
-          if (this.dormant || this.stopped) { tempCdp?.close(); break; }
+          if (this.stopped) { tempCdp?.close(); break; }
           const socketURL = assertLoopback(target.webSocketDebuggerUrl);
           if (Number(socketURL.port) !== this.endpoint.port) { tempCdp?.close(); throw new Error(this.t('controller.err.window_port_mismatch')); }
           const cdp = tempCdp ?? new CDP(socketURL.href);
           if (!tempCdp) await cdp.connect();
           tempCdp = undefined;
-          if (this.dormant || this.stopped) { cdp.close(); break; }
+          if (this.stopped) { cdp.close(); break; }
+          const environmentId = sourceKind === 'remote'
+            ? buildRemoteEnvironmentId(hostLabel || 'ssh-host')
+            : 'local';
           const session: PageSession = {
             cdp,
             targetId: target.id,
@@ -582,6 +633,8 @@ export class Controller {
             updateChain: Promise.resolve(),
             sourceKind,
             remoteKey,
+            environmentId,
+            machineId,
             hostLabel,
             browserContextId,
             lastFocusedAt: Date.now(),
@@ -619,23 +672,27 @@ export class Controller {
           cdp.on('Runtime.executionContextsCleared', () => {
             this.hudBridge.detachTargetPanes(target.id);
             session.contextId = undefined;
-            if (!session.detaching && !this.dormant && !this.stopped) this.scheduleSync(300);
+            if (!session.detaching && !this.stopped) this.scheduleSync(300);
           });
           await cdp.send('Page.enable'); await cdp.send('Runtime.enable');
           await cdp.send('Runtime.addBinding',{name:'__gravityboxLanguageChanged',executionContextName:WORLD});
           await cdp.send('Runtime.addBinding',{name:'__gravityboxWindowFocus',executionContextName:WORLD});
-          await this.hudBridge.attachToTarget(target.id, cdp, () => session.contextId, WORLD, {
-            sourceKind,
-            ...(remoteKey ? { remoteKey } : {}),
-            ...(hostLabel ? { hostLabel } : {}),
-            ...(targetOrigin ? { origin: targetOrigin } : {}),
-            ...(session.rpcClient ? { rpcClient: session.rpcClient } : {}),
-          });
+          if (!this.observeOnly) {
+            await this.hudBridge.attachToTarget(target.id, cdp, () => session.contextId, WORLD, {
+              sourceKind,
+              ...(remoteKey ? { remoteKey } : {}),
+              ...(hostLabel ? { hostLabel } : {}),
+              ...(targetOrigin ? { origin: targetOrigin } : {}),
+              ...(session.rpcClient ? { rpcClient: session.rpcClient } : {}),
+            });
+          }
           cdp.on('Runtime.bindingCalled',(event)=>{
             if(event.name==='__gravityboxLanguageChanged'&&event.executionContextId===session.contextId&&['zh','en'].includes(event.payload)){
               session.languageMode=event.payload;this.publish();if(this.hudEnabled){void this.hudBridge.refreshAllForLocaleChange();}
             }else if(event.name==='__gravityboxWindowFocus'&&event.executionContextId===session.contextId){
               const focusTs = Date.now();
+              const prevFocusedEnv = this.getFocusedEnvironmentId();
+              const prevFocusedCtx = this.getFocusedContextKey();
               session.lastFocusedAt = focusTs;
               if (session.sourceKind === 'remote' && session.remoteKey) {
                 const entry = this.remoteSessions.get(session.remoteKey);
@@ -646,11 +703,19 @@ export class Controller {
               } else if (session.sourceKind !== 'remote') {
                 this.localFocusedAt = focusTs;
               }
+              const nextFocusedEnv = this.getFocusedEnvironmentId();
+              const nextFocusedCtx = this.getFocusedContextKey();
+              if (nextFocusedEnv !== prevFocusedEnv || nextFocusedCtx !== prevFocusedCtx) {
+                this.remoteObservedVersion++;
+                this.scheduleFocusPublish(true);
+              } else {
+                this.scheduleFocusPublish(false);
+              }
             }else if(event.name===HUD_BRIDGE_BINDING_NAME&&this.hudEnabled&&event.executionContextId===session.contextId){
               this.hudBridge.handleRawBindingPayload(target.id,event.payload);
             }
           });
-          await this.refreshRegistration(session);
+          if (!this.observeOnly) await this.refreshRegistration(session);
           await this.queueBootstrap(session, false);
         } catch(error) {
           tempCdp?.close();
@@ -659,7 +724,7 @@ export class Controller {
         }
       }
       const hasUnreadyPage = [...this.pages.values()].some(session => !session.detaching && session.contextId === undefined);
-      if (!this.dormant && !this.stopped && hasPendingRemoteProbe) {
+      if (!this.stopped && hasPendingRemoteProbe) {
         if (this.sshProbeRetries < 30) {
           this.sshProbeRetries++;
           this.scheduleSync(300);
@@ -667,7 +732,7 @@ export class Controller {
       } else {
         this.sshProbeRetries = 0;
       }
-      if (!this.dormant && !this.stopped && !hasPendingRemoteProbe && permitted.length > 0 && (this.pages.size < permitted.length || hasUnreadyPage)) {
+      if (!this.stopped && !hasPendingRemoteProbe && permitted.length > 0 && (this.pages.size < permitted.length || hasUnreadyPage)) {
         if (this.unverifiedWindowRetries < 20) {
           this.unverifiedWindowRetries++;
           this.scheduleSync(1500);
@@ -693,7 +758,7 @@ export class Controller {
       this.publish(defaultMode, defaultMsg);
 
       const localSession = [...this.pages.values()].find(s => s.sourceKind !== 'remote');
-      if (!this.options.fixture && this.endpoint && localSession && !this.inspectingBundle && (this.lastInspectedAppVersion !== this.endpoint.appVersion || this.lastInspectedSha !== localSession.bundleSha256 || this.lastInspectedDictVersion !== this.options.dictionary.version)) {
+      if (!this.options.fixture && !this.observeOnly && this.endpoint && localSession && !this.inspectingBundle && (this.lastInspectedAppVersion !== this.endpoint.appVersion || this.lastInspectedSha !== localSession.bundleSha256 || this.lastInspectedDictVersion !== this.options.dictionary.version)) {
         try {
           const origin = new URL(localSession.url).origin;
           void this.inspectBundleInBackground(origin, this.endpoint.appVersion,this.initialBundle);this.initialBundle=undefined;
@@ -706,14 +771,50 @@ export class Controller {
       if (this.syncAgain) { this.syncAgain = false; this.scheduleSync(); }
     }
   }
+  private async installObserveFocusListener(session: PageSession): Promise<void> {
+    if (session.contextId === undefined || session.detaching || this.stopped) return;
+    await session.cdp.evaluate(
+      `(() => {
+        if (globalThis.__GRAVITYBOX_OBS_FOCUS__) return;
+        globalThis.__GRAVITYBOX_OBS_FOCUS__ = true;
+        const report = () => {
+          try {
+            if (typeof document !== 'undefined' && document.hidden) return;
+            if (typeof globalThis.__gravityboxWindowFocus === 'function') {
+              globalThis.__gravityboxWindowFocus(String(Date.now()));
+            }
+          } catch {}
+        };
+        if (typeof window !== 'undefined') window.addEventListener('focus', report, true);
+        if (typeof document !== 'undefined') document.addEventListener('visibilitychange', () => {
+          if (typeof document === 'undefined' || !document.hidden) report();
+        }, true);
+      })()`,
+      session.contextId
+    ).catch(() => {});
+  }
   private queueBootstrap(session: PageSession, reportUnhandledError = true): Promise<void> {
     if(session.detaching)return Promise.resolve();
     session.updateChain = session.updateChain.catch(() => {}).then(async () => {
-      if (this.dormant || this.stopped || session.detaching || this.pages.get(session.targetId)!==session) return;
+      if (this.stopped || session.detaching || this.pages.get(session.targetId)!==session) return;
       const tree = await session.cdp.send('Page.getFrameTree');
       const frame = tree.frameTree.frame;
       if (!allowedTarget({ type: 'page', url: frame.url }, this.options.fixture?.origin)) return;
       const isRemote = session.sourceKind === 'remote';
+      if (this.observeOnly) {
+        if (!this.options.fixture && this.endpoint && !isRemote) {
+          const activeApp = this.activeAppPath();
+          if (!await this.checkPageService(frame.url, activeApp)) throw new Error(this.t('controller.err.page_unverified'));
+        }
+        session.url = frame.url;
+        if (session.contextId === undefined) {
+          const context = await session.cdp.send('Page.createIsolatedWorld', { frameId: frame.id, worldName: WORLD });
+          session.contextId = context.executionContextId;
+        }
+        await this.installObserveFocusListener(session);
+        session.languageMode = 'en';
+        return;
+      }
       if(!this.options.fixture&&this.endpoint&&!isRemote){
         const activeApp = this.activeAppPath();
         if(!await this.checkPageService(frame.url,activeApp))throw new Error(this.t('controller.err.page_unverified'));
@@ -930,6 +1031,11 @@ export class Controller {
     if (session.sourceKind !== 'remote' || !session.remoteKey) return;
     let origin = '';
     try { origin = new URL(session.url).origin; } catch {}
+    const hostLabel = cleanHostLabel(session.hostLabel) || session.hostLabel || 'ssh-host';
+    const environmentId = session.environmentId || buildRemoteEnvironmentId(hostLabel);
+    session.hostLabel = hostLabel;
+    session.environmentId = environmentId;
+
     const existing = this.remoteSessions.get(session.remoteKey);
     if (existing) {
       const originChanged = Boolean(origin && existing.origin && existing.origin !== origin);
@@ -938,23 +1044,42 @@ export class Controller {
         existing.targetId !== session.targetId ||
         originChanged;
       existing.targetId = session.targetId;
-      existing.hostLabel = session.hostLabel || existing.hostLabel || 'ssh-host';
+      existing.hostLabel = hostLabel;
+      existing.environmentId = environmentId;
+      if (session.machineId) existing.machineId = session.machineId;
       if (origin) existing.origin = origin;
       if (existing.state === 'disconnected' || originChanged) {
         existing.state = 'connected';
         existing.disconnectedAt = null;
         existing.lastError = '';
+        existing.needsIdentityVerify = true;
       }
       existing.lastFocusedAt = Math.max(existing.lastFocusedAt, session.lastFocusedAt ?? 0);
       if (changed) this.remoteObservedVersion++;
       return;
     }
+
+    // Reconnected under a new dynamic port (different remoteKey, same environmentId):
+    // retire stale disconnected entries for this environmentId and flag identity re-verification.
+    let inheritedFocus = session.lastFocusedAt ?? Date.now();
+    let reconnectedFromOffline = false;
+    for (const [prevKey, prevEntry] of this.remoteSessions.entries()) {
+      if (prevEntry.environmentId === environmentId && prevEntry.state === 'disconnected') {
+        inheritedFocus = Math.max(inheritedFocus, prevEntry.lastFocusedAt);
+        reconnectedFromOffline = true;
+        this.remoteSessions.delete(prevKey);
+      }
+    }
+
     this.remoteSessions.set(session.remoteKey, {
       remoteKey: session.remoteKey,
-      hostLabel: session.hostLabel || 'ssh-host',
+      environmentId,
+      ...(session.machineId ? { machineId: session.machineId } : {}),
+      hostLabel,
       targetId: session.targetId,
       origin,
       state: 'connected',
+      probing: true,
       email: '',
       name: null,
       tier: '',
@@ -963,9 +1088,11 @@ export class Controller {
       quota: null,
       quotaOverview: null,
       observedAt: null,
+      lastIdentityVerifiedAt: null,
+      needsIdentityVerify: reconnectedFromOffline,
       disconnectedAt: null,
       lastError: '',
-      lastFocusedAt: session.lastFocusedAt ?? Date.now(),
+      lastFocusedAt: inheritedFocus,
     });
     this.remoteObservedVersion++;
   }
@@ -979,7 +1106,7 @@ export class Controller {
     if (!entry) return;
     if (replacement) {
       entry.targetId = replacement.targetId;
-      entry.hostLabel = replacement.hostLabel || entry.hostLabel;
+      entry.hostLabel = cleanHostLabel(replacement.hostLabel) || entry.hostLabel;
       try {
         const nextOrigin = new URL(replacement.url).origin;
         if (nextOrigin) entry.origin = nextOrigin;
@@ -989,6 +1116,7 @@ export class Controller {
     }
     if (entry.state !== 'disconnected') {
       entry.state = 'disconnected';
+      entry.probing = false;
       entry.disconnectedAt = nowMs;
       this.remoteObservedVersion++;
     }
@@ -1008,39 +1136,88 @@ export class Controller {
     }
   }
 
-  public getActiveSshWindowsSummary(): { count: number; hosts: string[] } {
-    const remotePages = [...this.pages.values()].filter(p => !p.detaching && p.sourceKind === 'remote');
-    const hosts = [...new Set(remotePages.map(p => (p.hostLabel || '').trim()).filter(Boolean))];
-    return { count: remotePages.length, hosts };
+  public getEnvironmentWindowCounts(): Map<string, number> {
+    const counts = new Map<string, number>();
+    counts.set('local', 0);
+    for (const session of this.pages.values()) {
+      if (session.detaching) continue;
+      if (session.sourceKind === 'remote') {
+        const host = cleanHostLabel(session.hostLabel) || session.hostLabel || 'ssh-host';
+        const envId = session.environmentId || buildRemoteEnvironmentId(host);
+        counts.set(envId, (counts.get(envId) ?? 0) + 1);
+      } else {
+        counts.set('local', (counts.get('local') ?? 0) + 1);
+      }
+    }
+    return counts;
   }
 
-  public getFocusedContextKey(): string {
+  public getLocalWindowsCount(): number {
+    return this.getEnvironmentWindowCounts().get('local') ?? 0;
+  }
+
+  public getLocalFocusedAt(): number {
     let localFocus = this.localFocusedAt;
     for (const session of this.pages.values()) {
       if (!session.detaching && session.sourceKind !== 'remote') {
         localFocus = Math.max(localFocus, session.lastFocusedAt ?? 0);
       }
     }
-    let bestRemote: RemoteSessionState | null = null;
+    return localFocus;
+  }
+
+  public getRemoteObservedVersion(): number {
+    return this.remoteObservedVersion;
+  }
+
+  public getActiveSshWindowsSummary(): { count: number; hosts: string[] } {
+    const remotePages = [...this.pages.values()].filter(p => !p.detaching && p.sourceKind === 'remote');
+    const hosts = [...new Set(remotePages.map(p => cleanHostLabel(p.hostLabel) || (p.hostLabel || '').trim()).filter(Boolean))];
+    return { count: remotePages.length, hosts };
+  }
+
+  private pickFocusedRemoteEntry(): (RemoteSessionState & { lastFocusedAt: number }) | null {
+    const localFocus = this.getLocalFocusedAt();
+    let bestRemote: (RemoteSessionState & { lastFocusedAt: number }) | null = null;
     for (const entry of this.remoteSessions.values()) {
       if (entry.state === 'disconnected') continue;
-      const livePage = this.pages.get(entry.targetId);
-      if (!livePage || livePage.detaching || livePage.sourceKind !== 'remote') continue;
-      const entryFocus = Math.max(entry.lastFocusedAt, livePage.lastFocusedAt ?? 0);
+      const livePages = [...this.pages.values()].filter(
+        p => !p.detaching && p.sourceKind === 'remote' && (p.remoteKey === entry.remoteKey || p.targetId === entry.targetId)
+      );
+      if (livePages.length === 0) continue;
+      const pageMaxFocus = Math.max(...livePages.map(p => p.lastFocusedAt ?? 0));
+      const entryFocus = Math.max(entry.lastFocusedAt, pageMaxFocus);
       if (!bestRemote || entryFocus > bestRemote.lastFocusedAt) {
         bestRemote = { ...entry, lastFocusedAt: entryFocus };
       }
     }
     if (bestRemote && bestRemote.lastFocusedAt > localFocus) {
-      return `remote:${bestRemote.remoteKey}`;
+      return bestRemote;
+    }
+    return null;
+  }
+
+  public getFocusedEnvironmentId(): string {
+    const best = this.pickFocusedRemoteEntry();
+    return best ? best.environmentId : 'local';
+  }
+
+  public getFocusedContextKey(): string {
+    const best = this.pickFocusedRemoteEntry();
+    if (best) {
+      return `remote:${best.remoteKey}`;
     }
     return 'local';
   }
 
   public getRemoteSessionsSnapshot(nowMs = Date.now()): RemoteSessionState[] {
     this.pruneExpiredRemoteSessions(nowMs);
+    const windowCounts = this.getEnvironmentWindowCounts();
     return [...this.remoteSessions.values()]
-      .map(entry => ({ ...entry }))
+      .map(entry => ({
+        ...entry,
+        windowCount: entry.state === 'disconnected' ? 0 : (windowCounts.get(entry.environmentId) ?? 0),
+      }))
       .sort((a, b) => {
         const aConn = a.state === 'disconnected' ? 0 : 1;
         const bConn = b.state === 'disconnected' ? 0 : 1;
@@ -1050,25 +1227,51 @@ export class Controller {
   }
 
   public getConnectedRemoteRpcTargets(): ConnectedRemoteRpcTarget[] {
-    const pageByRemoteKey = new Map<string, { session: PageSession; rpcClient: RemoteRpcClientLike }>();
+    const windowCounts = this.getEnvironmentWindowCounts();
+    const bestByEnvId = new Map<
+      string,
+      {
+        session: PageSession;
+        entry?: RemoteSessionState;
+        rpcClient: RemoteRpcClientLike;
+        hasContext: number;
+        healthyAuth: number;
+        lastFocusedAt: number;
+      }
+    >();
+
     for (const session of this.pages.values()) {
       if (session.detaching || session.sourceKind !== 'remote' || !session.remoteKey || !session.rpcClient) {
         continue;
       }
-      const existing = pageByRemoteKey.get(session.remoteKey);
-      if (
+      const entry = this.remoteSessions.get(session.remoteKey);
+      if (entry?.state === 'disconnected') continue;
+      const hostLabel = cleanHostLabel(entry?.hostLabel || session.hostLabel || 'ssh-host') || 'ssh-host';
+      const environmentId = session.environmentId || entry?.environmentId || buildRemoteEnvironmentId(hostLabel);
+      const hasContext = session.contextId !== undefined ? 1 : 0;
+      const healthyAuth = entry?.state !== 'auth_expired' ? 1 : 0;
+      const lastFocusedAt = Math.max(entry?.lastFocusedAt ?? 0, session.lastFocusedAt ?? 0);
+      const existing = bestByEnvId.get(environmentId);
+      const shouldReplace =
         !existing ||
-        (existing.session.contextId === undefined && session.contextId !== undefined) ||
-        (session.lastFocusedAt ?? 0) > (existing.session.lastFocusedAt ?? 0)
-      ) {
-        pageByRemoteKey.set(session.remoteKey, { session, rpcClient: session.rpcClient });
+        hasContext > existing.hasContext ||
+        (hasContext === existing.hasContext && healthyAuth > existing.healthyAuth) ||
+        (hasContext === existing.hasContext && healthyAuth === existing.healthyAuth && lastFocusedAt > existing.lastFocusedAt);
+      if (shouldReplace) {
+        bestByEnvId.set(environmentId, {
+          session,
+          entry,
+          rpcClient: session.rpcClient,
+          hasContext,
+          healthyAuth,
+          lastFocusedAt,
+        });
       }
     }
 
     const targets: Array<{ target: ConnectedRemoteRpcTarget; lastFocusedAt: number }> = [];
-    for (const [remoteKey, { session, rpcClient }] of pageByRemoteKey.entries()) {
-      const entry = this.remoteSessions.get(remoteKey);
-      if (entry?.state === 'disconnected') continue;
+    for (const [environmentId, picked] of bestByEnvId.entries()) {
+      const { session, entry, rpcClient, lastFocusedAt } = picked;
       let origin = entry?.origin ?? '';
       if (!origin) {
         try {
@@ -1077,13 +1280,13 @@ export class Controller {
           origin = '';
         }
       }
-      const hostLabel = entry?.hostLabel || session.hostLabel || 'ssh-host';
+      const hostLabel = cleanHostLabel(entry?.hostLabel || session.hostLabel || 'ssh-host') || 'ssh-host';
       targets.push({
-        lastFocusedAt: Math.max(entry?.lastFocusedAt ?? 0, session.lastFocusedAt ?? 0),
+        lastFocusedAt,
         target: {
-          remoteKey,
+          remoteKey: session.remoteKey!,
           hostLabel,
-          environmentId: buildRemoteEnvironmentId(hostLabel),
+          environmentId,
           origin,
           rpcClient,
           email: entry?.email ?? '',
@@ -1091,6 +1294,9 @@ export class Controller {
           accountType: entry?.accountType ?? 'unknown',
           matchedLocalAccountId: entry?.matchedLocalAccountId ?? null,
           state: entry?.state ?? 'connected',
+          windowCount: windowCounts.get(environmentId) ?? 1,
+          lastIdentityVerifiedAt: entry?.lastIdentityVerifiedAt ?? entry?.observedAt ?? 0,
+          reconnected: Boolean(entry?.needsIdentityVerify),
         },
       });
     }
@@ -1099,9 +1305,51 @@ export class Controller {
     return targets.map(item => item.target);
   }
 
+  public applyObservedRemoteIdentity(params: {
+    environmentId: string;
+    remoteKey?: string;
+    live: LiveLanguageServerStatus;
+    observedAtMs?: number;
+    matchAccountId?: (email: string) => string | null;
+    getQuotaOverview?: (quota: QuotaData, nowMs: number) => any;
+  }): boolean {
+    const observedAtMs = params.observedAtMs ?? Date.now();
+    let updated = false;
+    for (const entry of this.remoteSessions.values()) {
+      if (entry.state === 'disconnected') continue;
+      if (entry.environmentId !== params.environmentId && (!params.remoteKey || entry.remoteKey !== params.remoteKey)) {
+        continue;
+      }
+      entry.state = 'connected';
+      entry.probing = false;
+      entry.disconnectedAt = null;
+      entry.lastError = '';
+      entry.email = params.live.email;
+      entry.name = params.live.name ?? null;
+      entry.tier = params.live.tier || '';
+      entry.accountType = params.live.accountType ?? 'unknown';
+      entry.quota = params.live.quota ?? entry.quota;
+      entry.observedAt = observedAtMs;
+      entry.lastIdentityVerifiedAt = observedAtMs;
+      entry.needsIdentityVerify = false;
+      if (params.matchAccountId) {
+        entry.matchedLocalAccountId = params.matchAccountId(entry.email);
+      }
+      if (entry.quota && params.getQuotaOverview) {
+        entry.quotaOverview = params.getQuotaOverview(entry.quota, observedAtMs);
+      }
+      updated = true;
+    }
+    if (updated) {
+      this.remoteObservedVersion++;
+    }
+    return updated;
+  }
+
   public async probeRemoteSessions(options?: {
     force?: boolean;
     remoteKey?: string;
+    environmentId?: string;
     nowMs?: number;
     matchAccountId?: (email: string) => string | null;
     getQuotaOverview?: (quota: QuotaData, nowMs: number) => any;
@@ -1116,20 +1364,31 @@ export class Controller {
 
     const candidates = [...this.remoteSessions.values()].filter(entry => {
       if (options?.remoteKey && entry.remoteKey !== options.remoteKey) return false;
+      if (options?.environmentId && entry.environmentId !== options.environmentId) return false;
       return entry.state !== 'disconnected';
     });
 
     await Promise.all(
       candidates.map(async entry => {
-        const livePage = [...this.pages.values()].find(
-          p => !p.detaching && p.sourceKind === 'remote' && p.remoteKey === entry.remoteKey
-        );
+        const livePage = [...this.pages.values()]
+          .filter(
+            p =>
+              !p.detaching &&
+              p.sourceKind === 'remote' &&
+              (p.remoteKey === entry.remoteKey || p.environmentId === entry.environmentId)
+          )
+          .sort(
+            (a, b) =>
+              (b.contextId !== undefined ? 1 : 0) - (a.contextId !== undefined ? 1 : 0) ||
+              (b.lastFocusedAt ?? 0) - (a.lastFocusedAt ?? 0)
+          )[0];
         if (!livePage?.rpcClient) {
           return;
         }
         const cacheFresh =
           !options?.force &&
           entry.state === 'connected' &&
+          !entry.probing &&
           Boolean(entry.email) &&
           entry.observedAt !== null &&
           nowMs - entry.observedAt < this.REMOTE_SESSION_CACHE_TTL_MS;
@@ -1150,38 +1409,56 @@ export class Controller {
         }
 
         const probeTask = (async () => {
-          const probeNowMs = options?.nowMs ?? Date.now();
-          const res = await livePage.rpcClient!.probeUserAndQuota();
-          const current = this.remoteSessions.get(entry.remoteKey);
-          if (!current) return;
-          if (res.ok) {
-            current.state = 'connected';
-            current.disconnectedAt = null;
-            current.lastError = '';
-            current.email = res.data.email;
-            current.name = res.data.name ?? null;
-            current.tier = res.data.tier || '';
-            current.accountType = res.data.accountType ?? 'unknown';
-            current.quota = res.data.quota ?? null;
-            current.observedAt = probeNowMs;
-            current.matchedLocalAccountId = options?.matchAccountId
-              ? options.matchAccountId(current.email)
-              : current.matchedLocalAccountId;
-            current.quotaOverview = current.quota && options?.getQuotaOverview
-              ? options.getQuotaOverview(current.quota, probeNowMs)
-              : current.quotaOverview;
-            this.remoteObservedVersion++;
-            return;
-          }
-          if (res.authExpired) {
-            current.state = 'auth_expired';
-            current.lastError = 'auth_expired';
-            this.remoteObservedVersion++;
-          } else if (res.reason !== 'context_unavailable') {
-            current.lastError = res.reason || 'rpc_error';
-            this.remoteObservedVersion++;
+          try {
+            const probeNowMs = options?.nowMs ?? Date.now();
+            const res = await livePage.rpcClient!.probeUserAndQuota();
+            const current = this.remoteSessions.get(entry.remoteKey);
+            if (!current) return;
+            if (res.ok) {
+              current.state = 'connected';
+              current.probing = false;
+              current.disconnectedAt = null;
+              current.lastError = '';
+              current.email = res.data.email;
+              current.name = res.data.name ?? null;
+              current.tier = res.data.tier || '';
+              current.accountType = res.data.accountType ?? 'unknown';
+              current.quota = res.data.quota ?? null;
+              current.observedAt = probeNowMs;
+              current.lastIdentityVerifiedAt = probeNowMs;
+              current.needsIdentityVerify = false;
+              current.matchedLocalAccountId = options?.matchAccountId
+                ? options.matchAccountId(current.email)
+                : current.matchedLocalAccountId;
+              current.quotaOverview = current.quota && options?.getQuotaOverview
+                ? options.getQuotaOverview(current.quota, probeNowMs)
+                : current.quotaOverview;
+              this.remoteObservedVersion++;
+              return;
+            }
+            if (res.authExpired) {
+              current.state = 'auth_expired';
+              current.probing = false;
+              current.lastError = 'auth_expired';
+              this.remoteObservedVersion++;
+            } else if (res.reason !== 'context_unavailable') {
+              current.probing = false;
+              current.lastError = res.reason || 'rpc_error';
+              this.remoteObservedVersion++;
+            }
+          } catch {
+            const current = this.remoteSessions.get(entry.remoteKey);
+            if (current) {
+              current.probing = false;
+              current.lastError = 'rpc_error';
+              this.remoteObservedVersion++;
+            }
           }
         })().finally(() => {
+          const current = this.remoteSessions.get(entry.remoteKey);
+          if (current && current.probing && current.lastError) {
+            current.probing = false;
+          }
           this.remoteProbeInFlight.delete(entry.remoteKey);
         });
 
@@ -1238,11 +1515,53 @@ export class Controller {
     await this.controlChain.catch(() => {});
     await this.quiescePages();
   }
+  private async ensureHudBridgeAttached(session: PageSession): Promise<void> {
+    let targetOrigin = '';
+    try { targetOrigin = new URL(session.url).origin; } catch {}
+    await this.hudBridge.attachToTarget(session.targetId, session.cdp, () => session.contextId, WORLD, {
+      sourceKind: session.sourceKind ?? 'local',
+      ...(session.remoteKey ? { remoteKey: session.remoteKey } : {}),
+      ...(session.hostLabel ? { hostLabel: session.hostLabel } : {}),
+      ...(targetOrigin ? { origin: targetOrigin } : {}),
+      ...(session.rpcClient ? { rpcClient: session.rpcClient } : {}),
+    });
+  }
+  private async transitionActiveSessionsToObserveOnly(): Promise<void> {
+    await this.connecting?.catch(() => {});
+    if (this.syncing) await new Promise<void>(resolve => this.syncWaiters.push(resolve));
+    this.hudBridge.clearActivePanes();
+    for (const [id, session] of [...this.pages.entries()]) {
+      if (session.detaching) continue;
+      try {
+        await session.updateChain.catch(() => {});
+        this.hudBridge.detachTarget(id);
+        if (session.registration) {
+          await session.cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: session.registration }).catch(() => {});
+          session.registration = undefined;
+          session.registeredVerifiedBundle = undefined;
+          session.registeredFullTranslation = undefined;
+        }
+        if (session.contextId !== undefined) {
+          await session.cdp.evaluate(
+            '(globalThis.__GRAVITYBOX_PENDING_BOOT__?.cancel?.(),globalThis.__GRAVITYBOX_ENGINE_V1__?.dispose?.(),globalThis.__GRAVITYBOX_HUD_V1__?.dispose?.())',
+            session.contextId
+          ).catch(() => {});
+          await this.installObserveFocusListener(session);
+        }
+        session.languageMode = 'en';
+        session.bootedConservative = undefined;
+      } catch {
+        this.markRemoteSessionDisconnected(session);
+        await this.detach(session);
+        this.pages.delete(id);
+      }
+    }
+  }
   private async transitionActiveSessionsToHudOnly(): Promise<void> {
     await this.connecting?.catch(() => {});
     if (this.syncing) await new Promise<void>(resolve => this.syncWaiters.push(resolve));
     if (!this.hudEnabled) {
-      await this.disconnectPages();
+      await this.transitionActiveSessionsToObserveOnly();
       return;
     }
     const hudLocale = this.effectiveHudLocale();
@@ -1253,11 +1572,13 @@ export class Controller {
         const tree = await session.cdp.send('Page.getFrameTree');
         const frame = tree.frameTree.frame;
         if (!allowedTarget({ type: 'page', url: frame.url }, this.options.fixture?.origin)) {
+          this.markRemoteSessionDisconnected(session);
           await this.detach(session);
           this.pages.delete(id);
           continue;
         }
         session.url = frame.url;
+        await this.ensureHudBridgeAttached(session);
         await this.refreshRegistration(session);
         if (session.contextId === undefined) {
           const world = await session.cdp.send('Page.createIsolatedWorld', { frameId: frame.id, worldName: WORLD });
@@ -1274,6 +1595,7 @@ export class Controller {
         );
         session.languageMode = 'en';
       } catch {
+        this.markRemoteSessionDisconnected(session);
         await this.detach(session);
         this.pages.delete(id);
       }
@@ -1286,8 +1608,8 @@ export class Controller {
       this.status.errors = [];
       this.bootCache.clear();
       await this.transitionActiveSessionsToHudOnly();
+      await this.resumeHudOnly();
       if (this.hudEnabled) {
-        await this.resumeHudOnly();
         if (this.effectiveHudLocale() !== prevHudLocale) {
           await this.hudBridge.refreshAllForLocaleChange();
         }
@@ -1295,8 +1617,6 @@ export class Controller {
           this.publish('debug-port-missing', this.t('status.debug_port_missing'));
           return;
         }
-      } else {
-        clearTimeout(this.reconnection);
       }
       this.publish('paused', this.status.errors.length ? this.t('status.pausedWithErrors') : this.t('status.paused'));
     });
@@ -1313,25 +1633,30 @@ export class Controller {
       this.hasTargetDictionary = true;
     }
     const wasPaused = this.paused;
-    if (wasPaused && this.pages.size && !this.hudEnabled) await this.disconnectPages();
     this.paused = false;
     this.reconnectionDelay = 1000;
     this.unverifiedWindowRetries = 0;
     this.bootCache.clear();
-    if (wasPaused && this.hudEnabled && this.pages.size) {
+    if (wasPaused && this.pages.size) {
       for (const [id, session] of [...this.pages.entries()]) {
         if (session.detaching) continue;
         session.languageMode = undefined;
         try {
+          if (this.hudEnabled) {
+            await this.ensureHudBridgeAttached(session);
+          }
           if (session.contextId !== undefined) {
             await session.cdp.evaluate(
-              '(globalThis.__GRAVITYBOX_PENDING_BOOT__?.cancel?.(),globalThis.__GRAVITYBOX_ENGINE_V1__?.dispose?.({keepHud:true}))',
+              this.hudEnabled
+                ? '(globalThis.__GRAVITYBOX_PENDING_BOOT__?.cancel?.(),globalThis.__GRAVITYBOX_ENGINE_V1__?.dispose?.({keepHud:true}))'
+                : '(globalThis.__GRAVITYBOX_PENDING_BOOT__?.cancel?.(),globalThis.__GRAVITYBOX_ENGINE_V1__?.dispose?.(),globalThis.__GRAVITYBOX_HUD_V1__?.dispose?.())',
               session.contextId
             );
           }
           await this.refreshRegistration(session);
           await this.queueBootstrap(session, false);
         } catch {
+          this.markRemoteSessionDisconnected(session);
           await this.detach(session);
           this.pages.delete(id);
         }
@@ -1380,14 +1705,9 @@ export class Controller {
         this.paused = true;
         if (!previousPaused || previousLocale !== resolved) {
           await this.transitionActiveSessionsToHudOnly();
+          await this.resumeHudOnly();
           if (this.hudEnabled) {
-            await this.resumeHudOnly();
             await this.hudBridge.refreshAllForLocaleChange();
-          } else {
-            clearTimeout(this.reconnection);
-            this.hudBridge.clearActivePanes();
-            this.browser?.close();
-            this.browser = undefined;
           }
         }
         if (this.hudEnabled && !this.browser && this.status.mode === 'debug-port-missing') {
@@ -1453,18 +1773,17 @@ export class Controller {
       this.options.hudEnabled = enabled;
       this.bootCache.clear();
       if (this.paused) {
-        await this.disconnectPages();
         if (enabled) {
+          await this.transitionActiveSessionsToHudOnly();
           await this.resumeHudOnly();
-        } else {
-          clearTimeout(this.reconnection);
-          this.hudBridge.clearActivePanes();
-          this.browser?.close();
-          this.browser = undefined;
-          this.publish('paused', this.t('status.paused_keep'));
+          await this.hudBridge.refreshAllForLocaleChange();
+          this.publish();
           return;
         }
-        this.publish(); return;
+        await this.transitionActiveSessionsToObserveOnly();
+        await this.resumeHudOnly();
+        this.publish('paused', this.t('status.paused_keep'));
+        return;
       }
       if (!enabled) {
         this.hudBridge.clearActivePanes();
@@ -1474,6 +1793,7 @@ export class Controller {
         await this.refreshRegistration(session);
         if (session.contextId !== undefined && !session.detaching) {
           if (enabled) {
+            await this.ensureHudBridgeAttached(session);
             await session.cdp.evaluate(
               `((globalThis.__GRAVITYBOX_BOOT__&&(globalThis.__GRAVITYBOX_BOOT__.hudEnabled=true)),globalThis.__GRAVITYBOX_ATTACH_HUD__?.(),globalThis.__GRAVITYBOX_HUD_V1__?.setLanguage?.(${JSON.stringify(effectiveHudLocale)}),globalThis.__GRAVITYBOX_HUD_V1__?.setEnabled?.(true),globalThis.__GRAVITYBOX_HUD_V1__?.syncAllSessions?.())`,
               session.contextId
@@ -1554,6 +1874,7 @@ export class Controller {
     let checked = false;
     for (const page of this.pages.values()) {
       if (page.contextId === undefined) continue;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const res = await Promise.race([
           page.cdp.evaluate(
@@ -1589,23 +1910,39 @@ export class Controller {
             })()`,
             page.contextId
           ),
-          new Promise<{ busy: boolean; checked: boolean }>(resolve => setTimeout(() => resolve({ busy: false, checked: false }), 600)),
+          new Promise<{ busy: boolean; checked: boolean }>(resolve => {
+            timer = setTimeout(() => resolve({ busy: false, checked: false }), 600);
+          }),
         ]);
         if (res?.checked) checked = true;
         if (res?.busy) return res;
-      } catch {}
+      } catch {
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     }
     return { busy: false, checked };
   }
   async maintenancePreflight(){
     const sshSummary = this.getActiveSshWindowsSummary();
     if(!this.endpoint||!this.pages.size)return{ok:true,pid:0,activeSshWindowsCount:sshSummary.count,activeSshHosts:sshSummary.hosts};
-    const endpoint=await discover(this.options.appPath,this.options.profile);if(!endpoint||endpoint.pid!==this.endpoint.pid)return{ok:true,pid:endpoint?.pid??0,activeSshWindowsCount:sshSummary.count,activeSshHosts:sshSummary.hosts};
+    const endpoint=await this.discoverEndpoint(this.options.appPath,this.options.profile);if(!endpoint||endpoint.pid!==this.endpoint.pid)return{ok:true,pid:endpoint?.pid??0,activeSshWindowsCount:sshSummary.count,activeSshHosts:sshSummary.hosts};
     const agentTask=await this.hasRunningAgentTask();
     if(agentTask.busy)throw new Error(agentTask.reason?this.t('controller.preflight.reason_wait', { reason: agentTask.reason }):this.t('controller.preflight.task_wait'));
     for(const page of this.pages.values()){
-      if(page.contextId===undefined)continue;
-      const state=await page.cdp.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__?.maintenanceState?.()',page.contextId);
+      if(page.contextId===undefined||page.detaching)continue;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let state: { busy?: boolean } | undefined;
+      try {
+        state = await Promise.race([
+          page.cdp.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__?.maintenanceState?.()', page.contextId),
+          new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), 1500); }),
+        ]);
+      } catch {
+        continue;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
       if(state?.busy)throw new Error(this.t('controller.preflight.save_drafts'));
     }
     return{ok:true,pid:endpoint.pid,activeSshWindowsCount:sshSummary.count,activeSshHosts:sshSummary.hosts};
@@ -1632,7 +1969,7 @@ export class Controller {
     await this.hudBridge.refreshAllForPricingChange();
   }
   async stop() {
-    this.stopped = true; this.closeProfileWatchers(); clearTimeout(this.reconnection); clearTimeout(this.targetTimer);
+    this.stopped = true; this.closeProfileWatchers(); clearTimeout(this.reconnection); clearTimeout(this.targetTimer); clearTimeout(this.focusPublishTimer);
     this.hudBridge.dispose();
     await this.quiesce();
     this.browser?.close();

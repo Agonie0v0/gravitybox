@@ -480,6 +480,8 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         return [modelTitle]
     }
 
+    private static let cardBoxFillColor = Design.dynamicAlpha(Design.color(0x000000, 0xFFFFFF), 0.022, 0.035)
+
     private func makeCardBox(body: NSView, alpha: CGFloat = 1.0) -> DesignCardBox {
         let card = DesignCardBox()
         card.boxType = .custom
@@ -487,11 +489,7 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         card.borderWidth = 0.5
         card.borderColor = Design.border
         card.enablesHoverHighlight = false
-        card.fillColor = NSColor(name: nil) { app in
-            app.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                ? NSColor.white.withAlphaComponent(0.035)
-                : NSColor.black.withAlphaComponent(0.022)
-        }
+        card.fillColor = Self.cardBoxFillColor
         card.contentViewMargins = .zero
         card.alphaValue = alpha
         card.addSubview(body)

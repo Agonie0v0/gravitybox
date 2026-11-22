@@ -34,6 +34,13 @@ export type RemoteRpcCallResult<T> =
       latencyMs?: number;
     };
 
+export interface RemoteParentReference {
+  parentTrajectoryId?: string;
+  parentCascadeId?: string;
+  forkStepIndex?: number;
+  referenceType?: number | string;
+}
+
 export interface RemoteTrajectorySummary {
   cascadeId: string;
   trajectoryId?: string;
@@ -42,6 +49,9 @@ export interface RemoteTrajectorySummary {
   stepCount: number;
   parentConversationId?: string;
   rootConversationId?: string;
+  parentReferences?: RemoteParentReference[];
+  forkStepIndex?: number;
+  forkParentCascadeId?: string;
   lastModifiedTime?: unknown;
   requestedModel?: string;
 }
@@ -70,6 +80,13 @@ export interface RemoteGenMetadataRecord {
   modelDisplayName?: string;
   timeToFirstToken?: unknown;
   streamingDuration?: unknown;
+  createdAt?: unknown;
+  chatStartMetadata?: {
+    createdAt?: unknown;
+    startTime?: unknown;
+    startedAt?: unknown;
+    timestamp?: unknown;
+  };
   contextWindowMetadata?: {
     estimatedTokensUsed?: number | string;
     maxContextTokens?: number | string;
@@ -988,6 +1005,29 @@ export class SshRemoteRpcClient implements RemoteRpcClientLike {
       }
       const raw = res.data && res.data.trajectorySummaries;
       const out = [];
+      const MAX_VALID_FORK_STEP_INDEX = 10000000;
+      const pickId = (...vals) => {
+        for (const v of vals) {
+          if (typeof v === 'string') {
+            const t = v.trim();
+            if (t) return t;
+          }
+        }
+        return undefined;
+      };
+      const parseValidForkStepIndex = (val) => {
+        if (val === undefined || val === null || val === '') return undefined;
+        if (typeof val === 'number') {
+          return Number.isSafeInteger(val) && val >= 0 && val < MAX_VALID_FORK_STEP_INDEX ? val : undefined;
+        }
+        if (typeof val === 'string') {
+          const t = val.trim();
+          if (!/^[0-9]+$/.test(t)) return undefined;
+          const n = Number(t);
+          return Number.isSafeInteger(n) && n >= 0 && n < MAX_VALID_FORK_STEP_INDEX ? n : undefined;
+        }
+        return undefined;
+      };
       const pushEntry = (cid, s) => {
         if (!cid || !s || typeof s !== 'object') return;
         const tm = s.trajectoryMetadata && typeof s.trajectoryMetadata === 'object' ? s.trajectoryMetadata : {};
@@ -999,14 +1039,159 @@ export class SshRemoteRpcClient implements RemoteRpcClientLike {
             : s.trajectory_type !== undefined
             ? s.trajectory_type
             : tm.trajectory_type;
+        const trajectoryId = pickId(s.trajectoryId, s.trajectory_id, tm.trajectoryId, tm.trajectory_id);
+        const parentConversationId = pickId(
+          tm.parentConversationId,
+          s.parentConversationId,
+          tm.parent_conversation_id,
+          s.parent_conversation_id
+        );
+        const rootConversationId = pickId(
+          tm.rootConversationId,
+          s.rootConversationId,
+          tm.root_conversation_id,
+          s.root_conversation_id
+        );
+        const selfIds = new Set();
+        const cidNorm = String(cid).trim().toLowerCase();
+        if (cidNorm) selfIds.add(cidNorm);
+        if (trajectoryId) selfIds.add(trajectoryId.toLowerCase());
+
+        const rawRefsCandidate =
+          s.parentReferences !== undefined
+            ? s.parentReferences
+            : s.parent_references !== undefined
+            ? s.parent_references
+            : tm.parentReferences !== undefined
+            ? tm.parentReferences
+            : tm.parent_references !== undefined
+            ? tm.parent_references
+            : s.parentReference !== undefined
+            ? s.parentReference
+            : s.parent_reference !== undefined
+            ? s.parent_reference
+            : tm.parentReference !== undefined
+            ? tm.parentReference
+            : tm.parent_reference;
+        const rawRefsList = Array.isArray(rawRefsCandidate)
+          ? rawRefsCandidate
+          : rawRefsCandidate && typeof rawRefsCandidate === 'object'
+          ? [rawRefsCandidate]
+          : [];
+        const parentReferences = [];
+        let bestForkStepIndex;
+        let bestForkParentCascadeId;
+        for (const ref of rawRefsList) {
+          if (!ref || typeof ref !== 'object') continue;
+          const parentCascadeId = pickId(
+            ref.parentCascadeId,
+            ref.parent_cascade_id,
+            ref.parentConversationId,
+            ref.parent_conversation_id,
+            ref.cascadeId,
+            ref.cascade_id,
+            ref.parentId,
+            ref.parent_id
+          );
+          const parentTrajectoryId = pickId(
+            ref.parentTrajectoryId,
+            ref.parent_trajectory_id,
+            ref.trajectoryId,
+            ref.trajectory_id
+          );
+          const refForkStepIndex = parseValidForkStepIndex(
+            ref.forkStepIndex !== undefined
+              ? ref.forkStepIndex
+              : ref.fork_step_index !== undefined
+              ? ref.fork_step_index
+              : ref.stepIndex !== undefined
+              ? ref.stepIndex
+              : ref.step_index !== undefined
+              ? ref.step_index
+              : ref.parentStepIndex !== undefined
+              ? ref.parentStepIndex
+              : ref.parent_step_index !== undefined
+              ? ref.parent_step_index
+              : ref.forkedAtStepIndex !== undefined
+              ? ref.forkedAtStepIndex
+              : ref.forked_at_step_index
+          );
+          const rawRefType = ref.referenceType !== undefined ? ref.referenceType : ref.reference_type;
+          const referenceType =
+            typeof rawRefType === 'number' || typeof rawRefType === 'string' ? rawRefType : undefined;
+          if (!parentCascadeId && !parentTrajectoryId && refForkStepIndex === undefined) continue;
+          parentReferences.push({
+            ...(parentTrajectoryId ? { parentTrajectoryId } : {}),
+            ...(parentCascadeId ? { parentCascadeId } : {}),
+            ...(refForkStepIndex !== undefined ? { forkStepIndex: refForkStepIndex } : {}),
+            ...(referenceType !== undefined ? { referenceType } : {}),
+          });
+          const effectiveParentId = parentCascadeId || parentTrajectoryId;
+          if (
+            effectiveParentId &&
+            !selfIds.has(effectiveParentId.toLowerCase()) &&
+            refForkStepIndex !== undefined
+          ) {
+            if (bestForkStepIndex === undefined || refForkStepIndex > bestForkStepIndex) {
+              bestForkStepIndex = refForkStepIndex;
+              bestForkParentCascadeId = effectiveParentId;
+            }
+          }
+        }
+        if (bestForkStepIndex === undefined) {
+          const directForkStepIndex = parseValidForkStepIndex(
+            s.forkStepIndex !== undefined
+              ? s.forkStepIndex
+              : s.fork_step_index !== undefined
+              ? s.fork_step_index
+              : tm.forkStepIndex !== undefined
+              ? tm.forkStepIndex
+              : tm.fork_step_index !== undefined
+              ? tm.fork_step_index
+              : s.parentStepIndex !== undefined
+              ? s.parentStepIndex
+              : s.parent_step_index !== undefined
+              ? s.parent_step_index
+              : tm.parentStepIndex !== undefined
+              ? tm.parentStepIndex
+              : tm.parent_step_index !== undefined
+              ? tm.parent_step_index
+              : s.forkedAtStepIndex !== undefined
+              ? s.forkedAtStepIndex
+              : s.forked_at_step_index !== undefined
+              ? s.forked_at_step_index
+              : tm.forkedAtStepIndex !== undefined
+              ? tm.forkedAtStepIndex
+              : tm.forked_at_step_index
+          );
+          const directParentId = pickId(
+            s.forkParentCascadeId,
+            s.fork_parent_cascade_id,
+            tm.forkParentCascadeId,
+            tm.fork_parent_cascade_id,
+            parentConversationId,
+            rootConversationId
+          );
+          if (
+            directForkStepIndex !== undefined &&
+            directParentId &&
+            !selfIds.has(directParentId.toLowerCase())
+          ) {
+            bestForkStepIndex = directForkStepIndex;
+            bestForkParentCascadeId = directParentId;
+          }
+        }
         out.push({
           cascadeId: String(cid),
-          ...(typeof s.trajectoryId === 'string' ? { trajectoryId: s.trajectoryId } : {}),
+          ...(trajectoryId ? { trajectoryId } : {}),
           ...(rawTrajectoryType !== undefined && rawTrajectoryType !== null ? { trajectoryType: rawTrajectoryType } : {}),
           ...(s.status !== undefined ? { status: s.status } : {}),
           stepCount: typeof s.stepCount === 'number' ? s.stepCount : (Number(s.stepCount) || 0),
-          ...(tm.parentConversationId || s.parentConversationId ? { parentConversationId: String(tm.parentConversationId || s.parentConversationId) } : {}),
-          ...(tm.rootConversationId || s.rootConversationId ? { rootConversationId: String(tm.rootConversationId || s.rootConversationId) } : {}),
+          ...(parentConversationId ? { parentConversationId } : {}),
+          ...(rootConversationId ? { rootConversationId } : {}),
+          ...(parentReferences.length > 0 ? { parentReferences } : {}),
+          ...(bestForkStepIndex !== undefined ? { forkStepIndex: bestForkStepIndex } : {}),
+          ...(bestForkParentCascadeId ? { forkParentCascadeId: bestForkParentCascadeId } : {}),
           ...(s.lastModifiedTime !== undefined ? { lastModifiedTime: s.lastModifiedTime } : {}),
           ...(typeof (s.requestedModel || tm.model) === 'string' ? { requestedModel: s.requestedModel || tm.model } : {}),
         });
@@ -1050,9 +1235,23 @@ export class SshRemoteRpcClient implements RemoteRpcClientLike {
         const pageMapped = list.map((item) => {
           const cm = item && item.chatModel && typeof item.chatModel === 'object' ? item.chatModel : {};
           const u = cm.usage && typeof cm.usage === 'object' ? cm.usage : null;
-          const cwm = cm.chatStartMetadata && cm.chatStartMetadata.contextWindowMetadata && typeof cm.chatStartMetadata.contextWindowMetadata === 'object'
-            ? cm.chatStartMetadata.contextWindowMetadata
+          const csm = cm.chatStartMetadata && typeof cm.chatStartMetadata === 'object' ? cm.chatStartMetadata : null;
+          const cwm = csm && csm.contextWindowMetadata && typeof csm.contextWindowMetadata === 'object'
+            ? csm.contextWindowMetadata
             : null;
+          const rawCreatedAt =
+            (csm && (
+              csm.createdAt !== undefined ? csm.createdAt :
+              csm.created_at !== undefined ? csm.created_at :
+              csm.startTime !== undefined ? csm.startTime :
+              csm.start_time !== undefined ? csm.start_time :
+              csm.startedAt !== undefined ? csm.startedAt :
+              csm.started_at !== undefined ? csm.started_at :
+              csm.timestamp !== undefined ? csm.timestamp :
+              csm.chatStartTimestamp
+            )) ??
+            (cm.createdAt !== undefined ? cm.createdAt : cm.created_at !== undefined ? cm.created_at : cm.timestamp) ??
+            (item && (item.createdAt !== undefined ? item.createdAt : item.created_at));
           const pc = item && item.plannerConfig && typeof item.plannerConfig === 'object' ? item.plannerConfig : null;
           const pec = pc && pc.planExecuteConfig && typeof pc.planExecuteConfig === 'object' ? pc.planExecuteConfig : null;
           return {
@@ -1060,6 +1259,7 @@ export class SshRemoteRpcClient implements RemoteRpcClientLike {
               ? item.stepIndices.map(Number).filter((n) => Number.isSafeInteger(n) && n >= 0)
               : [],
             ...(typeof (item && item.executionId) === 'string' ? { executionId: item.executionId } : {}),
+            ...(rawCreatedAt !== undefined && rawCreatedAt !== null ? { createdAt: rawCreatedAt } : {}),
             ...(u ? {
               usage: {
                 ...(u.model !== undefined ? { model: u.model } : {}),

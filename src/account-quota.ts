@@ -852,10 +852,10 @@ export interface QuotaOverview {
   standaloneModels: StandaloneModelStatus[];
   projectedQuotaGroups?: ProjectedQuotaGroup[];
   familyWindows: {
-    gemini: { fiveHour: QuotaOverviewWindowStatus | null; weekly: QuotaOverviewWindowStatus | null };
-    claude: { fiveHour: QuotaOverviewWindowStatus | null; weekly: QuotaOverviewWindowStatus | null };
-    argon: { fiveHour: QuotaOverviewWindowStatus | null; weekly: QuotaOverviewWindowStatus | null };
-    carbon: { fiveHour: QuotaOverviewWindowStatus | null; weekly: QuotaOverviewWindowStatus | null };
+    gemini: { fiveHour: QuotaOverviewWindowStatus | null; daily?: QuotaOverviewWindowStatus | null; weekly: QuotaOverviewWindowStatus | null };
+    claude: { fiveHour: QuotaOverviewWindowStatus | null; daily?: QuotaOverviewWindowStatus | null; weekly: QuotaOverviewWindowStatus | null };
+    argon: { fiveHour: QuotaOverviewWindowStatus | null; daily?: QuotaOverviewWindowStatus | null; weekly: QuotaOverviewWindowStatus | null };
+    carbon: { fiveHour: QuotaOverviewWindowStatus | null; daily?: QuotaOverviewWindowStatus | null; weekly: QuotaOverviewWindowStatus | null };
   };
   familyModelQuota: Record<'gemini' | 'claude', QuotaOverviewWindowStatus | null>;
   nextResets: {
@@ -948,9 +948,11 @@ export function resolveEffectiveMonitoredModel(account: Account | { quota?: Quot
   const overview = buildAccountQuotaOverview(account);
   const hasGeminiCore = overview.models.some(m => m.family === 'gemini' && m.disabled !== true && !m.stale)
     || overview.familyWindows.gemini.fiveHour !== null
+    || Boolean(overview.familyWindows.gemini.daily)
     || overview.familyWindows.gemini.weekly !== null;
   const hasClaudeCore = overview.models.some(m => m.family === 'claude' && m.disabled !== true && !m.stale)
     || overview.familyWindows.claude.fiveHour !== null
+    || Boolean(overview.familyWindows.claude.daily)
     || overview.familyWindows.claude.weekly !== null;
   if (!hasGeminiCore && !hasClaudeCore) return monitoredModel;
 
@@ -1053,7 +1055,7 @@ export function computeAccountRemaining(
       && !(model.quota_bucket_name && classifyFamily({ groupName: model.quota_bucket_name, bucketId: model.quota_bucket_name }) === 'other')
       && model.stale !== true && model.own_stale !== true && model.own_percentage_known === true
       && typeof model.own_percentage === 'number').map(model => model.own_percentage! / 100);
-    return [freshFraction(windows.fiveHour), freshFraction(windows.weekly), ...own]
+    return [freshFraction(windows.fiveHour), freshFraction(windows.daily), freshFraction(windows.weekly), ...own]
       .filter((value): value is number => value !== null);
   };
   const bounded = (fraction: number): number => Math.max(0, Math.min(100, Math.round(fraction * 100)));
@@ -1673,10 +1675,26 @@ export function buildAccountQuotaOverview(
     standaloneModels,
     projectedQuotaGroups,
     familyWindows: {
-      gemini: { fiveHour: windowOut(familyWindows.gemini.fiveHour), weekly: windowOut(familyWindows.gemini.weekly) },
-      claude: { fiveHour: windowOut(familyWindows.claude.fiveHour), weekly: windowOut(familyWindows.claude.weekly) },
-      argon: { fiveHour: windowOut(familyWindows.argon.fiveHour), weekly: windowOut(familyWindows.argon.weekly) },
-      carbon: { fiveHour: windowOut(familyWindows.carbon.fiveHour), weekly: windowOut(familyWindows.carbon.weekly) },
+      gemini: {
+        fiveHour: windowOut(familyWindows.gemini.fiveHour),
+        ...(familyWindows.gemini.daily ? { daily: windowOut(familyWindows.gemini.daily) } : {}),
+        weekly: windowOut(familyWindows.gemini.weekly),
+      },
+      claude: {
+        fiveHour: windowOut(familyWindows.claude.fiveHour),
+        ...(familyWindows.claude.daily ? { daily: windowOut(familyWindows.claude.daily) } : {}),
+        weekly: windowOut(familyWindows.claude.weekly),
+      },
+      argon: {
+        fiveHour: windowOut(familyWindows.argon.fiveHour),
+        ...(familyWindows.argon.daily ? { daily: windowOut(familyWindows.argon.daily) } : {}),
+        weekly: windowOut(familyWindows.argon.weekly),
+      },
+      carbon: {
+        fiveHour: windowOut(familyWindows.carbon.fiveHour),
+        ...(familyWindows.carbon.daily ? { daily: windowOut(familyWindows.carbon.daily) } : {}),
+        weekly: windowOut(familyWindows.carbon.weekly),
+      },
     },
     familyModelQuota: { gemini: windowOut(modelQuota.gemini), claude: windowOut(modelQuota.claude) },
     nextResets: {
@@ -1774,6 +1792,9 @@ function collectQuotaWindowTiming(
       if (pair.fiveHour?.known && pair.fiveHour.resetTime) {
         consider(family, pair.fiveHour.resetTime);
       }
+      if (pair.daily?.known && pair.daily.resetTime) {
+        consider(family, pair.daily.resetTime);
+      }
       if (pair.weekly?.known && pair.weekly.resetTime) {
         consider(family, pair.weekly.resetTime);
       }
@@ -1791,7 +1812,7 @@ function collectQuotaWindowTiming(
       for (const bucket of group.buckets) {
         if (!bucket || bucket.disabled === true || bucket.remaining_fraction_known === false) continue;
         const win = classifyWindow(bucket.window, bucket.bucket_id, bucket.display_name);
-        if (win !== '5h' && win !== 'weekly') continue;
+        if (win !== '5h' && win !== 'daily' && win !== 'weekly') continue;
         consider(family, bucket.reset_time);
       }
     }
@@ -1823,6 +1844,7 @@ export function computeStandbyRefreshStatus(
   account: Account | AccountSummary | { quota?: QuotaData | null; quota_last_updated?: number | null; token?: Partial<TokenData> | null } | null | undefined,
   options: {
     isActive?: boolean;
+    isRemoteActive?: boolean;
     hasLocalOAuthClient: boolean;
     nowMs?: number;
     overview?: QuotaOverview;
@@ -1837,7 +1859,7 @@ export function computeStandbyRefreshStatus(
     : null;
   const { cooldownElapsedFamilies, nextResetAt } = collectQuotaWindowTiming(account?.quota, options.overview, nowMs);
 
-  if (options.isActive === true) {
+  if (options.isActive === true || options.isRemoteActive === true) {
     return {
       mode: 'live_active',
       hasLocalOAuthClient,
@@ -1914,8 +1936,10 @@ function resolveTargetFamiliesForCandidate(
   if (!trimmed || trimmed === 'all') {
     const hasCore = overview.models.some(m => (m.family === 'gemini' || m.family === 'claude') && m.disabled !== true)
       || overview.familyWindows.gemini.fiveHour !== null
+      || Boolean(overview.familyWindows.gemini.daily)
       || overview.familyWindows.gemini.weekly !== null
       || overview.familyWindows.claude.fiveHour !== null
+      || Boolean(overview.familyWindows.claude.daily)
       || overview.familyWindows.claude.weekly !== null;
     return {
       families: new Set<Family>(hasCore ? ['gemini', 'claude'] : ['argon', 'carbon']),
@@ -1940,7 +1964,7 @@ function resolveTargetFamiliesForCandidate(
   if (trimmed === 'gemini-4-carbon') return { families: new Set<Family>(['carbon']), matchedModel: null };
   const classified = classifyFamily({ modelId: trimmed, displayName: trimmed });
   return {
-    families: new Set<Family>(classified === 'other' ? ['gemini', 'claude'] : [classified]),
+    families: new Set<Family>(classified === 'other' ? [] : [classified]),
     matchedModel: null,
   };
 }
@@ -1969,6 +1993,7 @@ export function evaluateStandbyCandidate(
   });
   const { families: targetFamilies, matchedModel } = resolveTargetFamiliesForCandidate(account, overview, monitoredModel);
   if (matchedModel?.disabled === true) return null;
+  if (targetFamilies.size === 0 && !matchedModel) return null;
 
   const expiredResetMs: number[] = [];
   const unexpiredFractions: number[] = [];
@@ -1988,6 +2013,7 @@ export function evaluateStandbyCandidate(
     if (family === 'gemini' || family === 'claude' || family === 'argon' || family === 'carbon') {
       const fw = overview.familyWindows[family];
       if (fw.fiveHour) inspectWindow(fw.fiveHour.known, fw.fiveHour.remaining, fw.fiveHour.resetTime);
+      if (fw.daily) inspectWindow(fw.daily.known, fw.daily.remaining, fw.daily.resetTime);
       if (fw.weekly) inspectWindow(fw.weekly.known, fw.weekly.remaining, fw.weekly.resetTime);
     }
   }
@@ -2053,6 +2079,7 @@ export function projectAccountForIpc(
   account: Account | AccountSummary | null | undefined,
   options?: {
     isActive?: boolean;
+    isRemoteActive?: boolean;
     hasLocalOAuthClient?: boolean;
     nowMs?: number;
     overview?: QuotaOverview;
@@ -2081,6 +2108,7 @@ export function projectAccountForIpc(
         }, nowSec));
   const standbyRefreshStatus = computeStandbyRefreshStatus(account, {
     isActive: options?.isActive,
+    isRemoteActive: options?.isRemoteActive,
     hasLocalOAuthClient: options?.hasLocalOAuthClient ?? false,
     nowMs: options?.nowMs,
     overview: options?.overview,

@@ -140,6 +140,7 @@ final class AppUpdateManager {
         }
     }
 
+    #if NATIVE_UI_TEST
     func simulateRelease(_ release: AppReleaseInfo?) {
         availableRelease = release
         downloadedDMGURL = nil
@@ -149,13 +150,6 @@ final class AppUpdateManager {
         } else {
             state = .upToDate
         }
-        app.syncUpdatePromptControls()
-        onStateChanged?()
-    }
-
-    func simulateChecking() {
-        downloadProgressPercent = nil
-        state = .checking
         app.syncUpdatePromptControls()
         onStateChanged?()
     }
@@ -178,20 +172,13 @@ final class AppUpdateManager {
         onStateChanged?()
     }
 
-    func simulateInstalling(_ release: AppReleaseInfo) {
-        availableRelease = release
-        downloadProgressPercent = nil
-        state = .installing(release)
-        app.syncUpdatePromptControls()
-        onStateChanged?()
-    }
-
     func simulateFailed(_ message: String) {
         downloadProgressPercent = nil
         state = .failed(message)
         app.syncUpdatePromptControls()
         onStateChanged?()
     }
+    #endif
 
     func checkForUpdates(silent: Bool = false) {
         guard Thread.isMainThread else { DispatchQueue.main.async { [weak self] in self?.checkForUpdates(silent: silent) }; return }
@@ -202,10 +189,18 @@ final class AppUpdateManager {
             return
         }
         #endif
+        let preservedReady: (AppReleaseInfo, URL)?
+        if case .readyToInstall(let rel, let dmg) = state, FileManager.default.fileExists(atPath: dmg.path) {
+            preservedReady = (rel, dmg)
+        } else {
+            preservedReady = nil
+        }
         checkInFlight = true
         checkGeneration += 1
         let generation = checkGeneration
-        transition(.checking)
+        if !(silent && preservedReady != nil) {
+            transition(.checking)
+        }
         var req = URLRequest(url: Self.latestReleaseEndpoint, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         req.setValue("GravityBox/\(currentVersion)", forHTTPHeaderField: "User-Agent")
@@ -224,6 +219,9 @@ final class AppUpdateManager {
             if let error {
                 if !silent {
                     self.transition(.failed(L10n.t("update.error.github_connect", ["error": error.localizedDescription], fallback: "无法连接 GitHub Releases：\(error.localizedDescription)")))
+                } else if let (rel, dmg) = preservedReady, FileManager.default.fileExists(atPath: dmg.path) {
+                    self.downloadedDMGURL = dmg
+                    self.transition(.readyToInstall(rel, dmg))
                 } else {
                     self.transition(self.availableRelease.map { .updateAvailable($0) } ?? .idle)
                 }
@@ -240,6 +238,9 @@ final class AppUpdateManager {
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 if !silent {
                     self.transition(.failed(L10n.t("update.error.github_http", ["status": statusCode], fallback: "获取 GitHub 版本信息失败（HTTP \(statusCode)）")))
+                } else if let (rel, dmg) = preservedReady, FileManager.default.fileExists(atPath: dmg.path) {
+                    self.downloadedDMGURL = dmg
+                    self.transition(.readyToInstall(rel, dmg))
                 } else {
                     self.transition(self.availableRelease.map { .updateAvailable($0) } ?? .idle)
                 }
@@ -291,6 +292,13 @@ final class AppUpdateManager {
             )
 
             self.availableRelease = info
+            if let (prevRel, dmg) = preservedReady,
+               info.version == prevRel.version,
+               FileManager.default.fileExists(atPath: dmg.path) {
+                self.downloadedDMGURL = dmg
+                self.transition(.readyToInstall(info, dmg))
+                return
+            }
             let cached = self.cachedDMGPath(for: info.version)
             self.downloadedDMGURL = nil
             self.transition(.updateAvailable(info))
@@ -1043,6 +1051,15 @@ final class AppUpdateManager {
                     do {
                         try updater.run()
                         updater.waitUntilExit()
+                        guard updater.terminationStatus == 0 else {
+                            self.installationInFlight = false
+                            self.transition(.failed(L10n.t(
+                                "update.error.helper_launch_failed",
+                                ["error": "exit \(updater.terminationStatus)"],
+                                fallback: "无法启动安装辅助脚本，旧版本和恢复材料已保留（退出码 \(updater.terminationStatus)）"
+                            )))
+                            return
+                        }
                         self.app.quitForUpdate()
                     } catch {
                         self.installationInFlight = false

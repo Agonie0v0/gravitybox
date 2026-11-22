@@ -39,11 +39,33 @@ export function decodeTopicRow(value: string, sentinel: string): Buffer | null {
   const data = Buffer.from(encoded, 'base64');
   let offset = 0;
   while (offset < data.length) {
-    const tag = Reader.readVarint(data, offset); if (!tag || tag[0] !== 10) break;
-    const len = Reader.readVarint(data, tag[1]); if (!len || len[1] + len[0] > data.length) break;
-    const entry = data.subarray(len[1], len[1] + len[0]); offset = len[1] + len[0];
-    if (Reader.findString(entry, 1) !== sentinel) continue;
-    const row = Reader.findField(entry, 2); if (!row) return null;
+    const tag = Reader.readVarint(data, offset);
+    if (!tag) break;
+    const [field, pos] = tag;
+    const wireType = field & 7;
+    let content: Buffer | undefined;
+    if (wireType === 2) {
+      const size = Reader.readVarint(data, pos);
+      if (!size || size[1] + size[0] > data.length) break;
+      offset = size[1] + size[0];
+      content = data.subarray(size[1], offset);
+    } else if (wireType === 0) {
+      const v = Reader.readVarint(data, pos);
+      if (!v) break;
+      offset = v[1];
+    } else if (wireType === 1) {
+      offset = pos + 8;
+      if (offset > data.length) break;
+    } else if (wireType === 5) {
+      offset = pos + 4;
+      if (offset > data.length) break;
+    } else {
+      break;
+    }
+    if (field !== 10 || !content) continue;
+    if (Reader.findString(content, 1) !== sentinel) continue;
+    const row = Reader.findField(content, 2);
+    if (!row) return null;
     const payload = Reader.findString(row, 1);
     if (payload && /^[A-Za-z0-9+/]*={0,2}$/.test(payload)) return Buffer.from(payload, 'base64');
     return row; // Compatibility with the early, directly nested form.

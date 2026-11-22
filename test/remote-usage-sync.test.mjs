@@ -954,3 +954,750 @@ test('Controller.getConnectedRemoteRpcTargets 只读导出目标并驱动 Coordi
     await cdpServer.stop();
   }
 });
+
+test('Coordinator 每节点独立超时预算 + 受控并发(2)：慢主机超时不饿死其余在线 SSH 主机', async () => {
+  let activeTargets = 0;
+  let maxTargetConcurrency = 0;
+
+  const makeTarget = (hostLabel, delayMs, okTokens) => ({
+    remoteKey: `rk-${hostLabel}`,
+    hostLabel,
+    email: `${hostLabel}@example.invalid`,
+    rpcClient: {
+      async probeUserAndQuota() {
+        return { ok: false, reason: 'rpc_error', authExpired: false };
+      },
+      async getAllCascadeTrajectories() {
+        activeTargets++;
+        maxTargetConcurrency = Math.max(maxTargetConcurrency, activeTargets);
+        try {
+          await new Promise(r => setTimeout(r, delayMs));
+          return {
+            ok: true,
+            data: [
+              {
+                cascadeId: `casc-${hostLabel}`,
+                trajectoryId: `traj-${hostLabel}`,
+                stepCount: 1,
+                lastModifiedTime: '2026-11-20T08:00:00Z',
+              },
+            ],
+          };
+        } finally {
+          activeTargets--;
+        }
+      },
+      async getGeneratorMetadata() {
+        return {
+          ok: true,
+          data: [
+            {
+              stepIndices: [0],
+              executionId: `exec-${hostLabel}`,
+              responseModel: 'gemini-3.8-flash-n',
+              usage: { inputTokens: String(okTokens), outputTokens: '0' },
+            },
+          ],
+        };
+      },
+      async getTrajectorySteps() {
+        return {
+          ok: true,
+          data: [{ idx: 0, type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE', metadata: { createdAt: '2026-11-20T08:00:00Z' } }],
+        };
+      },
+    },
+  });
+
+  const savedEvents = [];
+  const coordinator = new RemoteUsageSyncCoordinator({
+    perTargetBudgetMs: 90,
+    targetConcurrency: 2,
+    getTargets: () => [
+      makeTarget('slow-host-1', 250, 999),
+      makeTarget('fast-host-2', 5, 111),
+      makeTarget('fast-host-3', 5, 222),
+    ],
+    ledger: {
+      async receipts() {
+        return {};
+      },
+      async save(events) {
+        savedEvents.push(...events);
+        return { saved: events.length };
+      },
+    },
+  });
+
+  const round = await coordinator.syncNow({ nowMs: Date.UTC(2026, 10, 20, 8, 1, 0) });
+  assert.equal(round.targetCount, 3);
+  assert.equal(round.abortedByBudget, true);
+  assert.equal(round.eventsSaved, 2, '慢主机超时后，fast-host-2 与 fast-host-3 必须各自在独立预算内完成同步');
+  assert.ok(maxTargetConcurrency <= 2, `受控并发应 <= 2，实际=${maxTargetConcurrency}`);
+  assert.deepEqual(
+    savedEvents.map(e => e.environment_label).sort(),
+    ['fast-host-2', 'fast-host-3']
+  );
+});
+
+test('远端用量同步前按 15s 冷却期与重连状态轻核验 email，及时捕获同主机切号防错账', async () => {
+  let probeCalls = 0;
+  let currentRemoteEmail = 'before-switch@example.invalid';
+  const observedInfos = [];
+
+  const targetBase = {
+    remoteKey: 'rk-switch-1',
+    hostLabel: 'switch-ssh-host',
+    email: 'before-switch@example.invalid',
+    accountType: 'consumer',
+    rpcClient: {
+      async probeUserAndQuota() {
+        probeCalls++;
+        return {
+          ok: true,
+          latencyMs: 5,
+          data: {
+            email: currentRemoteEmail,
+            name: 'Switched User',
+            tier: 'PRO',
+            accountType: 'consumer',
+            quota: {
+              models: [],
+              quota_groups: [],
+              last_updated: 1_795_000_100,
+              is_forbidden: false,
+              model_forwarding_rules: {},
+            },
+          },
+        };
+      },
+      async getAllCascadeTrajectories() {
+        return {
+          ok: true,
+          data: [
+            {
+              cascadeId: 'casc-sw-1',
+              trajectoryId: 'traj-sw-1',
+              stepCount: 1,
+              lastModifiedTime: '2026-11-20T09:00:05Z',
+            },
+          ],
+        };
+      },
+      async getGeneratorMetadata() {
+        return {
+          ok: true,
+          data: [
+            {
+              stepIndices: [0],
+              executionId: 'exec-sw-1',
+              responseModel: 'gemini-3.8-flash-n',
+              usage: { inputTokens: '50', outputTokens: '25' },
+            },
+          ],
+        };
+      },
+      async getTrajectorySteps() {
+        return {
+          ok: true,
+          data: [
+            {
+              idx: 0,
+              type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE',
+              metadata: { createdAt: '2026-11-20T09:00:05Z', executionId: 'exec-sw-1' },
+            },
+          ],
+        };
+      },
+    },
+  };
+
+  const t0 = Date.UTC(2026, 10, 20, 9, 0, 10);
+  // 1) 冷却期内（5s < 15s）且非重连：不重复调 GetUserStatus
+  const resWithinCooldown = await syncRemoteSessionUsage({
+    target: { ...targetBase, lastIdentityVerifiedAt: t0 - 5_000 },
+    resolveMatchedLocalAccountId: e => (e === 'after-switch@example.invalid' ? 'acc-new' : 'acc-old'),
+    onIdentityObserved: info => observedInfos.push(info),
+    nowMs: t0,
+  });
+  assert.equal(probeCalls, 0);
+  assert.equal(resWithinCooldown.events[0].account_email, 'before-switch@example.invalid');
+  assert.equal(resWithinCooldown.events[0].account_id, 'acc-old');
+
+  // 2) 超过 15s 冷却期：远端已切号为 after-switch@example.invalid，同步前先核验并正确归属新账号
+  currentRemoteEmail = 'after-switch@example.invalid';
+  const resAfterCooldown = await syncRemoteSessionUsage({
+    target: { ...targetBase, lastIdentityVerifiedAt: t0 - 16_000 },
+    resolveMatchedLocalAccountId: e => (e === 'after-switch@example.invalid' ? 'acc-new' : 'acc-old'),
+    onIdentityObserved: info => observedInfos.push(info),
+    nowMs: t0,
+  });
+  assert.equal(probeCalls, 1);
+  assert.equal(observedInfos.length, 1);
+  assert.equal(observedInfos[0].live.email, 'after-switch@example.invalid');
+  assert.equal(resAfterCooldown.events[0].account_email, 'after-switch@example.invalid');
+  assert.equal(resAfterCooldown.events[0].account_id, 'acc-new');
+
+  // 3) 重连标记 reconnected: true：即使距上次仅 1s 也立即轻核验
+  const resOnReconnect = await syncRemoteSessionUsage({
+    target: { ...targetBase, lastIdentityVerifiedAt: t0 - 1_000, reconnected: true },
+    resolveMatchedLocalAccountId: e => (e === 'after-switch@example.invalid' ? 'acc-new' : 'acc-old'),
+    nowMs: t0,
+  });
+  assert.equal(probeCalls, 2);
+  assert.equal(resOnReconnect.events[0].account_email, 'after-switch@example.invalid');
+});
+
+test('P0-5: SSH 远端 /btw 分叉会话按 forkStepIndex 跳过父会话克隆前缀，不重复计费并正常推进 cursor_offset', async () => {
+  const stepCalls = [];
+  const t0 = Date.UTC(2026, 10, 22, 10, 0, 0);
+
+  const mainGens = [
+    {
+      stepIndices: [0, 1],
+      executionId: 'exec-main-0',
+      responseModel: 'gemini-3.8-flash-n',
+      usage: { inputTokens: '5000', outputTokens: '1000' },
+    },
+    {
+      stepIndices: [3],
+      executionId: 'exec-main-1',
+      responseModel: 'gemini-3.8-flash-n',
+      usage: { inputTokens: '6000', outputTokens: '1200' },
+    },
+  ];
+  const btwGens = [
+    // Cloned prefix <= forkStepIndex(3) -> skip
+    mainGens[0],
+    mainGens[1],
+    // Spanning fork boundary [3, 4] -> keep
+    {
+      stepIndices: [3, 4],
+      executionId: 'exec-btw-span',
+      responseModel: 'gemini-3.8-flash-n',
+      usage: { inputTokens: '700', outputTokens: '100' },
+    },
+    // Strictly post-fork [5] -> keep
+    {
+      stepIndices: [5],
+      executionId: 'exec-btw-post',
+      responseModel: 'gemini-3.8-flash-n',
+      usage: { inputTokens: '900', outputTokens: '300' },
+    },
+    // Missing stepIndices -> keep (aligned with local usage-scanner)
+    {
+      executionId: 'exec-btw-undef',
+      responseModel: 'gemini-3.8-flash-n',
+      usage: { inputTokens: '200', outputTokens: '50' },
+    },
+    // Empty stepIndices -> keep (aligned with local usage-scanner)
+    {
+      stepIndices: [],
+      executionId: 'exec-btw-empty',
+      responseModel: 'gemini-3.8-flash-n',
+      usage: { inputTokens: '100', outputTokens: '25' },
+    },
+  ];
+
+  const target = {
+    remoteKey: 'rk-btw-fork',
+    hostLabel: 'ssh-btw-fork',
+    email: 'btw-user@example.invalid',
+    accountType: 'consumer',
+    lastIdentityVerifiedAt: t0,
+    rpcClient: {
+      async getAllCascadeTrajectories() {
+        return {
+          ok: true,
+          data: [
+            {
+              cascadeId: 'conv-main',
+              trajectoryId: 'traj-main',
+              trajectoryType: 2,
+              stepCount: 4,
+              lastModifiedTime: '2026-11-22T09:58:00Z',
+            },
+            {
+              cascadeId: 'conv-btw',
+              trajectoryId: 'traj-btw',
+              trajectoryType: 22,
+              stepCount: 6,
+              parentConversationId: 'conv-main',
+              parentReferences: [{ parentCascadeId: 'conv-main', forkStepIndex: 3 }],
+              forkStepIndex: 3,
+              forkParentCascadeId: 'conv-main',
+              lastModifiedTime: '2026-11-22T09:59:00Z',
+            },
+            // Only cloned prefix (no new generation yet) -> should skip getTrajectorySteps and still advance cursor
+            {
+              cascadeId: 'conv-btw-prefix-only',
+              trajectoryId: 'traj-btw-prefix-only',
+              trajectoryType: 22,
+              stepCount: 4,
+              forkStepIndex: 3,
+              forkParentCascadeId: 'conv-main',
+              lastModifiedTime: '2026-11-22T09:59:30Z',
+            },
+          ],
+        };
+      },
+      async getGeneratorMetadata(cid, offset) {
+        const list = cid === 'conv-main' ? mainGens : cid === 'conv-btw' ? btwGens : mainGens;
+        return { ok: true, data: list.slice(offset) };
+      },
+      async getTrajectorySteps(cid, offset) {
+        stepCalls.push({ cid, offset });
+        return {
+          ok: true,
+          data: [
+            { idx: 1, type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE', metadata: { createdAt: '2026-11-22T09:57:00Z', executionId: 'exec-main-0' } },
+            { idx: 3, type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE', metadata: { createdAt: '2026-11-22T09:58:00Z', executionId: 'exec-main-1' } },
+            { idx: 4, type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE', metadata: { createdAt: '2026-11-22T09:58:30Z', executionId: 'exec-btw-span' } },
+            { idx: 5, type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE', metadata: { createdAt: '2026-11-22T09:59:00Z', executionId: 'exec-btw-post' } },
+          ].filter(s => s.idx >= offset),
+        };
+      },
+    },
+  };
+
+  const res = await syncRemoteSessionUsage({ target, nowMs: t0 });
+  assert.equal(res.ok, true);
+  assert.equal(res.trajectoriesScanned, 3);
+
+  const mainSourceId = buildRemoteTrajectorySourceId('traj-main');
+  const btwSourceId = buildRemoteTrajectorySourceId('traj-btw');
+  const prefixOnlySourceId = buildRemoteTrajectorySourceId('traj-btw-prefix-only');
+
+  const mainEvents = res.events.filter(e => e.source_id === mainSourceId);
+  const btwEvents = res.events.filter(e => e.source_id === btwSourceId);
+  const prefixOnlyEvents = res.events.filter(e => e.source_id === prefixOnlySourceId);
+
+  assert.deepEqual(mainEvents.map(e => e.execution), ['exec-main-0', 'exec-main-1']);
+  assert.deepEqual(btwEvents.map(e => e.generation_index), [2, 3, 4, 5]);
+  assert.deepEqual(btwEvents.map(e => e.execution), [
+    'exec-btw-span',
+    'exec-btw-post',
+    'exec-btw-undef',
+    'exec-btw-empty',
+  ]);
+  assert.deepEqual(btwEvents.map(e => e.input_tokens), [700, 900, 200, 100]);
+  assert.equal(prefixOnlyEvents.length, 0, '仅含克隆前缀的 /btw 会话不应产出重复事件');
+  assert.equal(
+    stepCalls.some(c => c.cid === 'conv-btw-prefix-only'),
+    false,
+    '全部 gen 被 forkCutoff 过滤时应跳过无谓的 getTrajectorySteps 调用'
+  );
+
+  const receiptBySource = new Map(res.receipts.map(r => [r.source_id, r]));
+  assert.equal(receiptBySource.get(btwSourceId)?.cursor_offset, 6, 'cursor_offset 应推进到含跳过记录的完整长度');
+  assert.equal(receiptBySource.get(prefixOnlySourceId)?.cursor_offset, 2);
+});
+
+test('P0-5: 远端无 forkStepIndex 时，SIDE_QUESTION(22) 降级按父会话 executionId 去重（同轮/跨轮/协调器续轮与自引用负向保护）', async () => {
+  const t0 = Date.UTC(2026, 10, 22, 11, 0, 0);
+
+  // 1) 同轮同步 + 负向保护（普通会话带自引用/非法 forkStepIndex 不应被误裁）
+  const mainGens = [
+    {
+      stepIndices: [0],
+      executionId: 'exec-p-0',
+      responseModel: 'gemini-3.8-flash-n',
+      usage: { inputTokens: '4000', outputTokens: '800' },
+    },
+    {
+      stepIndices: [2],
+      executionId: 'exec-p-1',
+      responseModel: 'gemini-3.8-flash-n',
+      usage: { inputTokens: '3000', outputTokens: '600' },
+    },
+  ];
+  const btwGensRound1 = [
+    mainGens[0],
+    mainGens[1],
+    {
+      stepIndices: [4],
+      executionId: 'exec-btw-new-1',
+      responseModel: 'gemini-3.8-flash-n',
+      usage: { inputTokens: '500', outputTokens: '120' },
+    },
+  ];
+  const normalBadMetaGens = [
+    {
+      stepIndices: [0],
+      executionId: 'exec-normal-0',
+      responseModel: 'gemini-3.8-flash-n',
+      usage: { inputTokens: '1000', outputTokens: '200' },
+    },
+  ];
+
+  const sameRoundRes = await syncRemoteSessionUsage({
+    target: {
+      remoteKey: 'rk-btw-fallback-1',
+      hostLabel: 'ssh-btw-fallback',
+      email: 'fallback@example.invalid',
+      accountType: 'consumer',
+      lastIdentityVerifiedAt: t0,
+      rpcClient: {
+        async getAllCascadeTrajectories() {
+          return {
+            ok: true,
+            data: [
+              {
+                cascadeId: 'conv-parent-a',
+                trajectoryId: 'traj-parent-a',
+                trajectoryType: 2,
+                stepCount: 3,
+                lastModifiedTime: '2026-11-22T10:55:00Z',
+              },
+              {
+                cascadeId: 'conv-btw-no-fork',
+                trajectoryId: 'traj-btw-no-fork',
+                trajectoryType: 22,
+                stepCount: 5,
+                lastModifiedTime: '2026-11-22T10:58:00Z',
+              },
+              {
+                cascadeId: 'conv-normal-bad-ref',
+                trajectoryId: 'traj-normal-bad-ref',
+                trajectoryType: 2,
+                stepCount: 2,
+                parentReferences: [
+                  { parentCascadeId: 'conv-normal-bad-ref', forkStepIndex: 5 },
+                  { parentCascadeId: 'conv-other', forkStepIndex: -1 },
+                  { parentCascadeId: 'conv-other', forkStepIndex: 18446744073709551615 },
+                ],
+                lastModifiedTime: '2026-11-22T10:57:00Z',
+              },
+            ],
+          };
+        },
+        async getGeneratorMetadata(cid, offset) {
+          if (cid === 'conv-parent-a') return { ok: true, data: mainGens.slice(offset) };
+          if (cid === 'conv-btw-no-fork') return { ok: true, data: btwGensRound1.slice(offset) };
+          return { ok: true, data: normalBadMetaGens.slice(offset) };
+        },
+        async getTrajectorySteps() {
+          return { ok: true, data: [] };
+        },
+      },
+    },
+    nowMs: t0,
+  });
+
+  assert.equal(sameRoundRes.ok, true);
+  const btwNoForkSourceId = buildRemoteTrajectorySourceId('traj-btw-no-fork');
+  const normalBadSourceId = buildRemoteTrajectorySourceId('traj-normal-bad-ref');
+  assert.deepEqual(
+    sameRoundRes.events.filter(e => e.source_id === btwNoForkSourceId).map(e => e.execution),
+    ['exec-btw-new-1'],
+    '同轮无 forkStepIndex 的 SIDE_QUESTION 应按父会话 executionId 去重'
+  );
+  assert.deepEqual(
+    sameRoundRes.events.filter(e => e.source_id === normalBadSourceId).map(e => e.execution),
+    ['exec-normal-0'],
+    '普通会话带自引用或非法 forkStepIndex 时不得误裁数据'
+  );
+
+  // 2) 直接调用跨轮场景：父会话 receipt 已最新（不在 changed 中），新到达的 SIDE_QUESTION 带 parentConversationId 但无 forkStepIndex -> 懒查父会话一次并去重
+  const parentFetchCalls = [];
+  const parentSourceId = buildRemoteTrajectorySourceId('traj-parent-a');
+  const crossRoundDirectRes = await syncRemoteSessionUsage({
+    target: {
+      remoteKey: 'rk-btw-lazy-parent',
+      hostLabel: 'ssh-btw-lazy',
+      email: 'lazy@example.invalid',
+      accountType: 'consumer',
+      lastIdentityVerifiedAt: t0,
+      rpcClient: {
+        async getAllCascadeTrajectories() {
+          return {
+            ok: true,
+            data: [
+              {
+                cascadeId: 'conv-parent-a',
+                trajectoryId: 'traj-parent-a',
+                trajectoryType: 2,
+                stepCount: 3,
+                lastModifiedTime: '2026-11-22T10:55:00Z',
+              },
+              {
+                cascadeId: 'conv-btw-lazy',
+                trajectoryId: 'traj-btw-lazy',
+                trajectoryType: 'CORTEX_TRAJECTORY_TYPE_SIDE_QUESTION',
+                stepCount: 5,
+                parentConversationId: 'conv-parent-a',
+                lastModifiedTime: '2026-11-22T10:59:00Z',
+              },
+            ],
+          };
+        },
+        async getGeneratorMetadata(cid, offset) {
+          if (cid === 'conv-parent-a') {
+            parentFetchCalls.push({ cid, offset });
+            return { ok: true, data: mainGens.slice(offset) };
+          }
+          return { ok: true, data: btwGensRound1.slice(offset) };
+        },
+        async getTrajectorySteps() {
+          return { ok: true, data: [] };
+        },
+      },
+    },
+    receipts: {
+      [parentSourceId]: {
+        source_id: parentSourceId,
+        environment_id: buildRemoteEnvironmentId('ssh-btw-lazy'),
+        cursor_offset: 2,
+        step_offset: 3,
+        last_modified_sec: Math.floor(Date.parse('2026-11-22T10:55:00Z') / 1000),
+        step_count: 3,
+        committed_at: Math.floor(t0 / 1000) - 60,
+      },
+    },
+    nowMs: t0,
+  });
+
+  assert.equal(crossRoundDirectRes.ok, true);
+  assert.deepEqual(parentFetchCalls, [{ cid: 'conv-parent-a', offset: 0 }]);
+  assert.deepEqual(crossRoundDirectRes.events.map(e => e.execution), ['exec-btw-new-1']);
+
+  // 3) RemoteUsageSyncCoordinator 跨三轮验证：
+  // Round 1 同步父会话 -> 缓存父 executionId；
+  // Round 2 父会话未变更，新 /btw 无 forkStepIndex 也无 parentConversationId -> 仍成功去重；
+  // Round 3 该 /btw 新增后续轮次（prevCursor-1 会重扫 exec-btw-new-1）-> 不得误删 /btw 自己的 executionId！
+  const savedByRound = [];
+  const receiptStore = {};
+  let roundNo = 0;
+  const btwGensRound3 = [
+    ...btwGensRound1,
+    {
+      stepIndices: [6],
+      executionId: 'exec-btw-new-2',
+      responseModel: 'gemini-3.8-flash-n',
+      usage: { inputTokens: '600', outputTokens: '150' },
+    },
+  ];
+  const coordTarget = {
+    remoteKey: 'rk-btw-coord',
+    hostLabel: 'ssh-btw-coord',
+    email: 'coord@example.invalid',
+    accountType: 'consumer',
+    lastIdentityVerifiedAt: t0,
+    rpcClient: {
+      async getAllCascadeTrajectories() {
+        const list = [
+          {
+            cascadeId: 'conv-coord-parent',
+            trajectoryId: 'traj-coord-parent',
+            trajectoryType: 2,
+            stepCount: 3,
+            lastModifiedTime: '2026-11-22T10:55:00Z',
+          },
+        ];
+        if (roundNo >= 2) {
+          list.push({
+            cascadeId: 'conv-coord-btw',
+            trajectoryId: 'traj-coord-btw',
+            trajectoryType: 22,
+            stepCount: roundNo === 2 ? 5 : 7,
+            lastModifiedTime: roundNo === 2 ? '2026-11-22T10:58:00Z' : '2026-11-22T10:59:00Z',
+          });
+        }
+        return { ok: true, data: list };
+      },
+      async getGeneratorMetadata(cid, offset) {
+        if (cid === 'conv-coord-parent') return { ok: true, data: mainGens.slice(offset) };
+        const arr = roundNo === 2 ? btwGensRound1 : btwGensRound3;
+        return { ok: true, data: arr.slice(offset) };
+      },
+      async getTrajectorySteps() {
+        return { ok: true, data: [] };
+      },
+    },
+  };
+
+  const coordinator = new RemoteUsageSyncCoordinator({
+    getTargets: () => [coordTarget],
+    ledger: {
+      async receipts() {
+        return { ...receiptStore };
+      },
+      async save(events, opts) {
+        savedByRound.push(events);
+        for (const r of opts?.receipts ?? []) {
+          receiptStore[r.source_id] = r;
+        }
+      },
+    },
+  });
+
+  roundNo = 1;
+  await coordinator.syncNow({ nowMs: t0 });
+  assert.deepEqual(savedByRound[0].map(e => e.execution), ['exec-p-0', 'exec-p-1']);
+
+  roundNo = 2;
+  await coordinator.syncNow({ nowMs: t0 + 1000 });
+  assert.deepEqual(
+    savedByRound[1].map(e => e.execution),
+    ['exec-btw-new-1'],
+    'Coordinator 跨轮缓存的父 executionId 应过滤无 parentConversationId 的 SIDE_QUESTION 克隆记录'
+  );
+
+  roundNo = 3;
+  await coordinator.syncNow({ nowMs: t0 + 2000 });
+  assert.deepEqual(
+    savedByRound[2].map(e => e.execution),
+    ['exec-btw-new-1', 'exec-btw-new-2'],
+    'SIDE_QUESTION 自身的 executionId 不得污染父缓存，后续续轮（prevCursor-1 重扫）应完整保留'
+  );
+});
+
+test('P1-14: 远端事件优先使用 chatStartMetadata 原生时间戳；缺时间戳时仅末条允许回退 lastModifiedSec，其余历史轮次保持 0', async () => {
+  const t0 = Date.UTC(2026, 10, 22, 14, 0, 0);
+  const nativeTsIso = '2026-11-18T09:30:00Z';
+  const lastModIso = '2026-11-22T13:55:00Z';
+  const nativeTsSec = Math.floor(Date.parse(nativeTsIso) / 1000);
+  const lastModSec = Math.floor(Date.parse(lastModIso) / 1000);
+
+  const res = await syncRemoteSessionUsage({
+    target: {
+      remoteKey: 'rk-ts-p1-14',
+      hostLabel: 'ssh-ts-host',
+      email: 'ts-user@example.invalid',
+      accountType: 'consumer',
+      lastIdentityVerifiedAt: t0,
+      rpcClient: {
+        async getAllCascadeTrajectories() {
+          return {
+            ok: true,
+            data: [
+              {
+                cascadeId: 'conv-ts-multi',
+                trajectoryId: 'traj-ts-multi',
+                trajectoryType: 2,
+                stepCount: 6,
+                lastModifiedTime: lastModIso,
+              },
+            ],
+          };
+        },
+        async getGeneratorMetadata() {
+          return {
+            ok: true,
+            data: [
+              // 历史第 1 轮：无 gen/step 时间戳 -> 不得回退 lastModifiedSec，应保持 0
+              {
+                stepIndices: [0],
+                executionId: 'exec-hist-no-ts',
+                responseModel: 'gemini-3.8-flash-n',
+                usage: { inputTokens: '100', outputTokens: '20' },
+              },
+              // 历史第 2 轮：带 chatStartMetadata 原生时间戳 -> 优先采信
+              {
+                stepIndices: [2],
+                executionId: 'exec-hist-native-ts',
+                createdAt: nativeTsIso,
+                responseModel: 'gemini-3.8-flash-n',
+                usage: { inputTokens: '200', outputTokens: '40' },
+              },
+              // 末条新轮次：无 gen/step 时间戳 -> 允许回退 lastModifiedSec
+              {
+                stepIndices: [4],
+                executionId: 'exec-latest-fallback',
+                responseModel: 'gemini-3.8-flash-n',
+                usage: { inputTokens: '300', outputTokens: '60' },
+              },
+            ],
+          };
+        },
+        async getTrajectorySteps() {
+          return { ok: true, data: [] };
+        },
+      },
+    },
+    nowMs: t0,
+  });
+
+  assert.equal(res.ok, true);
+  assert.equal(res.events.length, 3);
+  assert.equal(res.events[0].timestamp_seconds, 0, '非末条历史轮次缺失时间戳时必须保持 0，避免错挂为最新 lastModifiedTime');
+  assert.equal(res.events[1].timestamp_seconds, nativeTsSec, '应优先使用 chatStartMetadata 原生时间戳');
+  assert.equal(res.events[2].timestamp_seconds, lastModSec, '仅末条新轮次允许回退 lastModifiedSec');
+});
+
+test('P2-4 & P2-7: listEnvironments 冷启动自动 ensureLoaded；远端同步透传 siblingModelIds 解析新代号 Orchestrator', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'gb-p2-4-obs-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const nowSec = Math.floor(Date.UTC(2026, 10, 22, 15, 0, 0) / 1000);
+
+  // P2-4: 持久化写入后，新实例直接调 listEnvironments() 必须先 ensureLoaded()
+  const store1 = new RemoteAccountObservationStore({ stateDir: dir });
+  store1.recordObservation({
+    environmentId: buildRemoteEnvironmentId('gpu-cold-box'),
+    hostLabel: 'gpu-cold-box',
+    email: 'cold@example.invalid',
+    accountType: 'consumer',
+    observedAtSec: nowSec,
+  });
+  await store1.flush();
+
+  const store2 = new RemoteAccountObservationStore({ stateDir: dir });
+  const envs = store2.listEnvironments();
+  assert.equal(envs.length, 1, '冷启动直接调用 listEnvironments() 应加载持久化环境记录');
+  assert.equal(envs[0].hostLabel, 'gpu-cold-box');
+
+  // P2-7: 远端同步透传 siblingModelIds，使未入库代号 Orchestrator (Xenon) 自动归并至同会话兄弟模型 gemini-5-xenon
+  const res = await syncRemoteSessionUsage({
+    target: {
+      remoteKey: 'rk-p2-7-sib',
+      hostLabel: 'ssh-sib-host',
+      email: 'sib@example.invalid',
+      accountType: 'consumer',
+      lastIdentityVerifiedAt: nowSec * 1000,
+      rpcClient: {
+        async getAllCascadeTrajectories() {
+          return {
+            ok: true,
+            data: [
+              {
+                cascadeId: 'conv-sib-1',
+                trajectoryId: 'traj-sib-1',
+                trajectoryType: 2,
+                stepCount: 2,
+                lastModifiedTime: '2026-11-22T15:00:00Z',
+              },
+            ],
+          };
+        },
+        async getGeneratorMetadata() {
+          return {
+            ok: true,
+            data: [
+              {
+                stepIndices: [0],
+                executionId: 'exec-sib-base',
+                responseModel: 'gemini-5-xenon',
+                usage: { inputTokens: '100', outputTokens: '20' },
+              },
+              {
+                stepIndices: [1],
+                executionId: 'exec-sib-orch',
+                responseModel: 'gemini-pro-orchestrator-xenon',
+                modelDisplayName: 'Orchestrator (Xenon)',
+                usage: { inputTokens: '150', outputTokens: '30' },
+              },
+            ],
+          };
+        },
+        async getTrajectorySteps() {
+          return { ok: true, data: [] };
+        },
+      },
+    },
+    nowMs: nowSec * 1000,
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.events.length, 2);
+  assert.equal(res.events[0].model, 'gemini-5-xenon');
+  assert.equal(res.events[1].model, 'gemini-5-xenon', '透传 siblingModelIds 后 Orchestrator (Xenon) 应自动归并至 gemini-5-xenon');
+});

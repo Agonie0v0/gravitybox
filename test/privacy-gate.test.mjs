@@ -80,6 +80,24 @@ test('隐私门禁扫描器：拦截真实私钥与密钥前缀，豁免显式�
   assert.equal(issues.length, 3);
   assert.deepEqual(issues.map(i => i.code), ['DISALLOWED_SECRET_LITERAL', 'DISALLOWED_SECRET_LITERAL', 'DISALLOWED_SECRET_LITERAL']);
 
+  const safeGoogleOAuth = [
+    "GRAVITYBOX_GOOGLE_CLIENT_ID='your-client-id.apps.googleusercontent.com'",
+    "GRAVITYBOX_GOOGLE_CLIENT_ID='mock-id.apps.googleusercontent.com'",
+    `const placeholderSecret = '${'GOCSPX-' + 'examplePlaceholderSecretValue99'}';`,
+    `const placeholderClientId = '${'1071006060591-' + 'exampleplaceholderclientid99.apps.googleusercontent.com'}';`,
+  ].join('\n');
+  assert.deepEqual(scanContentForPrivacy(safeGoogleOAuth, 'test/sample.test.mjs'), []);
+
+  const fakeOAuthSecret = 'GOCSPX-' + 'K9mPqR2xT4vW8zY1nB3cD6fG7hJ8';
+  const fakeOAuthClientId = '1071006060591-' + 'k9mpqr2xt4vw8zy1nb3cd6fg7hj8' + '.apps.googleusercontent.com';
+  const oauthIssues = scanContentForPrivacy(
+    `GRAVITYBOX_GOOGLE_CLIENT_ID=${fakeOAuthClientId}\nGRAVITYBOX_GOOGLE_CLIENT_SECRET=${fakeOAuthSecret}\n`,
+    'src/leaked-oauth.ts'
+  );
+  assert.equal(oauthIssues.length, 2);
+  assert.deepEqual(oauthIssues.map(i => i.code), ['DISALLOWED_SECRET_LITERAL', 'DISALLOWED_SECRET_LITERAL']);
+  assert.deepEqual(oauthIssues.map(i => i.line), [1, 2]);
+
   const tempDir = await mkdtemp(join(tmpdir(), 'gb-privacy-dir-'));
   try {
     await mkdir(join(tempDir, 'Resources', 'core'), { recursive: true });

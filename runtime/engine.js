@@ -87,8 +87,16 @@
     if (typeof window !== 'undefined') window.removeEventListener('focus', reportWindowFocus, true);
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', handleVisibilityFocus, true);
   }
-  installFocusListeners();
   if (options.translationEnabled === false) {
+    if (globalThis[KEY]) {
+      if (globalThis[KEY].state?.()?.runtimeId === options.runtimeId && globalThis[KEY].getLanguageMode?.() === 'en') {
+        globalThis[KEY].update?.(options.dictionary);
+        globalThis.__GRAVITYBOX_ATTACH_HUD__?.();
+        return;
+      }
+      try { globalThis[KEY].dispose?.({ keepHud: true }); } catch {}
+    }
+    installFocusListeners();
     // HUD-only connection: expose the lifecycle contract without installing
     // translators, project markers, mutation observers or scan collectors.
     let dictionary = options.dictionary;
@@ -109,6 +117,7 @@
     return;
   }
   if (globalThis[KEY]) { globalThis[KEY].setShortcutEnabled?.(options.shortcutEnabled !== false); globalThis[KEY].update(options.dictionary); return; }
+  installFocusListeners();
   let shortcutEnabled = options.path === '/fixture' && options.shortcutEnabled !== false;
   const ownedProjectMarkers = new Set();
   const UI = '[data-gravitybox-ui],button,a[href],h1,h2,h3,h4,[role="navigation"],[role="button"],[role="menuitem"],[role="tab"],[role="option"],[role="tooltip"],[role="dialog"],[role="status"],[role="alert"],[role="banner"],label,th,td,summary,figcaption,.monaco-menu-item,[data-sonner-toast],[data-testid="toast-notification"],[data-testid="ssh-connect-progress"],[data-testid="ssh-connect-error"],[data-testid="ssh-config-file"],[data-testid="ssh-machine-switcher-status"],[role="listitem"],[role="region"],[data-testid*="settings"],[data-testid*="preferences"],[data-testid*="empty"],[data-testid*="notice"],[data-testid*="banner"],[data-testid*="card"],[data-testid*="header"],[data-testid*="sidecar"],[data-testid*="trigger"],[data-testid="agent-input-box"],[contenteditable="true"][role="combobox"]+p,[data-testid="cascade-system-message-toolbar"],[data-testid="turn-cards-container"],[data-testid="side-question-followup-thinking"],[data-select-popup],[role="menu"],[role="listbox"]';
@@ -497,7 +506,7 @@
      can flip "translatable <-> protected" (protection-relevant classes, role, contenteditable,
      protection markers, data-testid) invalidates the element, and therefore its recorded subtree. */
   const protectionTokens = new WeakMap();
-  const PROTECTIVE_CLASSES = new Set(['chat-message', 'message-content', 'conversation-title', 'terminal', 'output-view', 'debug-console', 'code-view', 'artifact-container', 'model-item', 'markdown', 'markdown-frontmatter', 'markdown-alert-title', 'notebook-markdown-cell', 'prose', 'file-tree', 'gravitybox-project-name']);
+  const PROTECTIVE_CLASSES = new Set(['chat-message', 'message-content', 'conversation-title', 'terminal', 'output-view', 'debug-console', 'code-view', 'artifact-container', 'model-item', 'markdown', 'markdown-frontmatter', 'markdown-alert-title', 'notebook-markdown-cell', 'prose', 'file-tree', 'monaco-editor', 'xterm', 'gravitybox-project-name']);
   const PROTECTION_ATTRS = ['class', 'role', 'contenteditable', 'data-testid', 'data-gravitybox-protect', 'data-gravitybox-user-content', 'data-gravitybox-user-name'];
   function protectionToken(el) {
     const raw = typeof el.className === 'string' ? el.className : '';
@@ -590,8 +599,15 @@
     const next=headings.find(e=>e!==start&&(start.compareDocumentPosition(e)&Node.DOCUMENT_POSITION_FOLLOWING));
     return !next||!!(button.compareDocumentPosition(next)&Node.DOCUMENT_POSITION_FOLLOWING);
   }
+  function isDialogProjectButton(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE || !projectNames.size) return false;
+    if (!matches(el, 'button,[role="button"]')) return false;
+    if (!el.closest('[role="dialog"]')) return false;
+    return projectNames.has(normalize(originalText(el)));
+  }
   function isProtectedElement(el, scan = 0) {
     if (matches(el, PROTECTED_CORE)) return true;
+    if (isDialogProjectButton(el)) return true;
     if (matches(el, '[data-testid*="model"]:not([data-testid^="shortcut-row-"])')) {
       return !inSystemSettings(el, scan) || matches(el, SETTINGS_MODEL_PROTECTED);
     }
@@ -607,7 +623,9 @@
     if (userNamed(element) || settingsProjectName(element,scan)) return true;
     const cached = blockedCache.get(element);
     if (cached !== undefined && cached.scan === scan) return cached.val;
-    const isProt = ancestors(element).some(el => isProtectedElement(el, scan)) || (element.tagName === 'BUTTON' && Boolean(element.closest('[role="dialog"]')) && projectNames.has(normalize(element.textContent || '')));
+    const dialogProjectBtn = element.closest?.('[role="dialog"] button, [role="dialog"] [role="button"]');
+    const isDialogProject = Boolean(dialogProjectBtn && projectNames.has(normalize(originalText(dialogProjectBtn))));
+    const isProt = ancestors(element).some(el => isProtectedElement(el, scan)) || isDialogProject;
     blockedCache.set(element, { scan, val: isProt });
     return isProt;
   }
@@ -881,6 +899,10 @@
     },
     {
       key: "{count}{timeUnit}", pattern: /^(\d+)(m|h|d|w|mo|y)$/,
+      guard: (el) =>
+        (isRelativeTimeBadge(el) || Boolean(el?.closest?.('[data-gravitybox-ui]'))) &&
+        !isElapsedDurationNode(el) &&
+        !el?.closest?.('[data-testid*="model"],[data-testid*="quota"],[role="menu"]'),
       replace: (_, n, u) => {
         const uMap = { m: '分钟前', h: '小时前', d: '天前', w: '周前', mo: '个月前', y: '年前' };
         return `${n}${uMap[u] || u}`;
@@ -935,7 +957,7 @@
     },
     {
       key: "{provider} models", pattern: /^(Gemini|Claude and GPT)\s+models$/i,
-      replace: (_, brand) => `${brand === 'Claude and GPT' ? 'Claude 与 GPT' : brand} 系列模型`
+      replace: (_, brand) => `${brand.toLowerCase() === 'claude and gpt' ? 'Claude 与 GPT' : brand} 系列模型`
     },
 
     // 9. 界面复合前缀与截断片段 (消除拼接断裂感)
@@ -2068,6 +2090,242 @@
       key: "Connecting to {host}…",
       pattern: /^Connecting\s+to\s+(.+?)(?:\u2026|\.\.\.)$/i,
       replace: (_, h) => `正在连接到 ${h}…`
+    },
+    // 15. 2.34.0 新增动态模板与内联整句模板（Screen Recording、遥测、子智能体、自动换行、保存报错等）
+    {
+      key: "In System Settings, turn on {0}. If it isn't in the list, drag it in from the small window next to System Settings. Already on? Select {1}, click {2}, then drag it back in from the small window.",
+      pattern: /^In\s+System\s+Settings,\s*turn\s+on\s+\{(\d+)\}\.\s*If\s+it\s+isn['’]t\s+in\s+the\s+list,\s*drag\s+it\s+in\s+from\s+the\s+small\s+window\s+next\s+to\s+System\s+Settings\.\s*Already\s+on\?\s*Select\s+\{(\d+)\},\s*click\s+\{(\d+)\},\s*then\s+drag\s+it\s+back\s+in\s+from\s+the\s+small\s+window\.?$/i,
+      replace: (_, a, b, c) => `请在系统设置中开启 {${a}}。如果列表中没有它，请从系统设置旁的小窗口将其拖入。已开启？选中 {${b}}，点击 {${c}}，然后从小窗口将其重新拖入。`
+    },
+    {
+      key: "In System Settings, turn on {0}. If it isn't in the list, drag it in from the small window next to System Settings.",
+      pattern: /^In\s+System\s+Settings,\s*turn\s+on\s+\{(\d+)\}\.\s*If\s+it\s+isn['’]t\s+in\s+the\s+list,\s*drag\s+it\s+in\s+from\s+the\s+small\s+window\s+next\s+to\s+System\s+Settings\.?$/i,
+      replace: (_, a) => `请在系统设置中开启 {${a}}。如果列表中没有它，请从系统设置旁的小窗口将其拖入。`
+    },
+    {
+      key: "In System Settings, click {0}, choose {1}, then turn it on. Already on? Select {2}, click {3}, then click {4} and add it again.",
+      pattern: /^In\s+System\s+Settings,\s*click\s+\{(\d+)\},\s*choose\s+\{(\d+)\},\s*then\s+turn\s+it\s+on\.\s*Already\s+on\?\s*Select\s+\{(\d+)\},\s*click\s+\{(\d+)\},\s*then\s+click\s+\{(\d+)\}\s+and\s+add\s+it\s+again\.?$/i,
+      replace: (_, a, b, c, d, e) => `请在系统设置中点击 {${a}}，选择 {${b}}，然后开启它。已开启？选中 {${c}}，点击 {${d}}，然后点击 {${e}} 重新添加。`
+    },
+    {
+      key: "In System Settings, click {0}, choose {1}, then turn it on.",
+      pattern: /^In\s+System\s+Settings,\s*click\s+\{(\d+)\},\s*choose\s+\{(\d+)\},\s*then\s+turn\s+it\s+on\.?$/i,
+      replace: (_, a, b) => `请在系统设置中点击 {${a}}，选择 {${b}}，然后开启它。`
+    },
+    {
+      key: "Relaunch {app} to finish Screen Recording.",
+      pattern: /^Relaunch\s+(.+?)\s+to\s+finish\s+Screen\s+Recording\.?$/i,
+      replace: (_, app) => `重新启动 ${app} 以完成屏幕录制配置。`
+    },
+    {
+      key: "Telemetry is turned off for your account. {product} does not collect any of your prompts, content, or model responses but will still collect general usage patterns (e.g., feature adoption, active user counts).",
+      pattern: /^Telemetry\s+is\s+turned\s+off\s+for\s+your\s+account\.\s*(?:This\s+means\s+)?(.+?)\s+does\s+not\s+collect\s+any\s+of\s+your\s+prompts,\s*content,\s*or\s+model\s+responses,?\s*but\s+will\s+still\s+collect\s+general\s+usage\s+patterns\s*\(e\.g\.,\s*feature\s+adoption,\s*active\s+user\s+counts\)\.?$/i,
+      replace: (_, product) => `您的账号已关闭遥测。${product} 不会收集您的任何提示词、内容或模型回复，但仍会收集常规使用模式（例如功能采用率、活跃用户数）。`
+    },
+    {
+      key: "{product} does not collect any of your prompts, content, or model responses but does collect general usage patterns such as feature adoption and active user counts (“product analytics”). Telemetry data will be handled in accordance with the Google Privacy Policy.",
+      pattern: /^(.+?)\s+does\s+not\s+collect\s+any\s+of\s+your\s+prompts,\s*content,\s*or\s+model\s+responses\s+but\s+does\s+collect\s+general\s+usage\s+patterns\s+such\s+as\s+feature\s+adoption\s+and\s+active\s+user\s+counts\s*\([“"]product\s+analytics[”"]\)\.\s*Telemetry\s+data\s+will\s+be\s+handled\s+in\s+accordance\s+with\s+the\s+Google\s+Privacy\s+Policy\.?$/i,
+      replace: (_, product) => `${product} 不会收集您的任何提示词、内容或模型回复，但会收集常规使用模式，例如功能采用率与活跃用户数（“产品分析”）。遥测数据将按照 Google 隐私政策处理。`
+    },
+    {
+      key: "When toggled on, {product} collects usage data to help Google enhance performance and features.",
+      pattern: /^When\s+toggled\s+on,\s*(.+?)\s+collects\s+usage\s+data\s+to\s+help\s+Google\s+enhance\s+performance\s+and\s+features\.?$/i,
+      replace: (_, product) => `开启后，${product} 将收集使用数据，以帮助 Google 提升性能与功能体验。`
+    },
+    {
+      key: "Receive product updates, tips, and promotions from Google {product} via email.",
+      pattern: /^Receive\s+product\s+updates,\s*tips,\s*and\s+promotions\s+from\s+Google\s+(.+?)\s+via\s+email\.?$/i,
+      replace: (_, product) => `通过电子邮件接收来自 Google ${product} 的产品动态、使用技巧与推广通知。`
+    },
+    {
+      key: "Show {count} more subagents",
+      pattern: /^Show\s+(\d+)\s+more\s+subagents?$/i,
+      replace: (_, n) => `显示另外 ${n} 个子智能体`
+    },
+    {
+      key: "Enable Word Wrap ({shortcut})",
+      pattern: /^Enable\s+Word\s+Wrap(?:\s+(\([^)]+\)))?$/i,
+      replace: (_, s) => `开启自动换行${s ? ' ' + s : ''}`
+    },
+    {
+      key: "Disable Word Wrap ({shortcut})",
+      pattern: /^Disable\s+Word\s+Wrap(?:\s+(\([^)]+\)))?$/i,
+      replace: (_, s) => `关闭自动换行${s ? ' ' + s : ''}`
+    },
+    {
+      key: "Toggle Word Wrap ({shortcut})",
+      pattern: /^Toggle\s+Word\s+Wrap(?:\s+(\([^)]+\)))?$/i,
+      replace: (_, s) => `切换自动换行${s ? ' ' + s : ''}`
+    },
+    {
+      key: "Failed to save cloud permission settings: {reason}",
+      pattern: /^Failed\s+to\s+save\s+cloud\s+permission\s+settings:\s*(.+)$/i,
+      replace: (_, r) => `保存云端权限设置失败：${r}`
+    },
+    {
+      key: "Failed to save project Google3 configuration: {reason}",
+      pattern: /^Failed\s+to\s+save\s+project\s+Google3\s+configuration:\s*(.+)$/i,
+      replace: (_, r) => `保存项目 Google3 配置失败：${r}`
+    },
+    {
+      key: "Failed to save project permissions: {reason}",
+      pattern: /^Failed\s+to\s+save\s+project\s+permissions:\s*(.+)$/i,
+      replace: (_, r) => `保存项目权限失败：${r}`
+    },
+    {
+      key: "Failed to save project settings: {reason}",
+      pattern: /^Failed\s+to\s+save\s+project\s+settings:\s*(.+)$/i,
+      replace: (_, r) => `保存项目设置失败：${r}`
+    },
+    {
+      key: "Failed to save project: {reason}",
+      pattern: /^Failed\s+to\s+save\s+project:\s*(.+)$/i,
+      replace: (_, r) => `保存项目失败：${r}`
+    },
+    {
+      key: "Failed to save settings: {reason}",
+      pattern: /^Failed\s+to\s+save\s+settings:\s*(.+)$/i,
+      replace: (_, r) => `保存设置失败：${r}`
+    },
+    {
+      key: "Failed to create project: {reason}",
+      pattern: /^Failed\s+to\s+create\s+project:\s*(.+)$/i,
+      replace: (_, r) => `创建项目失败：${r}`
+    },
+    {
+      key: "Failed to unarchive project: {reason}",
+      pattern: /^Failed\s+to\s+unarchive\s+project:\s*(.+)$/i,
+      replace: (_, r) => `取消归档项目失败：${r}`
+    },
+    {
+      key: "Failed to delete recordings: {reason}",
+      pattern: /^Failed\s+to\s+delete\s+recordings:\s*(.+)$/i,
+      replace: (_, r) => `删除录制文件失败：${r}`
+    },
+    {
+      key: "Failed to resolve folder: {path} ({reason})",
+      pattern: /^Failed\s+to\s+resolve\s+folder:\s*(.+?)\s+\((.+)\)$/i,
+      replace: (_, p, r) => `无法解析文件夹：${p}（${r}）`
+    },
+    {
+      key: "Failed to load page {page}: {reason}",
+      pattern: /^Failed\s+to\s+load\s+page\s+(\d+):\s*(.+)$/i,
+      replace: (_, p, r) => `加载第 ${p} 页失败：${r}`
+    },
+    {
+      key: 'Cannot add folder: "{path}" is not a valid folder location.',
+      pattern: /^Cannot\s+add\s+folder:\s*[“"](.+?)[”"]\s+is\s+not\s+a\s+valid\s+folder\s+location\.?$/i,
+      replace: (_, p) => `无法添加文件夹：“${p}”不是有效的文件夹位置。`
+    },
+    {
+      key: "A file already exists at {path}.",
+      pattern: /^A\s+file\s+already\s+exists\s+at\s+(.+?)\.?$/i,
+      replace: (_, p) => `${p} 处已存在同名文件。`
+    },
+    {
+      key: "Couldn't disconnect {target}: {reason}",
+      pattern: /^Couldn['’]t\s+disconnect\s+(.+?):\s*(.+)$/i,
+      replace: (_, t, r) => `无法断开 ${t}：${r}`
+    },
+    {
+      key: "Configure {server}",
+      pattern: /^Configure\s+(.+)$/i,
+      replace: (_, s) => `配置 ${s}`
+    },
+    {
+      key: "More options for {title}",
+      pattern: /^More\s+options\s+for\s+(.+)$/i,
+      replace: (_, t) => `${t} 的更多选项`
+    },
+    {
+      key: "Forked from {source}",
+      pattern: /^Forked\s+from\s+(.+)$/i,
+      replace: (_, s) => `复刻自 ${s}`
+    },
+    {
+      key: "Make {account} the default {provider} account",
+      pattern: /^Make\s+(.+?)\s+the\s+default\s+(.+?)\s+account$/i,
+      replace: (_, a, p) => `将 ${a} 设为默认 ${p} 账号`
+    },
+    {
+      key: "Secret for a new {provider} account",
+      pattern: /^Secret\s+for\s+a\s+new\s+(.+?)\s+account$/i,
+      replace: (_, p) => `新 ${p} 账号的密钥`
+    },
+    {
+      key: "Secret for {provider}",
+      pattern: /^Secret\s+for\s+(.+)$/i,
+      replace: (_, p) => `${p} 的密钥`
+    },
+    {
+      key: "New secret for {account}",
+      pattern: /^New\s+secret\s+for\s+(.+)$/i,
+      replace: (_, a) => `${a} 的新密钥`
+    },
+    {
+      key: "See more in {name}",
+      pattern: /^See\s+more\s+in\s+(.+)$/i,
+      replace: (_, n) => `在 ${n} 中查看更多`
+    },
+    {
+      key: "See less in {name}",
+      pattern: /^See\s+less\s+in\s+(.+)$/i,
+      replace: (_, n) => `在 ${n} 中收起部分内容`
+    },
+    {
+      key: "Sign in from the {panel} panel.",
+      pattern: /^Sign\s+in\s+from\s+the\s+(.+?)\s+panel\.?$/i,
+      replace: (_, p) => `请从 ${p} 面板登录。`
+    },
+    {
+      key: "Sign in to use {name}!",
+      pattern: /^Sign\s+in\s+to\s+use\s+(.+?)!$/i,
+      replace: (_, n) => `登录以使用 ${n}！`
+    },
+    {
+      key: "{label}, error",
+      pattern: /^(.+?),\s*error$/i,
+      replace: (_, label) => `${nestedLabel(label)}（出错）`
+    },
+    {
+      key: "{name}, voice {current} of {total}",
+      pattern: /^(.+?),\s*voice\s+(\d+)\s+of\s+(\d+)$/i,
+      replace: (_, n, c, t) => `${n}，第 ${c} / ${t} 个语音`
+    },
+    {
+      key: "Line {from} → {to}",
+      pattern: /^Line\s+(\d+)\s*→\s*(\d+)$/i,
+      replace: (_, a, b) => `第 ${a} → ${b} 行`
+    },
+    {
+      key: "Image: {name}",
+      pattern: /^Image:\s*(.+)$/i,
+      replace: (_, n) => `图片：${n}`
+    },
+    {
+      key: "Pin Entire {target}",
+      pattern: /^Pin\s+Entire\s+(.+)$/i,
+      replace: (_, t) => `固定整个 ${nestedLabel(t)}`
+    },
+    {
+      key: "Unpin {target}",
+      pattern: /^Unpin\s+(.+)$/i,
+      replace: (_, t) => `取消固定 ${nestedLabel(t)}`
+    },
+    {
+      key: "Opens the New Conversation screen for this {target}",
+      pattern: /^Opens\s+the\s+New\s+Conversation\s+screen\s+for\s+this\s+(.+)$/i,
+      replace: (_, t) => `打开此${nestedLabel(t)}的新建对话界面`
+    },
+    {
+      key: "{count} days",
+      pattern: /^(\d+)\s+days?$/i,
+      replace: (_, n) => `${n} 天`
+    },
+    {
+      key: "{count} CEL values",
+      pattern: /^(\d+)\s+CEL\s+values?$/i,
+      replace: (_, n) => `${n} 个 CEL 值`
     }
   ];
 
@@ -2102,6 +2360,7 @@
     for (let i = 0; i < TEMPLATE_RULES.length; i++) {
       const rule = TEMPLATE_RULES[i];
       if (rule.inlineOnly && !hasInlineSlot) continue;
+      if (rule.guard && !rule.guard(el)) continue;
       if (rule.pattern.test(key)) {
         lastMatchedKeys = [rule.key];
         return key.replace(rule.pattern, rule.replace);
@@ -2744,7 +3003,7 @@
     for (const mutation of mutations) {
       const targetEl = mutation.target.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target.parentElement;
       const inStaticProtected = Boolean(
-        targetEl?.closest?.('[data-gravitybox-protect],.monaco-editor,.xterm') &&
+        targetEl?.closest?.('[data-gravitybox-protect],.monaco-editor,.xterm,[data-message-id],[data-message-author-role],[data-testid="planner-response-text"],.markdown,.prose,pre,code') &&
         !targetEl.closest?.('[data-testid="conversation-row-sidebar"],[data-testid*="model"]')
       );
       if (mutation.type === 'childList') {
@@ -2794,6 +3053,8 @@
       timer = setTimeout(flush, 0);
     }
   });
+  let updateGeneration = 0;
+  let updateTimer = null;
   const api = {
     refresh() {
       if (!active) return api.state();
@@ -2814,10 +3075,13 @@
       if (!changed) return api.refresh();
       rebuildIndex(next);
       dictionaryToastPending = true;
+      const generation = ++updateGeneration;
+      if (updateTimer !== null) { clearTimeout(updateTimer); updateTimer = null; }
       const groups = [...inlineGroupContainers], nodes = [...activeNodes];
       let groupIndex = 0, nodeIndex = 0;
       const updateSlice = () => {
-        if (!active) return;
+        if (!active || generation !== updateGeneration) return;
+        updateTimer = null;
         const started = performance.now();
         const scan = ++scanCount;
         while (groupIndex < groups.length && performance.now()-started < 4) refreshInlineGroup(groups[groupIndex++], scan);
@@ -2828,7 +3092,8 @@
           for (const attr of [...slots.keys()]) updateValue(node,attr,scan);
         }
         maxSliceMs = Math.max(maxSliceMs,performance.now()-started);
-        if(groupIndex<groups.length||nodeIndex<nodes.length)setTimeout(updateSlice,0);
+        if (generation !== updateGeneration) return;
+        if(groupIndex<groups.length||nodeIndex<nodes.length) updateTimer = setTimeout(updateSlice,0);
         else {requeueDocument=true;schedule(document);}
       };
       updateSlice();
@@ -3003,6 +3268,7 @@
       if (!opts?.keepHud) { try { globalThis.__GRAVITYBOX_HUD_V1__?.dispose?.(); } catch {} }
       auditKeys = null; auditTrail.clear();
       active = false; observer.disconnect(); clearTimeout(timer); timer = null; reconcileQueue = null;
+      ++updateGeneration; if (updateTimer !== null) { clearTimeout(updateTimer); updateTimer = null; }
       if (routeTimer) { clearInterval(routeTimer); routeTimer = null; }
       try { window.removeEventListener('popstate', checkRoute); window.removeEventListener('hashchange', checkRoute); } catch {}
       pending.clear(); waiting.clear(); settingsWaiting.clear();

@@ -1225,3 +1225,264 @@ test('autoHealUnpricedHistory 仅计入实际获得有效新定价的记录，�
   const healedAgain = await mgr.autoHealUnpricedHistory();
   assert.equal(healedAgain, 0, '仍未定价模型不得重复虚报补齐数量');
 });
+
+test('P1-7 #3: syncRemotePricing 在 unchanged: true 时按 force/首次检查触发历史自愈，有补齐才刷新 revision 与 hook', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'gb-sync-unchanged-heal-'));
+  t.after(async () => {
+    resetAndRegisterRemoteModelMetadata({});
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  });
+
+  const convDir = join(dir, 'antigravity', 'conversations');
+  await mkdir(convDir, { recursive: true });
+  const nowSec = Math.floor(Date.now() / 1000) - 60;
+  const mkBlob = (modelId, inputTok, outputTok) => ProtobufWriter.encodeLengthDelimited(
+    1,
+    Buffer.concat([
+      ProtobufWriter.encodeString(19, modelId),
+      ProtobufWriter.encodeLengthDelimited(4, Buffer.concat([
+        ProtobufWriter.encodeVarintField(2, inputTok),
+        ProtobufWriter.encodeVarintField(3, outputTok),
+      ])),
+      ProtobufWriter.encodeLengthDelimited(9, ProtobufWriter.encodeLengthDelimited(4, ProtobufWriter.encodeVarintField(1, nowSec))),
+    ])
+  );
+  const db = new DatabaseSync(join(convDir, 'unchanged-heal.db'));
+  try {
+    db.exec('CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB, status INTEGER, step_payload BLOB);');
+    db.exec('CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);');
+    db.prepare('INSERT INTO gen_metadata (idx, data) VALUES (?, ?)').run(1, mkBlob('unpriced-future-gamma', 1_000_000, 0));
+  } finally {
+    db.close();
+  }
+
+  const feedBody = {
+    version: '2026-11-22',
+    updatedAt: '2026-11-22T00:00:00Z',
+    prices: {
+      'unpriced-future-gamma': { model: 'unpriced-future-gamma', input: 4.0, output: 16.0, cached: 0.4 },
+    },
+  };
+  const srv = createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json', ETag: '"etag-gamma-1"' });
+    res.end(JSON.stringify(feedBody));
+  });
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+  const feedUrl = `http://127.0.0.1:${srv.address().port}/feed.json`;
+  t.after(() => new Promise((resolve) => srv.close(resolve)));
+
+  // 1) 先在无远端定价时扫描历史 DB，使账本存在 1 条未定价历史记录
+  const mgrBeforeSync = new UsageStatsManager({ geminiDir: dir, stateDir: dir, remotePricingUrl: feedUrl, fallbackPricingUrls: [] });
+  const before = await mgrBeforeSync.getUsageSummary(true);
+  assert.equal(before.all_time.estimated_usd, 0);
+  assert.equal(before.all_time.unpriced_models, 1);
+
+  // 2) 在隔离目录完成一次远端同步，将 remote_pricing.json 与 pricing-sync-status.json 复制到 dir，
+  //    模拟“远端缓存与状态已同步、但历史账本尚未触发自愈”的边界场景（后续请求必命中 unchanged: true）
+  const syncSeedDir = join(dir, 'sync-seed');
+  await mkdir(syncSeedDir, { recursive: true });
+  const mgrSeed = new UsageStatsManager({ geminiDir: syncSeedDir, stateDir: syncSeedDir, remotePricingUrl: feedUrl, fallbackPricingUrls: [] });
+  const seedRes = await mgrSeed.syncRemotePricing(feedUrl, true);
+  assert.equal(seedRes.synced, true);
+  assert.equal(seedRes.unchanged, false);
+  const remoteCache = JSON.parse(await readFile(join(syncSeedDir, 'remote_pricing.json'), 'utf8'));
+  remoteCache.syncedAt = new Date(Date.now() - 86_400_001).toISOString();
+  await writeFile(join(dir, 'remote_pricing.json'), JSON.stringify(remoteCache));
+  const syncStatus = JSON.parse(await readFile(join(syncSeedDir, 'pricing-sync-status.json'), 'utf8'));
+  syncStatus.lastCheckAt = Date.now() - 86_400_001;
+  await writeFile(join(dir, 'pricing-sync-status.json'), JSON.stringify(syncStatus));
+
+  const mgr = new UsageStatsManager({ geminiDir: dir, stateDir: dir, remotePricingUrl: feedUrl, fallbackPricingUrls: [] });
+  const hookEvents = [];
+  mgr.setOnPricingUpdated((info) => hookEvents.push(info));
+  const revBefore = mgr.getPricingRevision();
+
+  // 3) 首次非强制检查命中 unchanged: true，应执行首次自愈并更新 revision 与 hook
+  const firstUnchanged = await mgr.syncRemotePricing(feedUrl, false);
+  assert.equal(firstUnchanged.synced, true);
+  assert.equal(firstUnchanged.unchanged, true);
+  assert.equal(firstUnchanged.healedCount, 1);
+  assert.notEqual(mgr.getPricingRevision(), revBefore);
+  assert.equal(hookEvents.length, 1);
+  assert.equal(hookEvents[0].healedCount, 1);
+  const summaryAfterFirst = await mgr.getUsageSummary(false);
+  assert.equal(summaryAfterFirst.all_time.estimated_usd, 4.0);
+  assert.equal(summaryAfterFirst.all_time.unpriced_models, 0);
+
+  // 4) 非首次且非强制检查即使恢复冷却窗口也直接跳过重复自愈（不递增 revision、不触发 hook）
+  const revAfterFirst = mgr.getPricingRevision();
+  const lockKeys = Object.keys(mgr.rateLocks);
+  assert.equal(lockKeys.length, 1);
+  mgr.nextAutoSyncAt = 0;
+  mgr.rateLocks[lockKeys[0]] = {
+    usd: 0,
+    price: { model: 'unpriced-future-gamma', input: 0, output: 0, cached: 0 },
+  };
+  const secondNonForced = await mgr.syncRemotePricing(feedUrl, false);
+  assert.equal(secondNonForced.synced, true);
+  assert.equal(secondNonForced.unchanged, true);
+  assert.equal(secondNonForced.healedCount, 0);
+  assert.equal(mgr.getPricingRevision(), revAfterFirst);
+  assert.equal(hookEvents.length, 1);
+
+  // 5) 同一实例在 unchangedHealChecked 已为 true 后，force === true 仍会执行自愈并更新 revision 与 hook
+  const forcedHealRes = await mgr.syncRemotePricing(feedUrl, true);
+  assert.equal(forcedHealRes.synced, true);
+  assert.equal(forcedHealRes.unchanged, true);
+  assert.equal(forcedHealRes.healedCount, 1);
+  assert.notEqual(mgr.getPricingRevision(), revAfterFirst);
+  assert.equal(hookEvents.length, 2);
+
+  // 6) 全部已落锁后再次 force === true 且 unchanged: true，healedCount 为 0 且 revision 不再变化
+  const revAfterForced = mgr.getPricingRevision();
+  const forcedNoop = await mgr.syncRemotePricing(feedUrl, true);
+  assert.equal(forcedNoop.synced, true);
+  assert.equal(forcedNoop.unchanged, true);
+  assert.equal(forcedNoop.healedCount, 0);
+  assert.equal(mgr.getPricingRevision(), revAfterForced);
+  assert.equal(hookEvents.length, 2);
+});
+
+test('P1-11 & P1-15: 损坏远端价格缓存自动跳过 ETag/SHA-256 自愈重写；2 位数 Claude 版本、10M 容量与非四大族变体折叠', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'gb-p1-11-cache-heal-'));
+  t.after(async () => {
+    resetAndRegisterRemoteModelMetadata({});
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const feedBody = JSON.stringify({
+    version: '2026-11-22',
+    updatedAt: '2026-11-22T12:00:00Z',
+    prices: {
+      'gemini-4-carbon': { model: 'gemini-4-carbon', input: 2.0, output: 10.0, cached: 0.2 },
+    },
+  });
+  const seenIfNoneMatch = [];
+  const srv = createServer((req, res) => {
+    seenIfNoneMatch.push(req.headers['if-none-match'] ?? null);
+    if (req.headers['if-none-match'] === '"v-heal"') {
+      res.writeHead(304, { etag: '"v-heal"' });
+      res.end();
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json', etag: '"v-heal"' });
+    res.end(feedBody);
+  });
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => srv.close(resolve)));
+  const port = srv.address().port;
+  const feedUrl = `http://127.0.0.1:${port}/feed.json`;
+
+  const { executeRemotePricingSync } = await import('../dist/usage-pricing.js');
+  const { normalizeModelId } = await import('../dist/model-identity.js');
+  const { getRemoteModelSpec } = await import('../dist/model-catalog.js');
+  const remoteCachePath = join(dir, 'remote_pricing.json');
+  const syncStatePath = join(dir, 'pricing-sync.json');
+  const state = {
+    lastRemoteSyncAt: 0,
+    lastSyncSuccess: false,
+    lastCheckAt: 0,
+    lastCheckSuccess: false,
+    nextAutoSyncAt: 0,
+    lastSyncError: null,
+    lastSyncedVersion: '',
+    lastSyncedUpdatedAt: '',
+    lastSyncedSourceUrl: '',
+    lastSyncedEtag: '',
+    lastSyncedSha256: '',
+  };
+
+  // 1) 首次同步写入有效缓存
+  const first = await executeRemotePricingSync({
+    candidateUrls: [feedUrl],
+    remotePricingCachePath: remoteCachePath,
+    pricingSyncStatePath: syncStatePath,
+    state,
+    now: Date.parse('2026-11-22T12:00:00Z'),
+  });
+  assert.equal(first.synced, true);
+  assert.equal(first.unchanged, false);
+
+  // 2) 模拟磁盘缓存损坏（截断 JSON），下次非强制同步不得发送 If-None-Match 也不得走 SHA-256 跳过，应自动重写自愈
+  await writeFile(remoteCachePath, '{"version":1,"prices":INVALID', 'utf8');
+  const healed = await executeRemotePricingSync({
+    candidateUrls: [feedUrl],
+    remotePricingCachePath: remoteCachePath,
+    pricingSyncStatePath: syncStatePath,
+    state,
+    now: Date.parse('2026-11-22T13:00:00Z'),
+    force: false,
+  });
+  assert.equal(seenIfNoneMatch[1], null, '缓存损坏时不得发送 If-None-Match');
+  assert.equal(healed.synced, true);
+  assert.equal(healed.unchanged, false, '损坏缓存自愈重写后 unchanged 应为 false');
+  const repaired = JSON.parse(await readFile(remoteCachePath, 'utf8'));
+  assert.equal(repaired.prices['gemini-4-carbon'].input, 2.0);
+
+  // 3) 缓存含非法 prices 结构时同样视为无效并自愈
+  await writeFile(remoteCachePath, JSON.stringify({ version: 1, prices: { bad: { model: 'bad', input: -1, output: 1, cached: 0 } } }), 'utf8');
+  const healedBadPrices = await executeRemotePricingSync({
+    candidateUrls: [feedUrl],
+    remotePricingCachePath: remoteCachePath,
+    pricingSyncStatePath: syncStatePath,
+    state,
+    now: Date.parse('2026-11-22T14:00:00Z'),
+    force: false,
+  });
+  assert.equal(seenIfNoneMatch[2], null, 'prices 非法时不得发送 If-None-Match');
+  assert.equal(healedBadPrices.unchanged, false);
+
+  // 4) force: true 不发 If-None-Match 且重刷磁盘，同时对有效且同 SHA-256 缓存仍保留 unchanged: true 语义
+  const forced = await executeRemotePricingSync({
+    candidateUrls: [feedUrl],
+    remotePricingCachePath: remoteCachePath,
+    pricingSyncStatePath: syncStatePath,
+    state,
+    now: Date.parse('2026-11-22T15:00:00Z'),
+    force: true,
+  });
+  assert.equal(seenIfNoneMatch[3], null, 'force 刷新不得发送 If-None-Match');
+  assert.equal(forced.synced, true);
+  assert.equal(forced.unchanged, true);
+
+  // P1-15: 2 位数 Claude 版本归一化、10M 远端容量上限、非四大族未定价思考变体折叠
+  assert.equal(normalizeModelId('claude-10.0-sonnet'), 'claude-sonnet-10-0');
+  resetAndRegisterRemoteModelMetadata({
+    models: { 'gemini-10-nova': { displayName: 'Gemini 10 Nova', capacityTokens: 5_000_000 } },
+  });
+  assert.equal(getRemoteModelSpec('gemini-10-nova')?.capacityTokens, 5_000_000);
+
+  const snap = resolvePricingCatalogSnapshot({
+    rawPricingTable: {},
+    live: {
+      tier: 'PRO',
+      models: [
+        { model_id: 'deepseek-r2-high', display_name: 'DeepSeek R2 (High)' },
+        { model_id: 'deepseek-r2-low', display_name: 'DeepSeek R2 (Low)' },
+      ],
+    },
+  });
+  const deepseekEntry = snap.unpricedLiveModels.find((m) => m.key === 'deepseek-r2');
+  assert.ok(deepseekEntry, '非四大族未定价思考变体应折叠归并至基模型 deepseek-r2');
+  assert.deepEqual(deepseekEntry.variants, ['Low', 'High']);
+
+  // P2-5: 远端 pricing-feed.json 显式拒收不兼容 schema（如 schema: 2）
+  const badSchemaSrv = createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      schema: 2,
+      version: '2026-11-23',
+      prices: { 'gemini-4-carbon': { model: 'gemini-4-carbon', input: 2.0, output: 10.0, cached: 0.2 } },
+    }));
+  });
+  await new Promise((resolve) => badSchemaSrv.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => badSchemaSrv.close(resolve)));
+  const badSchemaRes = await executeRemotePricingSync({
+    candidateUrls: [`http://127.0.0.1:${badSchemaSrv.address().port}/bad-schema.json`],
+    remotePricingCachePath: join(dir, 'bad-schema-cache.json'),
+    pricingSyncStatePath: join(dir, 'bad-schema-state.json'),
+    state: { ...state, lastSyncedVersion: '', lastSyncedSha256: '', lastSyncedEtag: '' },
+    now: Date.parse('2026-11-23T00:00:00Z'),
+  });
+  assert.equal(badSchemaRes.synced, false, '不兼容 schema !== 1 的远端定价包必须被显式拒收');
+});

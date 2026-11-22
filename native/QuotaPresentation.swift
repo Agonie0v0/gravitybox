@@ -776,7 +776,10 @@ enum QuotaPresentation {
     static func contract(_ raw: [String: Any]) -> Contract {
         var result = Contract()
         let rawStandbyMode = text(dict(raw["standbyRefreshStatus"])?["mode"])
-        let standbyMode: String? = rawStandbyMode.isEmpty ? nil : rawStandbyMode
+        let activeRemoteIds = (raw["activeRemoteEnvIds"] as? [String]) ?? []
+        let sourceEnvId = text(raw["quotaSourceEnvironmentId"])
+        let hasRemoteSource = !activeRemoteIds.isEmpty || (!sourceEnvId.isEmpty && sourceEnvId != "local")
+        let standbyMode: String? = (rawStandbyMode.isEmpty || hasRemoteSource) ? nil : rawStandbyMode
         result.standbyMode = standbyMode
         let nested = dict(raw["quota"])
         let quotaGroupsRaw = (raw["quotaGroups"] as? [[String: Any]]) ?? nested.flatMap { $0["quotaGroups"] as? [[String: Any]] }

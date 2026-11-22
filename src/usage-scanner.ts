@@ -2,7 +2,7 @@ import { readdir, lstat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { DataDirectoryName } from './application-target.js';
-import { SqliteReadSnapshot, runUsageDbScanInWorker } from './sqlite-read.js';
+import { runUsageDbScanInWorker } from './sqlite-read.js';
 import { ProtobufReader } from './protobuf.js';
 import { USAGE_PROJECTION_VERSION } from './protobuf-projection.js';
 import type { LedgerEvent } from './usage-ledger.js';
@@ -134,17 +134,6 @@ export function resolveLinkedStepTimestamp(
   return 0;
 }
 
-export async function querySqlite(
-  dbPath: string,
-  sql: string,
-  signal?: AbortSignal,
-  reader?: SqliteReadSnapshot
-): Promise<{ ok: boolean; rows: any[]; error?: string }> {
-  if (reader) return reader.query(sql);
-  const owned = new SqliteReadSnapshot(dbPath, signal);
-  try { return await owned.query(sql); } finally { await owned.close(); }
-}
-
 export async function discoverDatabaseFiles(
   geminiDir: string,
   dataDirectoryNames: readonly DataDirectoryName[],
@@ -226,47 +215,6 @@ export async function discoverDatabaseFiles(
 
   list.sort((a, b) => b.mtime - a.mtime);
   return { paths: list.slice(0, maxFiles).map(x => x.path), errors, discoveredCount: list.length };
-}
-
-export async function blobRows(
-  dbPath: string,
-  table: 'gen_metadata' | 'steps',
-  column: 'data' | 'metadata',
-  where: string,
-  onRows?: (rows: any[]) => void,
-  knownIndex?: any[],
-  signal?: AbortSignal,
-  reader?: SqliteReadSnapshot
-): Promise<{ ok: boolean; rows: any[]; error?: string }> {
-  const index = knownIndex ? { ok: true, rows: knownIndex } : await querySqlite(dbPath, `SELECT idx, length(${column}) as size FROM ${table} WHERE ${where} ORDER BY idx;`, signal, reader);
-  if (!index.ok) return index;
-  const result: any[] = [];
-  let batch: any[] = [], bytes = 0;
-  const flush = async () => {
-    signal?.throwIfAborted();
-    if (!batch.length) return;
-    const ids = batch.map(row => Number(row.idx)).filter(Number.isSafeInteger);
-    if (ids.length !== batch.length) throw new Error(bt('scanner.err.unsupported_row_index'));
-    const reply = await querySqlite(dbPath, `SELECT idx, length(${column}) as size, ${column} as data_blob FROM ${table} WHERE idx IN (${ids.join(',')}) ORDER BY idx;`, signal, reader);
-    if (!reply.ok) throw new Error(reply.error);
-    if (onRows) onRows(reply.rows); else result.push(...reply.rows);
-    batch = []; bytes = 0;
-  };
-  try {
-    for (const row of index.rows) {
-      if (row.size > 16777216) {
-        await flush();
-        const projected = reader ? await reader.projectBlob(table, column, Number(row.idx)) : null;
-        const value = projected?.ok ? projected.rows[0] : { ...row, data_hex: '' };
-        if (onRows) onRows([value]); else result.push(value); continue;
-      }
-      if (batch.length >= 200 || (bytes + row.size > 2 * 1024 * 1024 && batch.length)) await flush();
-      batch.push(row); bytes += Number(row.size) || 0;
-    }
-    await flush();
-    result.sort((a, b) => Number(a.idx) - Number(b.idx));
-    return { ok: true, rows: result };
-  } catch (error) { return { ok: false, rows: [], error: (error as Error).message }; }
 }
 
 export function isTransientSqliteReadError(message = ''): boolean {
@@ -461,6 +409,15 @@ async function scanDatabaseEventsOnce(ctx: UsageScanContext, dbPath: string, byp
   const excludedForkedGenIndices: number[] = [];
 
   const validTimestamp = (value: number) => Number.isSafeInteger(value) && value >= 946684800 && value <= Date.now() / 1000 + 86400;
+  const siblingModelIds = new Set<string>();
+  for (const row of workerScan.genRows) {
+    if (!row.data_blob || (row.size > 16 * 1024 * 1024 && !row.projected)) continue;
+    const blob = Buffer.from(row.data_blob.buffer, row.data_blob.byteOffset, row.data_blob.byteLength);
+    const wrapped = ProtobufReader.findField(blob, 1);
+    if (!wrapped) continue;
+    const mid = ProtobufReader.findString(wrapped, 19);
+    if (mid && mid.trim()) siblingModelIds.add(mid.trim());
+  }
   const pendingStepLinks: { event: GenerationEvent; indices: number[]; execution: Buffer | null; usage: Buffer }[] = [];
   for (const row of workerScan.genRows) {
     generationsScanned++;
@@ -519,7 +476,10 @@ async function scanDatabaseEventsOnce(ctx: UsageScanContext, dbPath: string, byp
     if (!validTimestamp(timestamp)) timestamp = 0;
 
     const modelEnum = ProtobufReader.findVarint(wrapped, 3) ?? ProtobufReader.findVarint(usage, 1) ?? null;
-    const assignedModel = resolveDatabaseModelFullName(modelId, label, modelEnum, { canonicalUnknown: true });
+    const assignedModel = resolveDatabaseModelFullName(modelId, label, modelEnum, {
+      canonicalUnknown: true,
+      ...(siblingModelIds.size > 0 ? { siblingModelIds } : {}),
+    });
     const lockModelKey = modelId || label || '未知模型';
 
     const observedCtx = ctx.lookupObservedContext(timestamp);

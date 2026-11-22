@@ -1,8 +1,15 @@
 export class IdempotencyStore {
   private map = new Map<string,{at:number;fingerprint:string;result?:any;waiters:((result:any)=>void)[]}>();
-  reserve(key:string,fingerprint:string,reply:(result:any)=>void) {
+  reserve(key:string,fingerprint:string,reply:(result:any)=>void,timeoutResult:unknown={ok:false,error:'Request timed out'}) {
     const now=Date.now();
-    for(const[k,v]of this.map)if((v.result!==undefined&&now-v.at>60000)||(v.result===undefined&&now-v.at>125000))this.map.delete(k);
+    for(const[k,v]of this.map){
+      if((v.result!==undefined&&now-v.at>60000)||(v.result===undefined&&now-v.at>125000)){
+        this.map.delete(k);
+        if(v.result===undefined&&v.waiters.length){
+          for(const waiter of v.waiters.splice(0))waiter(timeoutResult);
+        }
+      }
+    }
     const hit=this.map.get(key);
     if(hit){if(hit.fingerprint!==fingerprint)return 'conflict';if(hit.result!==undefined)reply(hit.result);else hit.waiters.push(reply);return 'waiting';}
     if(this.map.size>=200){

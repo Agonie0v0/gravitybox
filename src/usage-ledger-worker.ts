@@ -4,7 +4,14 @@ import { existsSync, lstatSync, readFileSync, writeFileSync, chmodSync, mkdirSyn
 import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import type { LedgerEvent } from './usage-ledger.js';
-import { aggregateLedger, isUnpricedZeroSentinel, ledgerEventPage } from './usage-aggregate.js';
+import {
+    aggregateLedger,
+    bumpAggregateModelCatalogEpoch,
+    invalidateAggregateIndexCache,
+    isUnpricedZeroSentinel,
+    ledgerEventPage,
+    safeRollback,
+} from './usage-aggregate.js';
 import { revalueLedger, writeRateLocksJsonMirror } from './usage-revalue.js';
 import {
     registerObservedIdeModels,
@@ -159,6 +166,7 @@ function syncWorkerObservedIdeModels(ledgerPath: string): void {
         }
         if (entries.length > 0) {
             registerObservedIdeModels(entries);
+            bumpAggregateModelCatalogEpoch();
         }
         cachedWorkerObservedIdeModels = {
             path: ideModelsPath,
@@ -178,6 +186,7 @@ function syncWorkerRemoteMetadata(ledgerPath: string): void {
         if (cachedWorkerRemoteMeta) {
             cachedWorkerRemoteMeta = null;
             resetAndRegisterRemoteModelMetadata({});
+            bumpAggregateModelCatalogEpoch();
         }
         return;
     }
@@ -209,6 +218,7 @@ function syncWorkerRemoteMetadata(ledgerPath: string): void {
           onlyNewEntries: isOlderDatedFeed,
           authoritativeSnapshot: !isOlderDatedFeed,
         });
+        bumpAggregateModelCatalogEpoch();
         cachedWorkerRemoteMeta = {
             path: remotePath,
             dev: stat.dev,
@@ -268,7 +278,7 @@ function ensureImportedLegacyRates(db: DatabaseSync, dbPath: string): void {
             db.exec('COMMIT');
         }
         catch (error) {
-            db.exec('ROLLBACK');
+            safeRollback(db);
             throw error;
         }
     }
@@ -296,7 +306,7 @@ function ensureImportedLegacyBaseline(db: DatabaseSync, dbPath: string, legacyPa
                 db.exec('COMMIT');
             }
             catch (error) {
-                db.exec('ROLLBACK');
+                safeRollback(db);
                 throw error;
             }
         }
@@ -563,7 +573,7 @@ function reconcileDuplicateLegacyAliases(db: DatabaseSync): void {
         db.prepare('INSERT OR REPLACE INTO ledger_maintenance VALUES(?,?)').run(DEDUP_MAINTENANCE_KEY, Date.now());
         db.exec('COMMIT');
     } catch (error) {
-        db.exec('ROLLBACK');
+        safeRollback(db);
         throw error;
     }
 }
@@ -719,7 +729,7 @@ function runRequest(payload: {
                 db.exec('COMMIT');
             }
             catch (error) {
-                db.exec('ROLLBACK');
+                safeRollback(db);
                 throw error;
             }
             try {
@@ -822,11 +832,12 @@ function runRequest(payload: {
                 }
                 db.exec('COMMIT');
             } catch (error) {
-                db.exec('ROLLBACK');
+                safeRollback(db);
                 throw error;
             }
 
             if (deleted > 0) {
+                invalidateAggregateIndexCache(getDbIdentity(path));
                 chmodSync(path, 0o600);
                 const ratesPath = join(dirname(path), 'usage-rate-locks.json');
                 if (existsSync(ratesPath)) {
@@ -841,6 +852,7 @@ function runRequest(payload: {
             reconcileDuplicateLegacyAliases(db);
             const revResult = revalueLedger(db, path, options);
             if (options?.action === 'apply' || options?.action === 'restore') {
+                invalidateAggregateIndexCache(getDbIdentity(path));
                 refreshImportedRatesStamp(path);
             }
             return revResult;
@@ -880,7 +892,7 @@ function runRequest(payload: {
                 db.exec('COMMIT');
             }
             catch (error) {
-                db.exec('ROLLBACK');
+                safeRollback(db);
                 throw error;
             }
             return { saved: Object.keys(options.entries).length };
@@ -888,7 +900,10 @@ function runRequest(payload: {
         if (operation === 'aggregate') {
             ensureImportedLegacyBaseline(db, path, legacyPath, legacyEvents);
             reconcileDuplicateLegacyAliases(db);
-            return { ...aggregateLedger(db, options), ledger_review_records: legacyEvents.filter(event => !event.source_id || isSyntheticRecoveredDb(event.db_file)).length };
+            return {
+                ...aggregateLedger(db, { ...options, cacheKey: getDbIdentity(path) }),
+                ledger_review_records: legacyEvents.filter(event => !event.source_id || isSyntheticRecoveredDb(event.db_file)).length,
+            };
         }
         reconcileDuplicateLegacyAliases(db);
         const eventList: LedgerEvent[] = Array.isArray(events) ? events : [];
@@ -1118,7 +1133,7 @@ function runRequest(payload: {
             db.exec('COMMIT');
         }
         catch (error) {
-            db.exec('ROLLBACK');
+            safeRollback(db);
             throw error;
         }
         chmodSync(path, 0o600);

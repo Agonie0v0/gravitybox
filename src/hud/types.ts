@@ -263,7 +263,7 @@ export interface ConversationHudMetrics {
     isFallbackCapacity?: boolean;
     /** 容量来源分类：explicit=数据库明确返回，reference=模型族参考阈值，unknown=未知模型默认参考 */
     capacitySource?: HudCapacitySource;
-    /** 当前上下文占有效容量比例 (0.0 ~ 1.0 夹紧值) */
+    /** 当前上下文占有效容量比例（原始比值，文本展示允许超过 1.0，图形绘制层夹紧至 0.0 ~ 1.0） */
     usedRatio: number;
     /** 上下文占比格式化 (如 "88%") */
     usedRatioFormatted: string;

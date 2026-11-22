@@ -1973,6 +1973,113 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
     assert.equal(typeof await main.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.state().scanCount', ctx.executionContextId), 'number');
     await main.evaluate('document.querySelector("#ssh-fixture-root").remove()');
   });
+  await check('P1-30 ~ P1-35 & P1-37: 弹窗项目名子元素保护、动态编辑器类名回退、监听不泄漏、相对时间防误译、2.34.0 模板与深扫保护', async () => {
+    const tree = await main.send('Page.getFrameTree');
+    const ctx = await main.send('Page.createIsolatedWorld', { frameId: tree.frameTree.frame.id, worldName: 'GRAVITYBOX-localization-v1' });
+
+    // P1-30: 弹窗内嵌套 span 项目按钮与 role="button" 项目控件保持原文
+    await main.evaluate(`(() => {
+      document.body.insertAdjacentHTML('beforeend',
+        '<div id="p1-runtime-probe">' +
+          '<div role="dialog" aria-label="Switch Project">' +
+            '<button id="p1-dlg-proj-btn"><span id="p1-dlg-proj-span">Settings</span></button>' +
+            '<div role="button" id="p1-dlg-proj-role"><span id="p1-dlg-proj-role-span">Settings</span></div>' +
+            '<button id="p1-dlg-normal-btn">Cancel</button>' +
+          '</div>' +
+          '<div id="p1-dyn-code" data-gravitybox-ui><button id="p1-dyn-code-btn">Settings</button></div>' +
+          '<div data-testid="quota-card"><button id="p1-quota-5h">5h</button><button id="p1-quota-7d">7d</button></div>' +
+          '<div data-testid="conversation-row-sidebar"><span id="p1-sidebar-rel">13m</span></div>' +
+          '<div data-gravitybox-ui>' +
+            '<p id="p1-sr-inline">In System Settings, click <strong>+</strong>, choose <strong>Antigravity</strong>, then turn it on.</p>' +
+            '<p id="p1-sr-relaunch">Relaunch Antigravity to finish Screen Recording.</p>' +
+            '<button id="p1-sub-more">Show 3 more subagents</button>' +
+            '<button id="p1-wrap-btn">Enable Word Wrap (Alt+Z)</button>' +
+            '<p id="p1-save-err">Failed to save settings: disk full</p>' +
+          '</div>' +
+          '<div data-message-id="p1-stream-msg" class="markdown"><p id="p1-stream-text">Settings</p></div>' +
+        '</div>'
+      );
+    })()`);
+
+    await until(async () => await text(main, '#p1-dlg-normal-btn') === '取消');
+    await until(async () => await text(main, '#p1-dyn-code-btn') === '设置');
+    await until(async () => await text(main, '#p1-sidebar-rel') === '13分钟前');
+    await until(async () => await text(main, '#p1-sr-relaunch') === '重新启动 Antigravity 以完成屏幕录制配置。');
+
+    // P1-30 断言（含增量修改子节点文本后仍保持英文）
+    assert.equal(await text(main, '#p1-dlg-proj-span'), 'Settings');
+    assert.equal(await text(main, '#p1-dlg-proj-role-span'), 'Settings');
+    await main.evaluate('document.querySelector("#p1-dlg-proj-span").textContent = "Settings"');
+    await new Promise(resolve => setTimeout(resolve, 120));
+    assert.equal(await text(main, '#p1-dlg-proj-span'), 'Settings');
+
+    // P1-31: 动态添加 .monaco-editor 后必须触发 reconcile 还原英文
+    await main.evaluate('document.querySelector("#p1-dyn-code").classList.add("monaco-editor")');
+    await until(async () => await text(main, '#p1-dyn-code-btn') === 'Settings');
+    await main.evaluate('document.querySelector("#p1-dyn-code").classList.remove("monaco-editor"); document.querySelector("#p1-dyn-code").classList.add("xterm")');
+    await new Promise(resolve => setTimeout(resolve, 120));
+    assert.equal(await text(main, '#p1-dyn-code-btn'), 'Settings');
+
+    // P1-33: 配额区域 5h / 7d 不被误译为 "5小时前" / "7天前"，侧边栏 13m 与 #time-badge 仍正常
+    assert.equal(await text(main, '#p1-quota-5h'), '5h');
+    assert.equal(await text(main, '#p1-quota-7d'), '7d');
+    assert.equal(await text(main, '#p1-sidebar-rel'), '13分钟前');
+    assert.equal(await text(main, '#time-badge'), '5天前');
+
+    // P1-34: 2.34.0 新增内联与动态模板全部准确汉化
+    assert.equal(await text(main, '#p1-sr-inline'), '请在系统设置中点击 +，选择 Antigravity，然后开启它。');
+    assert.equal(await text(main, '#p1-sub-more'), '显示另外 3 个子智能体');
+    assert.equal(await text(main, '#p1-wrap-btn'), '开启自动换行 (Alt+Z)');
+    assert.equal(await text(main, '#p1-save-err'), '保存设置失败：disk full');
+
+    // P1-35: 流式受保护正文高频更新保持英文且不触发多余扫描错误
+    const beforeScan = await main.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.state().scanCount', ctx.executionContextId);
+    await main.evaluate(`(() => {
+      const p = document.querySelector('#p1-stream-text');
+      for (let i = 0; i < 20; i++) p.textContent = 'Settings chunk ' + i;
+    })()`);
+    await new Promise(resolve => setTimeout(resolve, 120));
+    const afterScan = await main.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.state().scanCount', ctx.executionContextId);
+    assert.equal(await text(main, '#p1-stream-text'), 'Settings chunk 19');
+    assert.ok(afterScan - beforeScan <= 2, `受保护流式正文变更不应高频触发 flush（scanCount 增量=${afterScan - beforeScan}）`);
+
+    // P1-32: 重复注入引擎脚本不重复注册 focus 监听器
+    await main.send('Page.bringToFront');
+    const engineCode = await readFile(join(root, 'runtime/engine.js'), 'utf8');
+    await main.evaluate(`(() => {
+      globalThis.__p1FocusOrig = globalThis.__gravityboxWindowFocus;
+      globalThis.__p1FocusCalls = 0;
+      globalThis.__gravityboxWindowFocus = (...args) => { globalThis.__p1FocusCalls++; return globalThis.__p1FocusOrig?.(...args); };
+    })()`, ctx.executionContextId);
+    await main.evaluate(engineCode, ctx.executionContextId);
+    await main.evaluate(engineCode, ctx.executionContextId);
+    await main.evaluate('window.dispatchEvent(new Event("focus"))', ctx.executionContextId);
+    const focusCalls = await main.evaluate(`(() => {
+      const n = globalThis.__p1FocusCalls;
+      globalThis.__gravityboxWindowFocus = globalThis.__p1FocusOrig;
+      delete globalThis.__p1FocusOrig;
+      delete globalThis.__p1FocusCalls;
+      return n;
+    })()`, ctx.executionContextId);
+    assert.equal(focusCalls, 1, `重复注入后单次 focus 事件仅应触发 1 次回调，实际 ${focusCalls}`);
+
+    // P1-37: deepScan editorHash 覆盖 contenteditable="plaintext-only"
+    const savedInputVal = await main.evaluate('document.querySelector("#input").value');
+    await main.evaluate(`(() => {
+      document.querySelector("#p1-runtime-probe")?.remove();
+      document.querySelector("#input").value = "";
+      document.body.insertAdjacentHTML("beforeend", '<div id="p1-plain-ed" contenteditable="plaintext-only"></div>');
+    })()`);
+    const beginRes = await main.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.deepScan.begin([])', ctx.executionContextId);
+    assert.equal(beginRes.ok, true, JSON.stringify(beginRes));
+    await main.evaluate('document.querySelector("#p1-plain-ed").textContent = "user typed"');
+    const finishRes = await main.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.deepScan.finish()', ctx.executionContextId);
+    assert.equal(finishRes.editorsMatch, false, 'plaintext-only 编辑区内容变化必须被 editorHash 检测到');
+    await main.evaluate(`(() => {
+      document.querySelector("#p1-plain-ed")?.remove();
+      document.querySelector("#input").value = ${JSON.stringify(savedInputVal)};
+    })()`);
+  });
   const resources = (await execute('/bin/ps', ['-p', String(backend.pid), '-o', 'rss=,%cpu=,time='])).stdout.trim();
   const finalStatus = await status();
   const finalHeap = await main.send('Runtime.getHeapUsage');

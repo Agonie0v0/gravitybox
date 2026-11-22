@@ -263,8 +263,11 @@ export class CdpHudBridge implements ICdpHudBridge {
     if (parsed.type === 'SESSION_DETACHED') {
       if (!existing || revision !== existing.sessionRevision || conversationId !== existing.conversationId) return;
       this.activePanes.delete(paneKey);
+      this.pendingPaneRefreshForce.delete(paneKey);
       if (paneSlotId === cascadeId) {
-        this.activePanes.delete(`${targetId}::${cascadeId}`);
+        const legacyKey = `${targetId}::${cascadeId}`;
+        this.activePanes.delete(legacyKey);
+        this.pendingPaneRefreshForce.delete(legacyKey);
       }
       return;
     }
@@ -603,14 +606,35 @@ export class CdpHudBridge implements ICdpHudBridge {
 
     const allSummaries = trajectoriesRes.ok ? trajectoriesRes.data : [];
     const mainSummary = allSummaries.find(s => s.cascadeId === session.conversationId) ?? null;
-    const childIdSet = new Set<string>(session.childConversationIds);
-    for (const sum of allSummaries) {
+    const summaryById = new Map(allSummaries.map(s => [s.cascadeId, s]));
+    const childIdSet = new Set<string>();
+    const lineageIds = new Set<string>([session.conversationId]);
+    let expanded = true;
+    while (expanded) {
+      expanded = false;
+      for (const sum of allSummaries) {
+        if (childIdSet.has(sum.cascadeId) || sum.cascadeId === session.conversationId) continue;
+        if (!isStrictSubagentSummary(sum.cascadeId, sum)) continue;
+        if (
+          (sum.parentConversationId && lineageIds.has(sum.parentConversationId)) ||
+          (sum.rootConversationId && lineageIds.has(sum.rootConversationId))
+        ) {
+          childIdSet.add(sum.cascadeId);
+          lineageIds.add(sum.cascadeId);
+          expanded = true;
+        }
+      }
+    }
+    for (const hintId of session.childConversationIds) {
+      if (!hintId || hintId === session.conversationId || childIdSet.has(hintId)) continue;
+      const cSum = summaryById.get(hintId);
       if (
-        isStrictSubagentSummary(sum.cascadeId, sum) &&
-        (sum.parentConversationId === session.conversationId ||
-          sum.rootConversationId === session.conversationId)
+        cSum &&
+        isStrictSubagentSummary(cSum.cascadeId, cSum) &&
+        ((cSum.parentConversationId && lineageIds.has(cSum.parentConversationId)) ||
+          (cSum.rootConversationId && lineageIds.has(cSum.rootConversationId)))
       ) {
-        childIdSet.add(sum.cascadeId);
+        childIdSet.add(cSum.cascadeId);
       }
     }
     childIdSet.delete(session.conversationId);
@@ -833,7 +857,8 @@ export class CdpHudBridge implements ICdpHudBridge {
 
     for (const [paneKey, pane] of this.activePanes.entries()) {
       const target = this.targets.get(pane.targetId);
-      if (target?.sourceKind === 'remote') {
+      if (!target) continue;
+      if (target.sourceKind === 'remote') {
         const list = remotePaneKeysByTarget.get(pane.targetId) ?? [];
         list.push(paneKey);
         remotePaneKeysByTarget.set(pane.targetId, list);

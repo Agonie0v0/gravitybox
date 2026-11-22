@@ -430,9 +430,6 @@ final class UsageTrendChartView: NSView {
             startRevealAnimation()
         }
     }
-    var subtitle: String = L10n.t("component.chart.recent_distribution", fallback: "近期消耗分布") {
-        didSet { needsDisplay = true }
-    }
     private var hoverTrackingArea: NSTrackingArea?
     private var hoveredIndex: Int? = nil {
         didSet {
@@ -972,7 +969,8 @@ final class ModelDonutChartView: NSView {
             let hSlice = validSlices[hIdx]
             activeUsd = hSlice.usd
             let pct = Int(round((hSlice.usd / sumUsd) * 100.0))
-            subLabelString = L10n.t("component.donut.share_pct", ["pct": pct], fallback: "占比 \(pct)%")
+            let pctText = (hSlice.usd > 0 && pct == 0) ? "<1" : "\(pct)"
+            subLabelString = L10n.t("component.donut.share_pct", ["pct": pctText], fallback: "占比 \(pctText)%")
         } else {
             activeUsd = totalUsd
             subLabelString = L10n.t("component.donut.equivalent_bill", fallback: "等效账单")

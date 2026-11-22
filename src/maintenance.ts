@@ -43,6 +43,17 @@ import {
 
 export * from './maintenance-catalog.js';
 
+const FORBIDDEN_MAINTENANCE_SEGMENTS = new Set([
+  'User',
+  'Cookies',
+  'Local Storage',
+  'Session Storage',
+  'WebStorage',
+  'Network Persistent State',
+  'conversation_summaries.db',
+  'state.vscdb',
+]);
+
 function isTrashPermissionError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
   return code === 'EPERM' || code === 'EACCES';
@@ -778,8 +789,7 @@ export class CacheMaintenance {
       for (const sub of row.subTargets) {
         if (!this.isAllowedTargetPath(sub.path)) throw Error(bt('maintenance.err.clear_out_of_bounds'));
         const resolvedSub = resolve(sub.path);
-        const forbiddenSegments = new Set(['User', 'Cookies', 'Local Storage', 'Session Storage', 'WebStorage', 'Network Persistent State', 'conversation_summaries.db', 'state.vscdb']);
-        if (resolvedSub.split(sep).some(seg => forbiddenSegments.has(seg))) {
+        if (resolvedSub.split(sep).some(seg => FORBIDDEN_MAINTENANCE_SEGMENTS.has(seg))) {
           throw Error(bt('maintenance.err.protected_path_hit'));
         }
         const to = row.isSingleLegacyRoot
@@ -1097,6 +1107,9 @@ export class CacheMaintenance {
             throw Error(bt('maintenance.err.snapshot_out_of_bounds'));
           }
           const normFrom = resolve(fromPath);
+          if (normFrom.split(sep).some(seg => FORBIDDEN_MAINTENANCE_SEGMENTS.has(seg))) {
+            throw Error(bt('maintenance.err.protected_path_hit'));
+          }
           const normTo = resolve(toPath);
           if (seenFromPaths.has(normFrom) || seenToPaths.has(normTo)) {
             throw Error(bt('maintenance.err.duplicate_item', { name: entryName }));

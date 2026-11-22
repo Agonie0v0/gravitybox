@@ -8,6 +8,7 @@ import {
 } from './usage-aggregate.js';
 import { matchPricingKeys, priceStatus, type ApiPricing, type ApiPricingEntry } from './pricing.js';
 import { bt } from './i18n.js';
+import { cleanHostLabel } from './ssh-context.js';
 import {
   normalizeEventEnvironment,
   resolveDatabaseModelFullName,
@@ -313,9 +314,10 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
   for (const ev of allEvents) {
     const evEnv = normalizeEventEnvironment(ev);
     if (evEnv.kind === 'ssh') {
+      const cleanedLabel = cleanHostLabel(evEnv.label) || evEnv.label;
       const prevLabel = allSshEnvsSeen.get(evEnv.id);
-      if (!prevLabel || (prevLabel === evEnv.id && evEnv.label !== evEnv.id)) {
-        allSshEnvsSeen.set(evEnv.id, evEnv.label);
+      if (!prevLabel || (prevLabel === evEnv.id && cleanedLabel !== evEnv.id)) {
+        allSshEnvsSeen.set(evEnv.id, cleanedLabel);
       }
     }
     const envHit = selectedEnvId === 'all' || evEnv.id === selectedEnvId;
@@ -363,9 +365,10 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
   for (const ev of orderedEvents) {
     const evEnv = normalizeEventEnvironment(ev);
     if (evEnv.kind === 'ssh') {
+      const cleanedLabel = cleanHostLabel(evEnv.label) || evEnv.label;
       const prevLabel = allSshEnvsSeen.get(evEnv.id);
-      if (!prevLabel || (prevLabel === evEnv.id && evEnv.label !== evEnv.id)) {
-        allSshEnvsSeen.set(evEnv.id, evEnv.label);
+      if (!prevLabel || (prevLabel === evEnv.id && cleanedLabel !== evEnv.id)) {
+        allSshEnvsSeen.set(evEnv.id, cleanedLabel);
       }
     }
     const modelName = resolveDatabaseModelFullName(ev.model, null);

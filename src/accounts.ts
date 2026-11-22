@@ -1,5 +1,6 @@
 import { applicationTarget, type ApplicationTarget } from './application-target.js';
 import { bt } from './i18n.js';
+import { resolveOutboundFetch } from './proxy.js';
 import { inspectBundle } from './discovery.js';
 import { readFileSync, statSync } from 'node:fs';
 import { lstat, mkdir, readFile, readdir, unlink } from 'node:fs/promises';
@@ -646,6 +647,84 @@ export class AccountsManager {
   }
 
   /**
+   * 从在线 SSH 会话只读探测结果安全回写本机已保存账号的配额展示快照与订阅等级：
+   * 绝不触碰 token、备注、排序等字段；仅当远端配额模型非空且时间更新鲜（或存在陈旧报错需清除）时落盘。
+   */
+  async syncRemoteObservedQuota(
+    accountId: string,
+    remoteQuota: QuotaData | null | undefined,
+    tier?: string | null
+  ): Promise<Account | null> {
+    const id = String(accountId || '').trim();
+    if (!id || !/^[a-zA-Z0-9_-]+$/.test(id) || !remoteQuota || !Array.isArray(remoteQuota.models) || remoteQuota.models.length === 0) {
+      return null;
+    }
+    await this.init();
+    return this.withWriteLock(async () => {
+      const diskAccount = await this.getAccount(id);
+      if (!diskAccount) return null;
+      const diskStamp = Number(diskAccount.quota?.last_updated ?? 0);
+      const remoteStamp = Number(remoteQuota.last_updated ?? 0);
+      const hasDiskQuota = Boolean(
+        diskAccount.quota && Array.isArray(diskAccount.quota.models) && diskAccount.quota.models.length > 0
+      );
+      if (hasDiskQuota && remoteStamp > 0 && remoteStamp < diskStamp) {
+        return diskAccount;
+      }
+      const hasErrorToClear = Boolean(diskAccount.quota_refresh_error || diskAccount.quota_refresh_error_code);
+      if (hasDiskQuota && remoteStamp > 0 && remoteStamp === diskStamp && !hasErrorToClear) {
+        return diskAccount;
+      }
+
+      const nextTier =
+        typeof tier === 'string' && tier.trim()
+          ? tier.trim()
+          : (remoteQuota.subscription_tier ?? diskAccount.quota?.subscription_tier ?? null);
+      const mergedQuota: QuotaData = {
+        ...remoteQuota,
+        ...(nextTier ? { subscription_tier: nextTier } : {}),
+      };
+      const toSave: Account = {
+        ...diskAccount,
+        quota: mergedQuota,
+        quota_refresh_error: null,
+        quota_refresh_error_code: null,
+      };
+      const accountPath = join(this.accountsDir, `${id}.json`);
+      const index = await this.loadIndex();
+      const summary: AccountSummary = {
+        id: toSave.id,
+        email: toSave.email,
+        name: toSave.name,
+        disabled: toSave.disabled,
+        disabled_reason: toSave.disabled_reason,
+        disabled_at: toSave.disabled_at,
+        protected_models: toSave.protected_models ?? [],
+        created_at: toSave.created_at,
+        last_used: toSave.last_used,
+        custom_label: toSave.custom_label,
+        quota: toSave.quota,
+        quota_refresh_error: null,
+        quota_refresh_error_code: null,
+        revision: computeAccountRevision(toSave),
+        quota_last_updated: toSave.quota?.last_updated ?? 0,
+      };
+      const existingIdx = index.accounts.findIndex(a => a.id === id);
+      if (existingIdx >= 0) {
+        index.accounts[existingIdx] = summary;
+      } else {
+        index.accounts.unshift(summary);
+      }
+      await commitAccountAndIndex(accountPath, toSave, this.indexPath, index);
+      this.indexCache = null;
+      this.accountCache.delete(id);
+      const nextDigest = createHash('sha256').update(await readFile(accountPath)).digest('hex');
+      this.accountFileDigests.set(toSave, nextDigest);
+      return toSave;
+    });
+  }
+
+  /**
    * 原子读-改-写：在锁内读取最新账号数据，执行 mutator，然后落盘更新，
    * 彻底杜绝先读出旧快照、再覆盖期间并发更新（如配额刷新）的 Lost Update 问题。
    */
@@ -1268,14 +1347,15 @@ export class AccountsManager {
     if (fetchImpl === globalThis.fetch && (!clientId || !clientSecret)) {
       throw new CodedAccountError('missing_oauth_client', bt('oauth.err.missing_client'));
     }
-    const tokenReply = await fetchImpl('https://oauth2.googleapis.com/token', {
+    const outboundFetch = resolveOutboundFetch(fetchImpl);
+    const tokenReply = await outboundFetch('https://oauth2.googleapis.com/token', {
       method: 'POST', signal: AbortSignal.timeout(6000), headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }).toString(),
     }).catch(() => { throw new CodedAccountError('token_network', bt('accounts.err.token_network')); });
     if (!tokenReply.ok) throw new CodedAccountError('token_invalid', bt('accounts.err.token_invalid'));
     const token: any = await tokenReply.json();
     if (typeof token.access_token !== 'string' || !token.access_token) throw new CodedAccountError('token_no_access', bt('accounts.err.token_no_access'));
-    const identityReply = await fetchImpl('https://www.googleapis.com/oauth2/v2/userinfo', {
+    const identityReply = await outboundFetch('https://www.googleapis.com/oauth2/v2/userinfo', {
       headers: { Authorization: `Bearer ${token.access_token}` }, signal: AbortSignal.timeout(6000),
     }).catch(() => { throw new CodedAccountError('identity_verify_failed', bt('accounts.err.identity_verify_failed')); });
     if (!identityReply.ok) throw new CodedAccountError('identity_verify_failed', bt('accounts.err.identity_verify_failed'));
@@ -1286,7 +1366,8 @@ export class AccountsManager {
   }
 
   async addAccountFromOAuth(token: { access_token: string; refresh_token: string; expires_in?: number; id_token?: string }, signal: AbortSignal, fetchImpl: typeof fetch = globalThis.fetch): Promise<void> {
-    const reply = await fetchImpl('https://www.googleapis.com/oauth2/v2/userinfo', {
+    const outboundFetch = resolveOutboundFetch(fetchImpl);
+    const reply = await outboundFetch('https://www.googleapis.com/oauth2/v2/userinfo', {
       headers: { Authorization: `Bearer ${token.access_token}` }, signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]),
     });
     if (!reply.ok) throw new CodedAccountError('oauth_verify_failed', bt('accounts.err.oauth_verify_failed'));
@@ -1303,10 +1384,10 @@ export class AccountsManager {
     return this.withWriteLock(async () => {
       const index = await this.loadIndex();
       const summary = index.accounts.find(item => item.id === id);
-      const existing = await this.getAccount(id);
+      const existing = await this.getAccount(id).catch(() => null);
       const email = existing?.email ?? summary?.email ?? '';
       const accountPath = join(this.accountsDir, `${id}.json`);
-      const tombstones = (await this.loadTombstones()).filter(item => item.id !== id && item.email.toLowerCase() !== email.toLowerCase());
+      const tombstones = (await this.loadTombstones()).filter(item => item.id !== id && (!email || item.email.toLowerCase() !== email.toLowerCase()));
       if (summary || existing) tombstones.push({ id, email, at: Math.floor(Date.now()/1000) });
       index.accounts = index.accounts.filter(a => a.id !== id);
       if (index.current_account_id === id) index.current_account_id = null;
@@ -1314,20 +1395,25 @@ export class AccountsManager {
       if (original !== null) {
         const removedDir = join(this.stateDir, 'accounts-removed');
         await mkdir(removedDir, { recursive: true, mode: 0o700 });
-        const parsedOriginal = JSON.parse(original);
-        const redactedAccount = parsedOriginal && typeof parsedOriginal === 'object'
-          ? {
-              ...parsedOriginal,
-              token: parsedOriginal.token && typeof parsedOriginal.token === 'object'
-                ? {
-                    redacted: true,
-                    email: parsedOriginal.token.email ?? null,
-                    project_id: parsedOriginal.token.project_id ?? null,
-                    token_type: parsedOriginal.token.token_type ?? null,
-                  }
-                : undefined,
-            }
-          : null;
+        let redactedAccount: Record<string, unknown> | null = null;
+        try {
+          const parsedOriginal = JSON.parse(sanitizeJsonString(Buffer.from(original, 'utf8')));
+          redactedAccount = parsedOriginal && typeof parsedOriginal === 'object'
+            ? {
+                ...parsedOriginal,
+                token: parsedOriginal.token && typeof parsedOriginal.token === 'object'
+                  ? {
+                      redacted: true,
+                      email: parsedOriginal.token.email ?? null,
+                      project_id: parsedOriginal.token.project_id ?? null,
+                      token_type: parsedOriginal.token.token_type ?? null,
+                    }
+                  : undefined,
+              }
+            : null;
+        } catch {
+          redactedAccount = { parseError: true, redacted: true };
+        }
         await atomicJson(join(removedDir, `${id}-${Date.now()}.json`), {
           schema: 1, removedAt: new Date().toISOString(), account: redactedAccount,
         });
@@ -2551,9 +2637,11 @@ export class AccountsManager {
         : new Map<string, string>();
       const userStatusB64 = extractTopicDataString(stateRows.get('antigravityUnifiedStateSync.userStatus'));
       if (userStatusB64) {
-        const buf = decodeTopicRow(userStatusB64, 'userStatusSentinelKey');
-        const email = buf ? ProtobufReader.findString(buf, 7) : null;
-        if (email && /^[^\s@]+@[^\s@]+$/.test(email)) detected = email;
+        try {
+          const buf = decodeTopicRow(userStatusB64, 'userStatusSentinelKey');
+          const email = buf ? ProtobufReader.findString(buf, 7) : null;
+          if (email && /^[^\s@]+@[^\s@]+$/.test(email)) detected = email;
+        } catch {}
       }
       if (!detected) {
         const authStatusRaw = stateRows.get('antigravityAuthStatus');

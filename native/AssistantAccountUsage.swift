@@ -86,6 +86,9 @@ extension Assistant {
             usageRemoteSyncRevisionByPeriod[p] = statusValue.remoteSyncRevision
             usageFetchErrorsByPeriod[p] = nil
             bootstrappedUsagePeriods.remove(p)
+            if p == "today" {
+                syncUsageEnvironmentsFromReport(item)
+            }
         }
     }
 
@@ -167,6 +170,7 @@ extension Assistant {
                 var cleanValue = value
                 cleanValue.removeValue(forKey: "periods")
                 self.cachedUsageReportsByPeriod[cacheKey] = cleanValue
+                self.syncUsageEnvironmentsFromReport(cleanValue)
                 resolvedResponse = .success(cleanValue)
                 if isDefaultAllFilter {
                     self.scheduleUIBootstrapSave()
@@ -191,6 +195,9 @@ extension Assistant {
                 }
                 if force && self.contentVisible && self.currentPage == 2 {
                     self.usagePage?.update(force: false)
+                }
+                if force && isDefaultAllFilter && period == "today" && self.contentVisible && self.currentPage == 0 {
+                    self.overview?.update(force: false)
                 }
             }
             if resolvedAcc == "all" {
@@ -237,6 +244,9 @@ extension Assistant {
                 }
                 if let globalErr = self.quotaRefreshError, !InterfaceText.isMultiAccountSummary(globalErr) {
                     self.quotaRefreshError = nil
+                }
+                if value["environments"] != nil || value["remoteSessions"] != nil {
+                    self.syncEnvironmentsFromPayload(value, notifyUI: false)
                 }
                 if var updated = value["account"] as? [String: Any] {
                     if updated["id"] == nil { updated["id"] = id }
@@ -337,7 +347,7 @@ extension Assistant {
         }
         if menuTracking || isMenuPanelShown {
             let periodKey = menuPanelController.map { MenuPanelController.periods[$0.selectedPeriod] } ?? "today"
-            let envId = menuPanelController?.selectedEnvironmentId ?? "all"
+            let envId = menuPanelController?.selectedEnvironmentId ?? usageFilterScope.rawEnvironmentId
             fetchUsageSummary(period: periodKey, environmentId: envId, force: true, allowCached: false)
             menuPanelController?.syncFromAssistant()
         }
@@ -430,10 +440,25 @@ extension Assistant {
             }
             let sshCount = payload["activeSshWindowsCount"] as? Int ?? 0
             let sshHostsList = payload["activeSshHosts"] as? [String] ?? []
-            let sshHostsSummary = sshHostsList.isEmpty ? "SSH" : sshHostsList.joined(separator: L10n.shared.isEnglish ? ", " : "、")
-            let sshWarningSuffix = sshCount > 0
+            let sep = L10n.shared.isEnglish ? ", " : "、"
+            let sshHostsSummary = sshHostsList.isEmpty ? "SSH" : sshHostsList.joined(separator: sep)
+            var sshWarningSuffix = sshCount > 0
                 ? "\n\n" + L10n.t("ssh.preflight.active_windows_warning", ["count": sshCount, "hosts": sshHostsSummary])
                 : ""
+            let sharedRemoteHosts = SshEnvironmentResolver.matchingHosts(
+                forAccount: ["id": id, "email": email],
+                hosts: self.canonicalRemoteHosts()
+            ).filter { $0.state.isOnlineOrAuthExpired }
+            if !sharedRemoteHosts.isEmpty {
+                let sharedHostsSummary = sharedRemoteHosts.map(\.hostLabel).joined(separator: sep)
+                sshWarningSuffix += "\n\n" + L10n.t(
+                    "accounts.ssh.shared_switch_confirm_note",
+                    ["hosts": sharedHostsSummary],
+                    fallback: L10n.shared.isEnglish
+                        ? "Note: This account is also active on SSH host(s) (\(sharedHostsSummary)). Switching locally won't alter remote logins, though SSH windows will briefly disconnect during restart."
+                        : "提示：该账号当前也正在 SSH 主机（\(sharedHostsSummary)）上使用；切换本机账号不会修改远端登录态，但本机重启期间 SSH 窗口会暂时断连。"
+                )
+            }
             if hasRunningTask {
                 #if NATIVE_UI_TEST
                 if self.confirmSwitchForTesting != nil {
@@ -548,6 +573,9 @@ extension Assistant {
             self.accountListPendingNotifyPage = false
             if case .success(let val) = res, generation >= self.accountListGeneration, let list = val["accounts"] as? [[String: Any]] {
                 self.bootstrappedAccounts = false
+                if val["environments"] != nil || val["environmentsRevision"] != nil || val["focusedEnvironmentId"] != nil {
+                    self.syncEnvironmentsFromPayload(val, notifyUI: false)
+                }
                 self.cachedAccountsBootstrapPayload = val
                 if self.statusValue.accountsRevision == requestRevision {
                     self.lastFetchedAccountsRevision = requestRevision

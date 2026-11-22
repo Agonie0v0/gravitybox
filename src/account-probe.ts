@@ -17,9 +17,11 @@ import {
   normalizeLiveGroups,
   normalizeLiveModels,
   resolveModelsWithGroupDescriptions,
+  type Family,
 } from './quota.js';
 import type { LiveLanguageServerStatus, ModelQuota, QuotaData, QuotaGroup } from './accounts.js';
 import { groupToQuotaGroup, modelQuotaFromNormalized } from './account-quota.js';
+import { sanitizeFallbackTierLabel } from './pricing.js';
 import { bt } from './i18n.js';
 
 const execFileAsync = promisify(execFile);
@@ -392,6 +394,21 @@ export function resolveProbeSubscriptionTier(
     const resolved = classifySubscriptionTierCandidate(candidate);
     if (resolved) return resolved;
   }
+  const rawFallbackCandidates = isEnterpriseVertex
+    ? primaryCandidates
+    : [
+        userStatus.userTier?.id,
+        userStatus.userTier?.name,
+        userStatus.g1Tier,
+        userStatus.g1_tier,
+        userStatus.paidTier?.id,
+        userStatus.paidTier?.name,
+        ...fallbackCandidates,
+      ];
+  for (const candidate of rawFallbackCandidates) {
+    const cleaned = sanitizeFallbackTierLabel(candidate);
+    if (cleaned) return cleaned;
+  }
   return '';
 }
 
@@ -453,11 +470,20 @@ export function buildLiveProbeResultFromRpc(
     const isIgnoredStandalone = (family: 'gemini' | 'claude' | 'argon' | 'carbon'): boolean =>
       (family === 'argon' && (liveArgon.mode === 'unified' || liveArgon.mode === 'disabled'))
       || (family === 'carbon' && (liveCarbon.mode === 'unified' || liveCarbon.mode === 'disabled'));
-    const missingFamilies = (['gemini', 'claude', 'argon', 'carbon'] as const).filter(family =>
+    const missingFamilies: Family[] = (['gemini', 'claude', 'argon', 'carbon'] as const).filter(family =>
       !isIgnoredStandalone(family)
       && models.some(model => model.family === family && !isExcludedFromStandaloneModelPool(model))
       && !groups.some(group => group.family === family && group.buckets.some(bucket => bucket.disabled !== true && bucket.remaining_fraction_known))
       && !((family === 'argon' || family === 'carbon') && models.some(m => m.family === family && !isExcludedFromStandaloneModelPool(m) && m.own_percentage_known && !m.own_stale)));
+    const hasMissingExplicitOther = models.some(model =>
+      model.family === 'other'
+      && !isExcludedFromStandaloneModelPool(model)
+      && Boolean(model.quota_bucket_name && model.quota_bucket_name.trim())
+      && (!model.own_percentage_known || model.own_stale)
+    ) && !groups.some(group => group.family === 'other' && group.buckets.some(bucket => bucket.disabled !== true && bucket.remaining_fraction_known));
+    if (hasMissingExplicitOther) {
+      missingFamilies.push('other');
+    }
     const quotaData: QuotaData = {
       models: applied.map(mappers.modelQuotaFromNormalized),
       quota_groups: groups.map(mappers.groupToQuotaGroup),

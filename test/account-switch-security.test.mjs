@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promis
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import { promisify } from 'node:util';
 import { AccountSwitchService, DatabaseTransaction } from '../dist/account-switch.js';
 import { AccountsManager, MockKeychainAdapter } from '../dist/accounts.js';
@@ -507,6 +508,48 @@ test('v1.1.3 Issue #19 & 合规切号: 同源 agy CLI 凭据非侵入同步、�
       assert.equal(restored.token.email, 'cli-a@example.test', `中断恢复后 ${cliPath} 也必须对称还原为账号 A`);
       assert.equal(restored.token.refresh_token, '1//refresh-cli-a');
     }
+  } finally {
+    await rm(env.root, { recursive: true, force: true });
+  }
+});
+
+test('P1-42: 切号归档与回滚日志采用白名单脱敏，agentManagerInitState 等非白名单行全部脱敏为 [REDACTED_STATE_ROW]', async () => {
+  const env = await setupSandbox();
+  try {
+    const dbPath = join(env.profile, 'User', 'globalStorage', 'state.vscdb');
+    const initDb = new DatabaseSync(dbPath);
+    try {
+      initDb.prepare('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)').run(
+        'jetskiStateSync.agentManagerInitState',
+        'sensitive-init-state-payload'
+      );
+      initDb.prepare('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)').run(
+        'antigravityOnboarding',
+        'true'
+      );
+    } finally {
+      initDb.close();
+    }
+
+    const acc = await env.manager.upsertAccount(makeAccount('acc-wl', 'whitelist-redact@example.invalid'));
+    const service = new AccountSwitchService(env.manager, {
+      stateDir: env.stateDir,
+      profile: env.profile,
+      keychain: env.keychain,
+      isRunning: async () => false,
+    });
+    await service.switchAccount(acc.id);
+    await service.rollback();
+
+    const journalPath = join(env.stateDir, 'account-switch-journal-stable.json');
+    const raw = await readFile(journalPath, 'utf8');
+    const journal = JSON.parse(raw);
+    assert.equal(journal.status, 'rolled-back');
+    assert.equal(raw.includes('sensitive-init-state-payload'), false, '归档/回滚日志绝不能保留 agentManagerInitState 明文');
+    assert.equal(journal.before['jetskiStateSync.agentManagerInitState'], '[REDACTED_STATE_ROW]');
+    assert.equal(journal.before['antigravityOnboarding'], 'true');
+    assert.equal(journal.after['antigravityUnifiedStateSync.oauthToken'], '[REDACTED_OAUTH_TOKEN]');
+    assert.equal(journal.after['antigravityUnifiedStateSync.userStatus'], '[REDACTED_STATE_ROW]');
   } finally {
     await rm(env.root, { recursive: true, force: true });
   }

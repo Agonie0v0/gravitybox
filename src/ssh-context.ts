@@ -17,6 +17,7 @@ export interface RemoteWindowIdentity {
   hostLabel: string;
   origin: string;
   browserContextId?: string;
+  machineId?: string;
   verifiedBy: 'process' | 'process+log';
 }
 
@@ -61,6 +62,16 @@ export function sanitizeHostLabel(raw: unknown): string {
   const cleaned = raw.replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!cleaned) return '';
   return cleaned.slice(0, 256);
+}
+
+/**
+ * 清洗主机显示名为纯主机名（剥离 UI 层可能拼接的 `SSH:` / `SSH · ` 前缀并规整空白）。
+ */
+export function cleanHostLabel(raw: unknown): string {
+  const sanitized = sanitizeHostLabel(raw);
+  if (!sanitized) return '';
+  const stripped = sanitized.replace(/^(?:SSH\s*(?:[:·]|-\s)\s*)+/i, '').trim();
+  return stripped.slice(0, 256);
 }
 
 /**
@@ -317,7 +328,7 @@ export async function verifyRemotePageWindow(params: {
     return { status: 'rejected', reason: 'no_active_ssh_tunnel' };
   }
 
-  const hostLabel = sanitizeHostLabel(probe.currentHost) || 'SSH Host';
+  const hostLabel = cleanHostLabel(probe.currentHost) || 'SSH Host';
   const origin = parsedUrl.origin;
   const logMatched = await matchMainLogRemotePort(parsedUrl.port, hostLabel, {
     logPath: params.deps?.logPath,

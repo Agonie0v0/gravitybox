@@ -722,3 +722,76 @@ test('HUD resolveModelCapacity 对未入库 -tiered-high 动态模型与 enum �
   assert.equal(byStr.modelId, byEnum.modelId, '字符串解析与占位符枚举解析必须得出一致 modelId');
   assert.equal(byStr.capacityTokens, 256_000);
 });
+
+test('P1-7 #1: extractCatalogModels 在无 agentModelSorts (in_model_selector === undefined) 时保留全新未定价 -tiered 聊天模型并继续拦截内部非聊天模型', () => {
+  const snap = resolvePricingCatalogSnapshot({
+    rawPricingTable: DEFAULT_API_PRICES,
+    live: {
+      tier: 'ULTRA',
+      models: [
+        // 上游未下发 agentModelSorts，in_model_selector 缺失
+        { model_id: 'gemini-5-nova-tiered-high', display_name: 'Gemini 5 Nova (High)', disabled: false, quota_source: 'live' },
+        { model_id: 'gemini-5-orbit-tiered', display_name: 'Gemini 5 Orbit', disabled: false, quota_source: 'live' },
+        // 剥离 -tiered 后仍属于内部非聊天模型 -> 必须继续拦截
+        { model_id: 'gemini-5-image-tiered', display_name: 'Gemini 5 Image', disabled: false, quota_source: 'live' },
+        { model_id: 'gemini-5-control-tiered', display_name: 'Gemini 5 Control', disabled: false, quota_source: 'live' },
+        { model_id: 'gemini-5-exp-ab12-tiered', display_name: 'Gemini 5 Exp', disabled: false, quota_source: 'live' },
+        { model_id: 'tiered-high', display_name: 'Tiered High', disabled: false, quota_source: 'live' },
+        // 显式被 selector 排除 -> 必须拦截
+        { model_id: 'gemini-5-hidden-tiered-high', display_name: 'Gemini 5 Hidden (High)', disabled: false, quota_source: 'live', in_model_selector: false },
+      ],
+    },
+  });
+
+  assert.deepEqual(snap.unpricedLiveModels, [
+    {
+      key: 'gemini-5-nova',
+      displayName: 'Gemini 5 Nova',
+      disabled: false,
+      variants: ['High'],
+    },
+    {
+      key: 'gemini-5-orbit',
+      displayName: 'Gemini 5 Orbit',
+      disabled: false,
+    },
+  ]);
+});
+
+test('P1-7 #2: resolveDynamicOrchestratorModel 动态提取最高 Gemini 主版本号替代硬编码 gemini-4-', (t) => {
+  t.after(() => {
+    clearObservedIdeModelsForTest();
+    resetAndRegisterRemoteModelMetadata({});
+  });
+  clearObservedIdeModelsForTest();
+  resetAndRegisterRemoteModelMetadata({});
+
+  // 1. 从 siblingModelIds 提取最高主版本号 5
+  assert.equal(
+    resolveDynamicOrchestratorModel('gemini-pro-orchestrator-quasar', 'Orchestrator (Quasar)', [
+      'gemini-4-neon-high',
+      'gemini-5-aurora-high',
+    ]),
+    'gemini-5-quasar'
+  );
+
+  // 2. 从 getEffectiveModelAliasKeys()（含 observed 模型）提取最高主版本号 6
+  registerObservedIdeModels([
+    {
+      modelId: 'gemini-6-orion-high',
+      displayName: 'Gemini 6 Orion (High)',
+      modelOrAlias: 'MODEL_PLACEHOLDER_M950',
+    },
+  ]);
+  assert.equal(
+    resolveDynamicOrchestratorModel('gemini-pro-orchestrator-quasar', 'Orchestrator (Quasar)'),
+    'gemini-6-quasar'
+  );
+
+  // 3. 当远端与别名仅有 4 代时回退到 4
+  clearObservedIdeModelsForTest();
+  assert.equal(
+    resolveDynamicOrchestratorModel('gemini-pro-orchestrator-quasar', 'Orchestrator (Quasar)'),
+    'gemini-4-quasar'
+  );
+});

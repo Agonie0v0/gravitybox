@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicJson } from './files.js';
-import { sanitizeHostLabel } from './ssh-context.js';
+import { cleanHostLabel, sanitizeHostLabel } from './ssh-context.js';
+import type { LiveLanguageServerStatus } from './accounts.js';
 import {
   parseConnectTimestampSeconds,
   type RemoteGenMetadataRecord,
@@ -91,6 +92,16 @@ export interface RemoteRpcTargetLike {
   accountType?: RemoteAccountType;
   matchedLocalAccountId?: string | null;
   state?: 'connected' | 'disconnected' | 'auth_expired' | 'unverified';
+  lastIdentityVerifiedAt?: number;
+  reconnected?: boolean;
+  windowCount?: number;
+}
+
+export interface RemoteIdentityObservedInfo {
+  environmentId: string;
+  remoteKey: string;
+  live: LiveLanguageServerStatus;
+  observedAtMs: number;
 }
 
 export interface RemoteUsageSyncLedgerPort {
@@ -109,10 +120,14 @@ export interface SyncRemoteSessionUsageOptions {
   receipts?: Readonly<Record<string, RemoteUsageSyncReceipt>>;
   observationStore?: RemoteAccountObservationStore;
   resolveMatchedLocalAccountId?: (email: string) => string | null;
+  onIdentityObserved?: (info: RemoteIdentityObservedInfo) => void;
+  knownParentExecutionIds?: ReadonlySet<string>;
+  onParentExecutionIdsObserved?: (executionIds: ReadonlySet<string>) => void;
   nowMs?: number;
   maxTrajectories?: number;
   concurrency?: number;
   budgetMs?: number;
+  identityVerifyCooldownMs?: number;
   force?: boolean;
   signal?: AbortSignal;
 }
@@ -142,6 +157,10 @@ export interface RemoteUsageSyncCoordinatorOptions {
   maxTrajectoriesPerTarget?: number;
   concurrencyPerTarget?: number;
   budgetMs?: number;
+  perTargetBudgetMs?: number;
+  targetConcurrency?: number;
+  identityVerifyCooldownMs?: number;
+  onIdentityObserved?: (info: RemoteIdentityObservedInfo) => void;
   onCommitted?: (info: { revision: number; eventsSaved: number; receiptsUpdated: number }) => void;
 }
 
@@ -159,6 +178,9 @@ export interface RemoteSyncRoundResult {
 const DEFAULT_MAX_TRAJECTORIES = 20;
 const DEFAULT_CONCURRENCY = 3;
 const DEFAULT_BUDGET_MS = 12_000;
+const DEFAULT_PER_TARGET_BUDGET_MS = 4_000;
+const DEFAULT_TARGET_CONCURRENCY = 2;
+const DEFAULT_IDENTITY_VERIFY_COOLDOWN_MS = 15_000;
 const MIN_VALID_UNIX_SECONDS = 946684800; // 2000-01-01T00:00:00Z
 
 function sha256Hex(value: string): string {
@@ -228,7 +250,7 @@ function extractStepTimestampSeconds(step: RemoteStepRecord | undefined): number
  * 基于规范化主机标签生成稳定的远端环境 ID：`ssh:<12位sha256>`。
  */
 export function buildRemoteEnvironmentId(hostLabel: string): string {
-  const normalizedHostLabel = sanitizeHostLabel(hostLabel).toLowerCase();
+  const normalizedHostLabel = (cleanHostLabel(hostLabel) || sanitizeHostLabel(hostLabel)).toLowerCase();
   return `ssh:${sha256Hex(JSON.stringify(['ssh-env', normalizedHostLabel])).slice(0, 12)}`;
 }
 
@@ -393,6 +415,24 @@ export class RemoteAccountObservationStore {
     if (this.environments.size <= this.maxEnvironments) return;
     const sorted = [...this.environments.entries()].sort((a, b) => b[1].updated_at - a[1].updated_at);
     this.environments = new Map(sorted.slice(0, this.maxEnvironments));
+  }
+
+  listEnvironments(): Array<{ environmentId: string; hostLabel: string; updatedAt: number; lastSyncedAt?: number }> {
+    this.ensureLoaded();
+    const out: Array<{ environmentId: string; hostLabel: string; updatedAt: number; lastSyncedAt?: number }> = [];
+    for (const env of this.environments.values()) {
+      let lastSyncedAt = 0;
+      for (const tr of env.recent_trajectories) {
+        if (tr.synced_at_sec > lastSyncedAt) lastSyncedAt = tr.synced_at_sec;
+      }
+      out.push({
+        environmentId: env.environment_id,
+        hostLabel: cleanHostLabel(env.host_label) || env.host_label,
+        updatedAt: env.updated_at,
+        ...(lastSyncedAt > 0 ? { lastSyncedAt } : {}),
+      });
+    }
+    return out;
   }
 
   private serializeForDisk(): { version: 1; environments: Record<string, DiskEnvironmentEntry> } {
@@ -681,7 +721,8 @@ export class RemoteAccountObservationStore {
 function resolveEventModelName(
   rec: RemoteGenMetadataRecord,
   linkedStep: RemoteStepRecord | undefined,
-  summary: RemoteTrajectorySummary
+  summary: RemoteTrajectorySummary,
+  siblingModelIds?: ReadonlySet<string>
 ): string {
   const rawId = pickNonEmptyString(
     rec.responseModel,
@@ -699,6 +740,7 @@ function resolveEventModelName(
 
   return resolveDatabaseModelFullName(rawId || undefined, rawLabel || undefined, modelEnum, {
     canonicalUnknown: true,
+    ...(siblingModelIds && siblingModelIds.size > 0 ? { siblingModelIds } : {}),
   });
 }
 
@@ -729,6 +771,133 @@ function isAuthExpiredResult(res: { ok: boolean; reason?: string; authExpired?: 
   return !res.ok && (res.authExpired === true || res.reason === 'auth_expired');
 }
 
+const MAX_VALID_FORK_STEP_INDEX = 10_000_000;
+const MAX_KNOWN_EXECUTION_IDS_PER_ENV = 10_000;
+
+interface RemoteForkCutoff {
+  forkStepIndex: number;
+  forkParentCascadeId: string;
+}
+
+function parseValidForkStepIndex(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value >= 0 && value < MAX_VALID_FORK_STEP_INDEX
+      ? value
+      : undefined;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!/^[0-9]+$/.test(trimmed)) return undefined;
+    const parsed = Number(trimmed);
+    return Number.isSafeInteger(parsed) && parsed >= 0 && parsed < MAX_VALID_FORK_STEP_INDEX
+      ? parsed
+      : undefined;
+  }
+  return undefined;
+}
+
+function isSideQuestionTrajectory(summary: RemoteTrajectorySummary): boolean {
+  const raw = summary.trajectoryType;
+  if (raw === undefined || raw === null) return false;
+  if (raw === 22) return true;
+  const text = String(raw).trim();
+  return text === '22' || text.toUpperCase().includes('SIDE_QUESTION');
+}
+
+function buildSelfIdSet(summary: RemoteTrajectorySummary): Set<string> {
+  const ids = new Set<string>();
+  const cid = typeof summary.cascadeId === 'string' ? summary.cascadeId.trim().toLowerCase() : '';
+  if (cid) ids.add(cid);
+  const tid = typeof summary.trajectoryId === 'string' ? summary.trajectoryId.trim().toLowerCase() : '';
+  if (tid) ids.add(tid);
+  return ids;
+}
+
+function resolveRemoteForkCutoff(summary: RemoteTrajectorySummary): RemoteForkCutoff | undefined {
+  const selfIds = buildSelfIdSet(summary);
+  let best: RemoteForkCutoff | undefined;
+
+  const consider = (stepIdxRaw: unknown, parentIdRaw: unknown): void => {
+    const stepIdx = parseValidForkStepIndex(stepIdxRaw);
+    const parentId = typeof parentIdRaw === 'string' ? parentIdRaw.trim() : '';
+    if (stepIdx === undefined || !parentId || selfIds.has(parentId.toLowerCase())) return;
+    if (!best || stepIdx > best.forkStepIndex) {
+      best = { forkStepIndex: stepIdx, forkParentCascadeId: parentId };
+    }
+  };
+
+  if (Array.isArray(summary.parentReferences)) {
+    for (const ref of summary.parentReferences) {
+      if (!ref || typeof ref !== 'object') continue;
+      const parentId = pickNonEmptyString(ref.parentCascadeId, ref.parentTrajectoryId);
+      consider(ref.forkStepIndex, parentId);
+    }
+  }
+
+  const directParentId = pickNonEmptyString(
+    summary.forkParentCascadeId,
+    summary.parentConversationId,
+    summary.rootConversationId
+  );
+  consider(summary.forkStepIndex, directParentId);
+
+  return best;
+}
+
+function resolveSideQuestionParentCascadeIds(
+  summary: RemoteTrajectorySummary,
+  cascadeIdByTrajectoryId: ReadonlyMap<string, string>
+): string[] {
+  const selfIds = buildSelfIdSet(summary);
+  const out: string[] = [];
+  const seen = new Set<string>();
+
+  const addCandidate = (rawId: unknown): void => {
+    if (typeof rawId !== 'string') return;
+    const trimmed = rawId.trim();
+    if (!trimmed || selfIds.has(trimmed.toLowerCase())) return;
+    const mappedCascadeId = cascadeIdByTrajectoryId.get(trimmed.toLowerCase()) ?? trimmed;
+    const key = mappedCascadeId.toLowerCase();
+    if (selfIds.has(key) || seen.has(key)) return;
+    seen.add(key);
+    out.push(mappedCascadeId);
+  };
+
+  addCandidate(summary.forkParentCascadeId);
+  addCandidate(summary.parentConversationId);
+  addCandidate(summary.rootConversationId);
+  if (Array.isArray(summary.parentReferences)) {
+    for (const ref of summary.parentReferences) {
+      if (!ref || typeof ref !== 'object') continue;
+      addCandidate(ref.parentCascadeId);
+      addCandidate(ref.parentTrajectoryId);
+    }
+  }
+  return out;
+}
+
+function extractGenRecordTimestampSeconds(rec: RemoteGenMetadataRecord): number | null {
+  return (
+    parseConnectTimestampSeconds(rec.createdAt) ??
+    parseConnectTimestampSeconds(rec.chatStartMetadata?.createdAt) ??
+    parseConnectTimestampSeconds(rec.chatStartMetadata?.startTime) ??
+    parseConnectTimestampSeconds(rec.chatStartMetadata?.startedAt) ??
+    parseConnectTimestampSeconds(rec.chatStartMetadata?.timestamp) ??
+    null
+  );
+}
+
+function isGenerationBeforeOrAtForkCutoff(
+  rec: RemoteGenMetadataRecord,
+  forkStepIndex: number
+): boolean {
+  return (
+    Array.isArray(rec.stepIndices) &&
+    rec.stepIndices.length > 0 &&
+    rec.stepIndices.every(stepIdx => Number.isSafeInteger(stepIdx) && stepIdx <= forkStepIndex)
+  );
+}
+
 function shouldSyncTrajectory(
   prevReceipt: RemoteUsageSyncReceipt | undefined,
   lastModifiedSec: number,
@@ -749,14 +918,16 @@ export async function syncRemoteSessionUsage(
   options: SyncRemoteSessionUsageOptions
 ): Promise<SyncRemoteSessionUsageResult> {
   const { target, receipts = {}, observationStore } = options;
-  const hostLabel = sanitizeHostLabel(target.hostLabel) || 'ssh-host';
+  const hostLabel = cleanHostLabel(target.hostLabel) || 'ssh-host';
   const environmentId = target.environmentId || buildRemoteEnvironmentId(hostLabel);
   const nowMs = options.nowMs ?? Date.now();
   const nowSec = Math.floor(nowMs / 1000);
   const maxTrajectories = Math.max(1, Math.min(100, Math.floor(options.maxTrajectories ?? DEFAULT_MAX_TRAJECTORIES)));
   const concurrency = Math.max(1, Math.min(8, Math.floor(options.concurrency ?? DEFAULT_CONCURRENCY)));
   const budgetMs = Math.max(50, Math.floor(options.budgetMs ?? DEFAULT_BUDGET_MS));
+  const identityCooldownMs = Math.max(0, options.identityVerifyCooldownMs ?? DEFAULT_IDENTITY_VERIFY_COOLDOWN_MS);
   const force = options.force === true;
+  const deadlineAt = Date.now() + budgetMs;
 
   const emptyFailure = (authExpired: boolean, abortedByBudget: boolean, error?: string): SyncRemoteSessionUsageResult => ({
     ok: false,
@@ -780,27 +951,77 @@ export async function syncRemoteSessionUsage(
     return emptyFailure(true, false, 'auth_expired');
   }
 
+  const raceWithRemainingBudget = async <T>(work: Promise<T>): Promise<{ timedOut: true } | { timedOut: false; value: T }> => {
+    if (options.signal?.aborted) return { timedOut: true };
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) return { timedOut: true };
+    let timer: NodeJS.Timeout | undefined;
+    let onAbort: (() => void) | undefined;
+    try {
+      return await Promise.race([
+        work.then(value => ({ timedOut: false as const, value })),
+        new Promise<{ timedOut: true }>(resolve => {
+          timer = setTimeout(() => resolve({ timedOut: true }), remainingMs);
+          if (options.signal) {
+            onAbort = () => resolve({ timedOut: true });
+            if (options.signal.aborted) {
+              resolve({ timedOut: true });
+            } else {
+              options.signal.addEventListener('abort', onAbort, { once: true });
+            }
+          }
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (options.signal && onAbort) {
+        options.signal.removeEventListener('abort', onAbort);
+      }
+    }
+  };
+
   let effectiveEmail = typeof target.email === 'string' ? target.email.trim() : '';
   let effectiveAccountType = normalizeAccountType(target.accountType);
   let effectiveLocalAccountId = target.matchedLocalAccountId ?? null;
 
-  if (!effectiveEmail && observationStore) {
-    const probeRes = await target.rpcClient.probeUserAndQuota();
+  const hasTimedIdentity = typeof target.lastIdentityVerifiedAt === 'number';
+  const identityCooldownElapsed = hasTimedIdentity && (nowMs - target.lastIdentityVerifiedAt!) >= identityCooldownMs;
+  const shouldVerifyIdentity =
+    Boolean(target.reconnected) ||
+    identityCooldownElapsed ||
+    (!effectiveEmail && Boolean(observationStore));
+
+  if (shouldVerifyIdentity && typeof target.rpcClient.probeUserAndQuota === 'function') {
+    const probeRaced = await raceWithRemainingBudget(target.rpcClient.probeUserAndQuota());
+    if (probeRaced.timedOut) {
+      return emptyFailure(false, true, 'aborted_by_budget');
+    }
+    const probeRes = probeRaced.value;
     if (isAuthExpiredResult(probeRes)) {
       return emptyFailure(true, false, 'auth_expired');
     }
     if (probeRes.ok) {
       effectiveEmail = probeRes.data.email.trim();
       effectiveAccountType = normalizeAccountType(probeRes.data.accountType);
-      if (!effectiveLocalAccountId && effectiveEmail && options.resolveMatchedLocalAccountId) {
+      if (effectiveEmail && options.resolveMatchedLocalAccountId) {
         effectiveLocalAccountId = options.resolveMatchedLocalAccountId(effectiveEmail);
       }
+      options.onIdentityObserved?.({
+        environmentId,
+        remoteKey: target.remoteKey,
+        live: probeRes.data,
+        observedAtMs: nowMs,
+      });
     }
   } else if (effectiveEmail && !effectiveLocalAccountId && options.resolveMatchedLocalAccountId) {
     effectiveLocalAccountId = options.resolveMatchedLocalAccountId(effectiveEmail);
   }
 
-  const trajectoriesRes = await target.rpcClient.getAllCascadeTrajectories();
+  const trajRaced = await raceWithRemainingBudget(target.rpcClient.getAllCascadeTrajectories());
+  if (trajRaced.timedOut) {
+    return emptyFailure(false, true, 'aborted_by_budget');
+  }
+  const trajectoriesRes = trajRaced.value;
   if (!trajectoriesRes.ok) {
     return emptyFailure(
       isAuthExpiredResult(trajectoriesRes),
@@ -821,6 +1042,25 @@ export async function syncRemoteSessionUsage(
   }
 
   const summaries = Array.isArray(trajectoriesRes.data) ? trajectoriesRes.data : [];
+  const summarySiblingModelIds = new Set<string>();
+  const cascadeIdByTrajectoryId = new Map<string, string>();
+  const summaryByCascadeIdLower = new Map<string, RemoteTrajectorySummary>();
+  for (const summary of summaries) {
+    if (typeof summary.requestedModel === 'string' && summary.requestedModel.trim()) {
+      summarySiblingModelIds.add(summary.requestedModel.trim());
+    }
+    const cid = typeof summary.cascadeId === 'string' ? summary.cascadeId.trim() : '';
+    if (cid) {
+      const cidLower = cid.toLowerCase();
+      cascadeIdByTrajectoryId.set(cidLower, cid);
+      summaryByCascadeIdLower.set(cidLower, summary);
+      const tid = typeof summary.trajectoryId === 'string' ? summary.trajectoryId.trim() : '';
+      if (tid) {
+        cascadeIdByTrajectoryId.set(tid.toLowerCase(), cid);
+      }
+    }
+  }
+
   const changed = summaries
     .map(summary => {
       const trajectoryId = typeof summary.trajectoryId === 'string' ? summary.trajectoryId.trim() : '';
@@ -857,8 +1097,39 @@ export async function syncRemoteSessionUsage(
     };
   }
 
-  const events: RemoteGenerationEvent[] = [];
   const nextReceipts: RemoteUsageSyncReceipt[] = [];
+  const envNonSideQuestionExecIds = new Set<string>(options.knownParentExecutionIds ?? []);
+  const newlyObservedNonSideQuestionExecIds = new Set<string>();
+  const parentExecIdsByCascadeId = new Map<string, Set<string>>();
+  const scannedFullFromZeroCascadeIds = new Set<string>();
+  const scannedBatches: Array<{
+    isSideQuestion: boolean;
+    hasForkCutoff: boolean;
+    parentCascadeIds: string[];
+    events: RemoteGenerationEvent[];
+  }> = [];
+
+  const recordCascadeExecutionIds = (
+    cascadeIdLower: string,
+    records: readonly RemoteGenMetadataRecord[],
+    isNonSideQuestion: boolean
+  ): void => {
+    let bucket = parentExecIdsByCascadeId.get(cascadeIdLower);
+    for (const rec of records) {
+      const execId = typeof rec.executionId === 'string' ? rec.executionId.trim() : '';
+      if (!execId) continue;
+      if (!bucket) {
+        bucket = new Set<string>();
+        parentExecIdsByCascadeId.set(cascadeIdLower, bucket);
+      }
+      bucket.add(execId);
+      if (isNonSideQuestion) {
+        envNonSideQuestionExecIds.add(execId);
+        newlyObservedNonSideQuestionExecIds.add(execId);
+      }
+    }
+  };
+
   let trajectoriesScanned = 0;
   let trajectoriesFailed = 0;
   let authExpired = false;
@@ -866,7 +1137,6 @@ export async function syncRemoteSessionUsage(
   let firstError: string | undefined;
   let finalized = false;
 
-  const deadlineAt = Date.now() + budgetMs;
   let cursor = 0;
   const maxValidTs = Math.floor(nowMs / 1000) + 86400;
 
@@ -875,6 +1145,12 @@ export async function syncRemoteSessionUsage(
     const prevCursor = prevReceipt?.cursor_offset ?? 0;
     const prevStepOffset = prevReceipt?.step_offset ?? 0;
     const genFetchOffset = Math.max(0, prevCursor - 1);
+    const sideQuestion = isSideQuestionTrajectory(summary);
+    const forkCutoff = resolveRemoteForkCutoff(summary);
+    const parentCascadeIds = sideQuestion
+      ? resolveSideQuestionParentCascadeIds(summary, cascadeIdByTrajectoryId)
+      : [];
+    const cascadeIdLower = summary.cascadeId.trim().toLowerCase();
 
     const genRes = await target.rpcClient.getGeneratorMetadata(summary.cascadeId, genFetchOffset);
     if (finalized || abortedByBudget || options.signal?.aborted) return;
@@ -890,9 +1166,28 @@ export async function syncRemoteSessionUsage(
     }
 
     const genRecords = Array.isArray(genRes.data) ? genRes.data : [];
+    recordCascadeExecutionIds(cascadeIdLower, genRecords, !sideQuestion);
+    if (genFetchOffset === 0 && cascadeIdLower) {
+      scannedFullFromZeroCascadeIds.add(cascadeIdLower);
+    }
+
+    const excludedByForkCutoff = new Set<number>();
+    if (forkCutoff) {
+      for (let i = 0; i < genRecords.length; i++) {
+        const rec = genRecords[i]!;
+        if (isGenerationBeforeOrAtForkCutoff(rec, forkCutoff.forkStepIndex)) {
+          excludedByForkCutoff.add(i);
+        }
+      }
+    }
+
     let steps: RemoteStepRecord[] = [];
     let minReferencedStepIdx: number | undefined;
-    for (const rec of genRecords) {
+    let hasIncludedGenRecords = false;
+    for (let i = 0; i < genRecords.length; i++) {
+      if (excludedByForkCutoff.has(i)) continue;
+      hasIncludedGenRecords = true;
+      const rec = genRecords[i]!;
       if (!Array.isArray(rec.stepIndices)) continue;
       for (const sIdx of rec.stepIndices) {
         if (Number.isSafeInteger(sIdx) && sIdx >= 0) {
@@ -906,7 +1201,7 @@ export async function syncRemoteSessionUsage(
         ? Math.max(0, minReferencedStepIdx)
         : Math.max(0, prevStepOffset - 1);
 
-    if (genRecords.length > 0) {
+    if (hasIncludedGenRecords) {
       if (authExpired || abortedByBudget || options.signal?.aborted || Date.now() >= deadlineAt) {
         if (Date.now() >= deadlineAt) abortedByBudget = true;
         return;
@@ -943,8 +1238,26 @@ export async function syncRemoteSessionUsage(
       }
     }
 
+    const siblingModelIds = new Set<string>(summarySiblingModelIds);
+    for (const rec of genRecords) {
+      for (const candidate of [
+        rec.responseModel,
+        typeof rec.model === 'string' ? rec.model : undefined,
+        typeof rec.usage?.model === 'string' ? rec.usage.model : undefined,
+        rec.plannerModel?.modelName,
+      ]) {
+        if (typeof candidate === 'string' && candidate.trim()) siblingModelIds.add(candidate.trim());
+      }
+    }
+    for (const step of steps) {
+      for (const candidate of [step.metadata?.generatorModel, step.metadata?.requestedModel]) {
+        if (typeof candidate === 'string' && candidate.trim()) siblingModelIds.add(candidate.trim());
+      }
+    }
+
     const localEvents: RemoteGenerationEvent[] = [];
     for (let i = 0; i < genRecords.length; i++) {
+      if (excludedByForkCutoff.has(i)) continue;
       const rec = genRecords[i]!;
       if (!rec.usage) continue;
       const inputTokens = normalizeTokenInt(rec.usage.inputTokens ?? rec.usage.rawInputTokens);
@@ -958,7 +1271,11 @@ export async function syncRemoteSessionUsage(
 
       const genIdx = genFetchOffset + i;
       const linkedStep = resolveLinkedStep(rec, stepsByIdx, stepsByExecId);
-      const rawTs = extractStepTimestampSeconds(linkedStep) ?? (lastModifiedSec > 0 ? lastModifiedSec : null);
+      const isLatestRecord = i === genRecords.length - 1;
+      const rawTs =
+        extractGenRecordTimestampSeconds(rec) ??
+        extractStepTimestampSeconds(linkedStep) ??
+        (isLatestRecord && lastModifiedSec > 0 ? lastModifiedSec : null);
       let tsSec = rawTs !== null && Number.isFinite(rawTs) ? Math.floor(rawTs) : 0;
       if (tsSec < MIN_VALID_UNIX_SECONDS || tsSec > maxValidTs) {
         tsSec = 0;
@@ -966,7 +1283,7 @@ export async function syncRemoteSessionUsage(
 
       const executionId =
         typeof rec.executionId === 'string' && rec.executionId.trim() ? rec.executionId.trim() : undefined;
-      const model = resolveEventModelName(rec, linkedStep, summary);
+      const model = resolveEventModelName(rec, linkedStep, summary, siblingModelIds);
       const eventKey = buildRemoteEventKey(remoteSourceId, genIdx, executionId);
 
       let attribution: RemoteAttributionResult;
@@ -1021,7 +1338,12 @@ export async function syncRemoteSessionUsage(
       committed_at: nowSec,
     };
 
-    events.push(...localEvents);
+    scannedBatches.push({
+      isSideQuestion: sideQuestion,
+      hasForkCutoff: Boolean(forkCutoff),
+      parentCascadeIds,
+      events: localEvents,
+    });
     nextReceipts.push(nextReceipt);
     trajectoriesScanned++;
   };
@@ -1041,6 +1363,42 @@ export async function syncRemoteSessionUsage(
         }
       })
     );
+
+    const pendingParentCascadeIds = new Map<string, string>();
+    for (const batch of scannedBatches) {
+      if (!batch.isSideQuestion || batch.hasForkCutoff) continue;
+      if (!batch.events.some(ev => Boolean(ev.execution))) continue;
+      for (const parentCid of batch.parentCascadeIds) {
+        const parentCidLower = parentCid.toLowerCase();
+        if (scannedFullFromZeroCascadeIds.has(parentCidLower) || pendingParentCascadeIds.has(parentCidLower)) {
+          continue;
+        }
+        pendingParentCascadeIds.set(parentCidLower, parentCid);
+      }
+    }
+
+    for (const [parentCidLower, parentCid] of pendingParentCascadeIds) {
+      if (authExpired || abortedByBudget || finalized) break;
+      if (options.signal?.aborted || Date.now() >= deadlineAt) {
+        abortedByBudget = true;
+        break;
+      }
+      const parentGenRes = await target.rpcClient.getGeneratorMetadata(parentCid, 0);
+      if (finalized || abortedByBudget || options.signal?.aborted) break;
+      if (!parentGenRes.ok) {
+        if (isAuthExpiredResult(parentGenRes)) {
+          authExpired = true;
+          firstError = firstError ?? 'auth_expired';
+          break;
+        }
+        continue;
+      }
+      const parentGenRecords = Array.isArray(parentGenRes.data) ? parentGenRes.data : [];
+      const parentSummary = summaryByCascadeIdLower.get(parentCidLower);
+      const isParentNonSideQuestion = !parentSummary || !isSideQuestionTrajectory(parentSummary);
+      recordCascadeExecutionIds(parentCidLower, parentGenRecords, isParentNonSideQuestion);
+      scannedFullFromZeroCascadeIds.add(parentCidLower);
+    }
   };
 
   let budgetTimer: NodeJS.Timeout | undefined;
@@ -1074,6 +1432,32 @@ export async function syncRemoteSessionUsage(
     if (options.signal && abortListener) {
       options.signal.removeEventListener('abort', abortListener);
     }
+  }
+
+  const events: RemoteGenerationEvent[] = [];
+  for (const batch of scannedBatches) {
+    if (!batch.isSideQuestion || batch.hasForkCutoff) {
+      events.push(...batch.events);
+      continue;
+    }
+    for (const ev of batch.events) {
+      if (ev.execution) {
+        if (envNonSideQuestionExecIds.has(ev.execution)) continue;
+        let matchedExplicitParent = false;
+        for (const parentCid of batch.parentCascadeIds) {
+          if (parentExecIdsByCascadeId.get(parentCid.toLowerCase())?.has(ev.execution)) {
+            matchedExplicitParent = true;
+            break;
+          }
+        }
+        if (matchedExplicitParent) continue;
+      }
+      events.push(ev);
+    }
+  }
+
+  if (newlyObservedNonSideQuestionExecIds.size > 0) {
+    options.onParentExecutionIdsObserved?.(newlyObservedNonSideQuestionExecIds);
   }
 
   if (observationStore && nextReceipts.length > 0) {
@@ -1115,8 +1499,13 @@ export class RemoteUsageSyncCoordinator {
   private readonly getBillingPrices?: () => Promise<Record<string, unknown>>;
   private readonly maxTrajectoriesPerTarget: number;
   private readonly concurrencyPerTarget: number;
-  private readonly budgetMs: number;
+  private readonly perTargetBudgetMs: number;
+  private readonly targetConcurrency: number;
+  private readonly identityVerifyCooldownMs: number;
+  private readonly onIdentityObserved?: (info: RemoteIdentityObservedInfo) => void;
   private readonly onCommitted?: (info: { revision: number; eventsSaved: number; receiptsUpdated: number }) => void;
+  private readonly lastIdentityVerifiedAtByEnv = new Map<string, number>();
+  private readonly knownExecutionIdsByEnv = new Map<string, Set<string>>();
   private inFlight?: Promise<RemoteSyncRoundResult>;
   private revision = 0;
 
@@ -1129,7 +1518,10 @@ export class RemoteUsageSyncCoordinator {
     this.getBillingPrices = options.getBillingPrices;
     this.maxTrajectoriesPerTarget = options.maxTrajectoriesPerTarget ?? DEFAULT_MAX_TRAJECTORIES;
     this.concurrencyPerTarget = options.concurrencyPerTarget ?? DEFAULT_CONCURRENCY;
-    this.budgetMs = options.budgetMs ?? DEFAULT_BUDGET_MS;
+    this.perTargetBudgetMs = Math.max(50, options.perTargetBudgetMs ?? options.budgetMs ?? DEFAULT_PER_TARGET_BUDGET_MS);
+    this.targetConcurrency = Math.max(1, Math.min(4, Math.floor(options.targetConcurrency ?? DEFAULT_TARGET_CONCURRENCY)));
+    this.identityVerifyCooldownMs = Math.max(0, options.identityVerifyCooldownMs ?? DEFAULT_IDENTITY_VERIFY_COOLDOWN_MS);
+    this.onIdentityObserved = options.onIdentityObserved;
     this.onCommitted = options.onCommitted;
   }
 
@@ -1191,12 +1583,42 @@ export class RemoteUsageSyncCoordinator {
     return task;
   }
 
+  private recordKnownParentExecutionIds(envId: string, executionIds: ReadonlySet<string>): void {
+    if (executionIds.size === 0) return;
+    let bucket = this.knownExecutionIdsByEnv.get(envId);
+    if (!bucket) {
+      bucket = new Set<string>();
+      this.knownExecutionIdsByEnv.set(envId, bucket);
+    }
+    for (const execId of executionIds) {
+      if (!execId) continue;
+      if (bucket.has(execId)) {
+        bucket.delete(execId);
+      }
+      bucket.add(execId);
+      while (bucket.size > MAX_KNOWN_EXECUTION_IDS_PER_ENV) {
+        const oldest = bucket.values().next().value;
+        if (oldest === undefined) break;
+        bucket.delete(oldest);
+      }
+    }
+  }
+
   private async runRound(options?: {
     force?: boolean;
     nowMs?: number;
     signal?: AbortSignal;
   }): Promise<RemoteSyncRoundResult> {
-    const targets = this.getTargets();
+    const rawTargets = this.getTargets();
+    const dedupByEnv = new Map<string, RemoteRpcTargetLike>();
+    for (const target of rawTargets) {
+      const hostLabel = cleanHostLabel(target.hostLabel) || 'ssh-host';
+      const envId = target.environmentId || buildRemoteEnvironmentId(hostLabel);
+      if (!dedupByEnv.has(envId)) {
+        dedupByEnv.set(envId, { ...target, hostLabel, environmentId: envId });
+      }
+    }
+    const targets = [...dedupByEnv.values()];
     if (targets.length === 0) {
       return {
         ok: true,
@@ -1210,35 +1632,61 @@ export class RemoteUsageSyncCoordinator {
       };
     }
 
-    const roundStartedAt = Date.now();
     const existingReceipts = this.ledger ? await this.ledger.receipts() : {};
-    const allEvents: RemoteGenerationEvent[] = [];
-    const allReceipts: RemoteUsageSyncReceipt[] = [];
+    const receiptsSnapshot: Readonly<Record<string, RemoteUsageSyncReceipt>> = { ...existingReceipts };
+    const results: SyncRemoteSessionUsageResult[] = new Array(targets.length);
+    const workerCount = Math.min(this.targetConcurrency, targets.length);
+    let cursor = 0;
+
+    await Promise.all(
+      Array.from({ length: workerCount }, async () => {
+        while (cursor < targets.length) {
+          const idx = cursor++;
+          const rawTarget = targets[idx]!;
+          const envId = rawTarget.environmentId!;
+          const knownLastVerified = this.lastIdentityVerifiedAtByEnv.get(envId);
+          const effectiveLastVerified =
+            rawTarget.lastIdentityVerifiedAt !== undefined
+              ? rawTarget.lastIdentityVerifiedAt
+              : knownLastVerified;
+          const targetForSync: RemoteRpcTargetLike =
+            effectiveLastVerified !== undefined
+              ? { ...rawTarget, lastIdentityVerifiedAt: effectiveLastVerified }
+              : rawTarget;
+
+          results[idx] = await syncRemoteSessionUsage({
+            target: targetForSync,
+            receipts: receiptsSnapshot,
+            observationStore: this.observationStore,
+            resolveMatchedLocalAccountId: this.resolveMatchedLocalAccountId,
+            identityVerifyCooldownMs: this.identityVerifyCooldownMs,
+            knownParentExecutionIds: this.knownExecutionIdsByEnv.get(envId),
+            onParentExecutionIdsObserved: ids => {
+              this.recordKnownParentExecutionIds(envId, ids);
+            },
+            onIdentityObserved: info => {
+              this.lastIdentityVerifiedAtByEnv.set(info.environmentId, info.observedAtMs);
+              this.onIdentityObserved?.(info);
+            },
+            nowMs: options?.nowMs,
+            maxTrajectories: this.maxTrajectoriesPerTarget,
+            concurrency: this.concurrencyPerTarget,
+            budgetMs: this.perTargetBudgetMs,
+            force: options?.force,
+            signal: options?.signal,
+          });
+        }
+      })
+    );
+
+    const eventsByKey = new Map<string, RemoteGenerationEvent>();
+    const receiptsBySourceId = new Map<string, RemoteUsageSyncReceipt>();
     const authExpiredTargets: string[] = [];
     const errors: string[] = [];
     let abortedByBudget = false;
 
-    for (const target of targets) {
-      const elapsed = Date.now() - roundStartedAt;
-      const remainingBudget = this.budgetMs - elapsed;
-      if (remainingBudget <= 0 || options?.signal?.aborted) {
-        abortedByBudget = true;
-        break;
-      }
-
-      const res = await syncRemoteSessionUsage({
-        target,
-        receipts: existingReceipts,
-        observationStore: this.observationStore,
-        resolveMatchedLocalAccountId: this.resolveMatchedLocalAccountId,
-        nowMs: options?.nowMs,
-        maxTrajectories: this.maxTrajectoriesPerTarget,
-        concurrency: this.concurrencyPerTarget,
-        budgetMs: remainingBudget,
-        force: options?.force,
-        signal: options?.signal,
-      });
-
+    for (const res of results) {
+      if (!res) continue;
       if (res.authExpired) {
         authExpiredTargets.push(res.environmentId);
       }
@@ -1248,16 +1696,16 @@ export class RemoteUsageSyncCoordinator {
       if (res.error && !res.authExpired) {
         errors.push(`${res.hostLabel}: ${res.error}`);
       }
-      if (res.events.length > 0) {
-        allEvents.push(...res.events);
+      for (const ev of res.events) {
+        eventsByKey.set(ev.event_key, ev);
       }
-      if (res.receipts.length > 0) {
-        for (const receipt of res.receipts) {
-          existingReceipts[receipt.source_id] = receipt;
-          allReceipts.push(receipt);
-        }
+      for (const receipt of res.receipts) {
+        receiptsBySourceId.set(receipt.source_id, receipt);
       }
     }
+
+    const allEvents = [...eventsByKey.values()];
+    const allReceipts = [...receiptsBySourceId.values()];
 
     if (this.ledger && (allEvents.length > 0 || allReceipts.length > 0)) {
       const billingPrices = this.getBillingPrices ? await this.getBillingPrices() : undefined;

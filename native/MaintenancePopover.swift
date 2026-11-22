@@ -83,10 +83,7 @@ extension CachePage {
     }
 
     func formatCount(_ count: Int) -> String {
-        let fmt = NumberFormatter()
-        fmt.numberStyle = .decimal
-        fmt.locale = L10n.shared.foundationLocale
-        return fmt.string(from: NSNumber(value: max(0, count))) ?? "\(max(0, count))"
+        InterfaceText.formatInteger(max(0, count))
     }
 
     private func localizedRetentionWindowTitle() -> String {

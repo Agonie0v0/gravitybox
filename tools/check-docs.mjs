@@ -93,6 +93,8 @@ export async function checkDocs({
   readmeEnPath = join(root, 'README_EN.md'),
   changelogPath = join(root, 'CHANGELOG.md'),
   projectPath = join(root, 'PROJECT.md'),
+  securityPath = join(root, 'SECURITY.md'),
+  bundlePath = join(root, 'src', 'bundle.ts'),
   screenshotsReadmePath = join(root, 'assets/screenshots/README.md'),
   installedApp = '/Applications/GravityBox.app',
   accountsPath = join(homedir(), 'Library', 'Application Support', 'GravityBox', 'accounts.json'),
@@ -177,9 +179,47 @@ export async function checkDocs({
     }
   };
 
+  let latestSupportedBundle = null;
+  if (existsSync(bundlePath)) {
+    const bundleSource = await readText(bundlePath);
+    const bundleBlock = bundleSource?.match(/export const SUPPORTED_BUNDLES\s*=\s*new Map\(\[([\s\S]*?)\]\);/)?.[1] ?? '';
+    const bundleVersions = [...bundleBlock.matchAll(/\['(\d+\.\d+\.\d+)'\s*,/g)].map(match => match[1]);
+    if (bundleVersions.length > 0) {
+      bundleVersions.sort((a, b) => {
+        const pa = a.split('.').map(Number);
+        const pb = b.split('.').map(Number);
+        for (let i = 0; i < 3; i++) {
+          if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
+        }
+        return 0;
+      });
+      latestSupportedBundle = bundleVersions[bundleVersions.length - 1];
+    }
+  }
+
+  const checkSupportedBundleRange = (file, text) => {
+    if (!latestSupportedBundle || !text) return;
+    for (const match of text.matchAll(/(?:`?2\.23\.0`?)\s*(?:–|—|~|～|-)\s*`?(\d+\.\d+\.\d+)`?/g)) {
+      const upper = match[1];
+      const line = text.slice(0, match.index).split('\n').length;
+      verify(
+        'error',
+        'DOC_SUPPORTED_BUNDLE_STALE',
+        file,
+        line,
+        `受支持 Antigravity 版本上限 ${upper} ≠ SUPPORTED_BUNDLES 最新版本 ${latestSupportedBundle}`,
+        upper === latestSupportedBundle,
+      );
+    }
+  };
+
   if (existsSync(agentsPath)) await checkDocFile('AGENTS.md', agentsPath);
   await checkDocFile('README.md', readmePath);
-  if (existsSync(readmeZhPath)) await checkDocFile('README.zh-CN.md', readmeZhPath);
+  checkSupportedBundleRange('README.md', await readText(readmePath));
+  if (existsSync(readmeZhPath)) {
+    await checkDocFile('README.zh-CN.md', readmeZhPath);
+    checkSupportedBundleRange('README.zh-CN.md', await readText(readmeZhPath));
+  }
   if (existsSync(readmeEnPath)) await checkDocFile('README_EN.md', readmeEnPath);
 
   if (existsSync(changelogPath) && facts.version) {
@@ -215,6 +255,24 @@ export async function checkDocs({
       } else {
         verify('error', 'DOC_VERSION_MISSING', 'PROJECT.md', null, `PROJECT.md 未声明当前版本 ${facts.version}`, false);
       }
+      checkSupportedBundleRange('PROJECT.md', projectText);
+    }
+  }
+
+  if (existsSync(securityPath) && facts.version) {
+    const securityText = await readText(securityPath);
+    const minorMatch = /^(\d+)\.(\d+)\.\d+$/.exec(facts.version);
+    if (securityText !== null && minorMatch) {
+      const minorSeries = `${minorMatch[1]}.${minorMatch[2]}.x`;
+      const hasCurrentSeries = new RegExp(`^\\|\\s*\`?${escapeRegExp(minorSeries)}\`?\\s*\\|[^\\n]*(?:white_check_mark|当前维护|supported)`, 'mi').test(securityText);
+      verify(
+        'error',
+        'SECURITY_VERSION_STALE',
+        'SECURITY.md',
+        null,
+        `SECURITY.md 受支持版本表缺少当前维护系列 ${minorSeries}`,
+        hasCurrentSeries,
+      );
     }
   }
 

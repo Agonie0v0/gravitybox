@@ -68,6 +68,7 @@ function isWaitingSubagentToolName(toolCallName: string | undefined): boolean {
   return SUBAGENT_WAITING_TOOL_NAMES.has(toolCallName.trim().toLowerCase());
 }
 const MAX_CACHED_CONVERSATIONS = 128;
+const MAX_TERMINAL_CHILD_CACHE_ENTRIES = 512;
 const ACTIVE_DB_RECENCY_MS = 60 * 60 * 1000;
 const TURN_STEP_HANDOFF_GRACE_SEC = 600;
 const INLINE_BLOB_LIMIT_BYTES = 65_536;
@@ -1031,11 +1032,16 @@ function isStepCompleted(step: ComputeHudMetricsInput['steps'][number]): boolean
 function isStepActiveNow(
   step: ComputeHudMetricsInput['steps'][number],
   isStreaming: boolean,
-  allowActiveInference: boolean
+  allowActiveInference: boolean,
+  options?: { allowWaitingStatus?: boolean }
 ): boolean {
   if (isStepCompleted(step)) return false;
+  if (isWaitingSubagentToolName(step.toolCallName)) return false;
   const rawStatus = step.status ?? 3;
   if (TERMINAL_INACTIVE_STEP_STATUSES.has(rawStatus) || rawStatus === 5) return false;
+  if (rawStatus === 9) {
+    return Boolean(options?.allowWaitingStatus && isStreaming);
+  }
   if (ACTIVE_STEP_STATUSES.has(rawStatus)) {
     return allowActiveInference || isStreaming;
   }
@@ -1514,6 +1520,15 @@ function createStageSnapshot(
   };
 }
 
+interface LiveHudContextInfo {
+  latestSessionTurn: number;
+  latestTurnRunning: boolean;
+  trailingActiveModelStep?: {
+    step: ComputeHudMetricsInput['steps'][number];
+    turnIndex: number;
+  };
+}
+
 function resolveContextStagesAndActiveSlot(
   usageContextEntries: ReadonlyArray<{ step: ComputeHudMetricsInput['steps'][number]; prompt: number; turnIndex?: number }>,
   input: ComputeHudMetricsInput,
@@ -1521,9 +1536,11 @@ function resolveContextStagesAndActiveSlot(
     step: ComputeHudMetricsInput['steps'][number];
     precedingUsageIndex: number;
     turnIndex: number;
-  }> = []
+  }> = [],
+  liveContext?: LiveHudContextInfo
 ): {
   latestStep?: ComputeHudMetricsInput['steps'][number];
+  latestUsageStep?: ComputeHudMetricsInput['steps'][number];
   latestGenMeta?: ParsedGenMetadata;
   sessionPeakContextTokens: number;
   activeStage: HudModelContextStage;
@@ -1699,6 +1716,7 @@ function resolveContextStagesAndActiveSlot(
       const activeStage = stages.find((s) => s.isActive) ?? stages[0]!;
       return {
         latestStep: undefined,
+        latestUsageStep: undefined,
         latestGenMeta: input.genMetadata,
         sessionPeakContextTokens: 0,
         activeStage,
@@ -1715,6 +1733,7 @@ function resolveContextStagesAndActiveSlot(
     const activeStage = createStageSnapshot(emptyAcc, true);
     return {
       latestStep: undefined,
+      latestUsageStep: undefined,
       latestGenMeta: input.genMetadata,
       sessionPeakContextTokens: 0,
       activeStage,
@@ -1738,10 +1757,18 @@ function resolveContextStagesAndActiveSlot(
   let latestPlanModelEnum: number | undefined;
   let latestExecutionModelEnum: number | undefined;
   const lastTurnNum = usageContextEntries[usageContextEntries.length - 1]?.turnIndex ?? 0;
-  const execMetaAppliesToLatestTurn = Boolean(
+  const execMetaInLatestSessionTurn = lastTurnNum === (liveContext?.latestSessionTurn ?? lastTurnNum);
+  const execMetaAppliesToCurrentSession = Boolean(
     execMetaExecEnum &&
       execMetaExecEnum > 0 &&
       (inputIsOrchestrator || !trimmedInputModel)
+  );
+  const execMetaAppliesToLatestUsageTurn = Boolean(
+    execMetaAppliesToCurrentSession && execMetaInLatestSessionTurn
+  );
+  const execMetaCapAppliesToLatestUsageTurn = Boolean(
+    execMetaInLatestSessionTurn &&
+      (!execMetaExecEnum || inputIsOrchestrator || !trimmedInputModel)
   );
   const hasAnyExplicitUsageModel = usageContextEntries.some((entry, idx) => {
     const isGlobalLatest = idx === usageContextEntries.length - 1;
@@ -1761,7 +1788,7 @@ function resolveContextStagesAndActiveSlot(
     const stepExecEnum =
       stepGenMeta?.executionModelEnum ??
       prevTurnConfig?.executionModelEnum ??
-      (turnIndex === lastTurnNum && execMetaAppliesToLatestTurn ? execMetaExecEnum : undefined);
+      (turnIndex === lastTurnNum && execMetaAppliesToLatestUsageTurn ? execMetaExecEnum : undefined);
     const rawStepPlanEnum = stepGenMeta?.planModelEnum;
     const distinctPrevPlanEnum =
       prevTurnConfig?.planModelEnum !== undefined && prevTurnConfig.planModelEnum !== stepExecEnum
@@ -1791,7 +1818,7 @@ function resolveContextStagesAndActiveSlot(
       stepPlanEnum =
         rawStepPlanEnum ??
         prevTurnConfig?.planModelEnum ??
-        (turnIndex === lastTurnNum && execMetaAppliesToLatestTurn ? execMetaPlanEnum : undefined);
+        (turnIndex === lastTurnNum && execMetaAppliesToLatestUsageTurn ? execMetaPlanEnum : undefined);
     }
     if (stepExecEnum && stepExecEnum > 0) {
       const preservedPlanEnum =
@@ -1838,7 +1865,8 @@ function resolveContextStagesAndActiveSlot(
     // 容量优先级：stepGenMeta.maxContextTokens > executorMetadata.checkpointMaxTokenLimit > step.modelMaxTokens > inputExplicitCapacity > 动态目录 > ~200K
     const stepExplicitCap = [
       stepGenMeta?.maxContextTokens,
-      isGlobalLatest || (turnIndex === lastTurnNum && (slot.role === 'planner' || slot.role === 'executor'))
+      execMetaCapAppliesToLatestUsageTurn &&
+      (isGlobalLatest || (turnIndex === lastTurnNum && (slot.role === 'planner' || slot.role === 'executor')))
         ? executorExplicitCap
         : undefined,
       entry.step.modelMaxTokens,
@@ -1905,9 +1933,9 @@ function resolveContextStagesAndActiveSlot(
   let effectiveActiveSlotKey = latestEntry.slot.slotKey;
   const activeAcc = stageMap.get(effectiveActiveSlotKey)!;
   const allAccs = [...stageMap.values()];
-  const effectivePlanModelEnum = latestPlanModelEnum ?? (execMetaAppliesToLatestTurn ? execMetaPlanEnum : undefined);
+  const effectivePlanModelEnum = latestPlanModelEnum ?? (execMetaAppliesToCurrentSession ? execMetaPlanEnum : undefined);
   const effectiveExecutionModelEnum =
-    latestExecutionModelEnum ?? (execMetaAppliesToLatestTurn ? execMetaExecEnum : undefined);
+    latestExecutionModelEnum ?? (execMetaAppliesToCurrentSession ? execMetaExecEnum : undefined);
   const isOrchestrator =
     latestEntry.slot.role === 'planner' ||
     latestEntry.slot.role === 'executor' ||
@@ -1926,6 +1954,80 @@ function resolveContextStagesAndActiveSlot(
         (a) => a.slot.slotKey === inputAsStandaloneSlot.slotKey || a.slot.modelId === inputAsStandaloneSlot.modelId
       )
     );
+  const findMatchingSlot = (
+    accs: ReadonlyArray<StageAccumulator>,
+    target: ClassifiedContextSlot
+  ): StageAccumulator | undefined =>
+    accs.find(
+      (a) =>
+        a.slot.slotKey === target.slotKey ||
+        (target.modelId !== 'unknown' && target.modelId !== 'pending' && a.slot.modelId === target.modelId)
+    );
+  const resolveTrailingLiveModelSlot = (): { slot: ClassifiedContextSlot; explicitCap?: number } | null => {
+    const trailing = liveContext?.trailingActiveModelStep;
+    if (!trailing) return null;
+    const liveStep = trailing.step;
+    const liveGen = liveStep.generation;
+    const hasLiveModelEvidence = Boolean(
+      liveGen?.responseModel ||
+        liveGen?.modelDisplayName ||
+        liveGen?.plannerModelName ||
+        liveGen?.modelEnum ||
+        liveStep.modelName
+    );
+    if (!hasLiveModelEvidence) return null;
+    const liveTurnIdx = trailing.turnIndex;
+    const liveTurnCfg = turnPlanExecConfig.get(liveTurnIdx);
+    const isCurrentLatestSessionTurn = liveTurnIdx === liveContext!.latestSessionTurn;
+    const liveExecEnum =
+      liveGen?.executionModelEnum ??
+      liveTurnCfg?.executionModelEnum ??
+      (execMetaAppliesToCurrentSession && isCurrentLatestSessionTurn ? execMetaExecEnum : undefined);
+    const rawLivePlanEnum = liveGen?.planModelEnum;
+    const liveDistinctPrevPlan =
+      liveTurnCfg?.planModelEnum !== undefined && liveTurnCfg.planModelEnum !== liveExecEnum
+        ? liveTurnCfg.planModelEnum
+        : undefined;
+    const liveDistinctExecMetaPlan =
+      execMetaAppliesToCurrentSession &&
+      isCurrentLatestSessionTurn &&
+      execMetaPlanEnum !== undefined &&
+      execMetaPlanEnum !== liveExecEnum
+        ? execMetaPlanEnum
+        : undefined;
+    let livePlanEnum: number | undefined;
+    if (rawLivePlanEnum !== undefined && liveExecEnum !== undefined && rawLivePlanEnum === liveExecEnum) {
+      const execSpec = resolveObservedModelSpecByEnum(liveExecEnum);
+      const domSuggestsDifferentPlanner = Boolean(
+        inputAsStandaloneSlot &&
+          inputAsStandaloneSlot.role === 'planner' &&
+          inputAsStandaloneSlot.hasExplicitEvidence &&
+          execSpec &&
+          inputAsStandaloneSlot.modelId !== execSpec.modelId
+      );
+      livePlanEnum =
+        liveDistinctPrevPlan ??
+        liveDistinctExecMetaPlan ??
+        (domSuggestsDifferentPlanner ? undefined : rawLivePlanEnum);
+    } else {
+      livePlanEnum =
+        rawLivePlanEnum ??
+        liveTurnCfg?.planModelEnum ??
+        (execMetaAppliesToCurrentSession && isCurrentLatestSessionTurn ? execMetaPlanEnum : undefined);
+    }
+    const slot = classifyContextModelSlot({
+      responseModel: liveGen?.responseModel,
+      modelDisplayName: liveGen?.modelDisplayName,
+      plannerModelName: liveGen?.plannerModelName,
+      stepModelName: liveStep.modelName,
+      modelEnum: liveGen?.modelEnum,
+      planModelEnum: livePlanEnum,
+      executionModelEnum: liveExecEnum,
+      hasPriorOrchestrator: orchestratorTurns.has(liveTurnIdx),
+    });
+    const explicitCap = [liveGen?.maxContextTokens, liveStep.modelMaxTokens].find(isPositiveSafeInt);
+    return { slot, explicitCap };
+  };
 
   if (isOrchestrator) {
     const planners = allAccs.filter((a) => a.slot.role === 'planner');
@@ -2016,7 +2118,7 @@ function resolveContextStagesAndActiveSlot(
     inheritedOrchCap =
       [...planners, ...executors].find((a) => a.explicitCapacity !== undefined)?.explicitCapacity ??
       inheritedOrchCap;
-    const filteredOthersSorted = [...filteredOthersRaw].sort((a, b) => a.lastSeenSeq - b.lastSeenSeq);
+    const filteredOthersSorted: StageAccumulator[] = [...filteredOthersRaw].sort((a, b) => a.lastSeenSeq - b.lastSeenSeq);
 
     const primaryAccs: StageAccumulator[] = [...planners, ...executors];
     if (hasPendingInputSlot([...primaryAccs, ...filteredOthersSorted]) && inputAsStandaloneSlot) {
@@ -2026,6 +2128,34 @@ function resolveContextStagesAndActiveSlot(
         peakContextTokens: 0,
         explicitCapacity: inputExplicitCapacity,
       });
+    }
+    const trailingLiveOrch = resolveTrailingLiveModelSlot();
+    if (trailingLiveOrch) {
+      const matched = findMatchingSlot([...primaryAccs, ...filteredOthersSorted], trailingLiveOrch.slot);
+      if (matched) {
+        effectiveActiveSlotKey = matched.slot.slotKey;
+      } else if (trailingLiveOrch.slot.hasExplicitEvidence && trailingLiveOrch.slot.modelId !== 'unknown') {
+        const pendingLiveAcc: StageAccumulator = {
+          slot: trailingLiveOrch.slot,
+          latestStep: undefined,
+          latestPrompt: 0,
+          peakContextTokens: 0,
+          ...(trailingLiveOrch.explicitCap !== undefined ? { explicitCapacity: trailingLiveOrch.explicitCap } : {}),
+        };
+        if (trailingLiveOrch.slot.role === 'planner' || trailingLiveOrch.slot.role === 'executor') {
+          primaryAccs.push(pendingLiveAcc);
+        } else {
+          filteredOthersSorted.push(pendingLiveAcc);
+        }
+        effectiveActiveSlotKey = trailingLiveOrch.slot.slotKey;
+      }
+    } else if (liveContext?.latestTurnRunning === true && liveContext.latestSessionTurn > lastTurnNum) {
+      const validPlanner = planners.find(
+        (p) => p.slot.modelId !== 'unknown' && p.slot.modelId !== 'pending'
+      );
+      if (validPlanner) {
+        effectiveActiveSlotKey = validPlanner.slot.slotKey;
+      }
     }
     const allOrchAccs: StageAccumulator[] = [...primaryAccs, ...filteredOthersSorted];
     let cappedAccs: StageAccumulator[];
@@ -2124,6 +2254,34 @@ function resolveContextStagesAndActiveSlot(
         explicitCapacity: inputExplicitCapacity,
       });
     }
+    const trailingLiveStandalone = resolveTrailingLiveModelSlot();
+    if (trailingLiveStandalone) {
+      const matched = findMatchingSlot(orderedAccs, trailingLiveStandalone.slot);
+      if (matched) {
+        effectiveActiveSlotKey = matched.slot.slotKey;
+      } else if (trailingLiveStandalone.slot.hasExplicitEvidence && trailingLiveStandalone.slot.modelId !== 'unknown') {
+        orderedAccs.push({
+          slot: trailingLiveStandalone.slot,
+          latestStep: undefined,
+          latestPrompt: 0,
+          peakContextTokens: 0,
+          ...(trailingLiveStandalone.explicitCap !== undefined ? { explicitCapacity: trailingLiveStandalone.explicitCap } : {}),
+        });
+        effectiveActiveSlotKey = trailingLiveStandalone.slot.slotKey;
+      }
+    } else if (liveContext?.latestTurnRunning === true && liveContext.latestSessionTurn > lastTurnNum) {
+      if (
+        inputAsStandaloneSlot &&
+        inputAsStandaloneSlot.hasExplicitEvidence &&
+        inputAsStandaloneSlot.modelId !== 'unknown' &&
+        inputAsStandaloneSlot.modelId !== 'pending'
+      ) {
+        const matched = findMatchingSlot(orderedAccs, inputAsStandaloneSlot);
+        if (matched) {
+          effectiveActiveSlotKey = matched.slot.slotKey;
+        }
+      }
+    }
     let finalAccs: StageAccumulator[];
     if (orderedAccs.length > 5) {
       const tail = orderedAccs.slice(-5);
@@ -2137,6 +2295,14 @@ function resolveContextStagesAndActiveSlot(
                 a.slot.modelId === inputAsStandaloneSlot.modelId
             )
           : undefined;
+      const activeInOrdered = orderedAccs.find((a) => a.slot.slotKey === effectiveActiveSlotKey);
+      if (activeInOrdered && !tail.includes(activeInOrdered)) {
+        const dropIdx = tail.findIndex((a) => a !== pinnedInput && a.slot.slotKey !== effectiveActiveSlotKey);
+        if (dropIdx >= 0) {
+          tail.splice(dropIdx, 1);
+          tail.unshift(activeInOrdered);
+        }
+      }
       if (pinnedInput && !tail.includes(pinnedInput)) {
         const dropIdx = tail.findIndex((a) => a.slot.slotKey !== effectiveActiveSlotKey);
         if (dropIdx >= 0) {
@@ -2174,16 +2340,23 @@ function resolveContextStagesAndActiveSlot(
         });
       })()
     : undefined;
+  const activeStageAcc =
+    orderedEntries.find(({ acc }) => acc.slot.slotKey === effectiveActiveSlotKey)?.acc ??
+    orderedEntries[0]?.acc ??
+    activeAcc;
   const activeStage =
     modelStages?.find((s) => s.isActive) ??
-    createStageSnapshot(orderedEntries[0]?.acc ?? activeAcc, true);
+    createStageSnapshot(activeStageAcc, true);
 
   return {
-    latestStep: latestEntry.step,
+    latestStep: activeStageAcc?.latestStep,
+    latestUsageStep: latestEntry.step,
     latestGenMeta: latestEntry.genMeta,
     sessionPeakContextTokens,
     activeStage,
-    hasExplicitModelEvidence: latestEntry.slot.hasExplicitEvidence,
+    hasExplicitModelEvidence: activeStageAcc
+      ? activeStageAcc.slot.hasExplicitEvidence
+      : latestEntry.slot.hasExplicitEvidence,
     isMultiModel,
     isOrchestrator,
     modelStages,
@@ -2384,10 +2557,19 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
   }> = [];
   let turns = 0;
   let compactionCount = 0;
-  for (const step of contextSteps) {
+  let lastUserStepIdx = -1;
+  let lastUsageContextStepIdx = -1;
+  let trailingActiveModelStep:
+    | { step: ComputeHudMetricsInput['steps'][number]; turnIndex: number }
+    | undefined;
+  for (let i = 0; i < contextSteps.length; i++) {
+    const step = contextSteps[i]!;
     const stepType = step.step_type ?? step.stepType ?? 0;
     const rawStatus = step.status ?? 3;
-    if (stepType === 14) turns++;
+    if (stepType === 14) {
+      turns++;
+      lastUserStepIdx = i;
+    }
     if (stepType === 23 && (rawStatus === 3 || rawStatus === 5)) {
       compactionCount++;
       compactionContextEntries.push({
@@ -2396,16 +2578,62 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
         turnIndex: turns,
       });
     }
-    if (stepType !== 15 || step.hasUsage === false) continue;
-    const prompt = safeTokens(step.rawInput ?? step.rawInputTokens) +
-      safeTokens(step.cachedTokens ?? step.cachedReadTokens) + safeTokens(step.cacheWriteTokens);
+    if (stepType !== 15) continue;
+    const hasUsage = step.hasUsage !== false;
+    const prompt = hasUsage
+      ? safeTokens(step.rawInput ?? step.rawInputTokens) +
+        safeTokens(step.cachedTokens ?? step.cachedReadTokens) +
+        safeTokens(step.cacheWriteTokens)
+      : 0;
     const estCtx = safeTokens(step.generation?.estimatedTokensUsed);
     const effectivePrompt = prompt > 0 ? prompt : estCtx;
-    const outputTok = safeTokens(step.outputTokens);
+    const outputTok = hasUsage ? safeTokens(step.outputTokens) : 0;
     if (effectivePrompt > 0 || (step.hasUsage === true && outputTok > 0)) {
       usageContextEntries.push({ step, prompt: effectivePrompt, turnIndex: turns });
+      lastUsageContextStepIdx = i;
+      trailingActiveModelStep = undefined;
+    } else if (
+      i > lastUsageContextStepIdx &&
+      !isStepCompleted(step) &&
+      !TERMINAL_INACTIVE_STEP_STATUSES.has(rawStatus) &&
+      rawStatus !== 5
+    ) {
+      trailingActiveModelStep = { step, turnIndex: turns };
     }
   }
+  const latestTurnSteps = lastUserStepIdx >= 0 ? contextSteps.slice(lastUserStepIdx + 1) : contextSteps;
+  const latestTurnLastSub = findLastSubstantiveStep(latestTurnSteps);
+  const latestTurnLastSubType = latestTurnLastSub
+    ? (latestTurnLastSub.step_type ?? latestTurnLastSub.stepType ?? 0)
+    : 0;
+  const latestTurnLastSubStatus = latestTurnLastSub?.status ?? 3;
+  const isLatestTurnAborted =
+    Boolean(latestTurnLastSub) &&
+    (latestTurnLastSubStatus === 4 || latestTurnLastSubStatus === 6 || latestTurnLastSubStatus === 7);
+  const isLatestTurnClosed =
+    Boolean(latestTurnLastSub) &&
+    latestTurnLastSubType === 2 &&
+    (latestTurnLastSubStatus === 3 || latestTurnLastSubStatus === 5);
+  const hasActiveNonTerminalStepInLatestTurn = latestTurnSteps.some((step) => {
+    const st = step.step_type ?? step.stepType ?? 0;
+    if (TRANSPARENT_HANDOFF_STEP_TYPES.has(st)) return false;
+    if (isWaitingSubagentToolName(step.toolCallName)) return false;
+    const rawStatus = step.status ?? 3;
+    return (
+      RUNNING_SUBAGENT_STEP_STATUSES.has(rawStatus) &&
+      !isStepCompleted(step) &&
+      !TERMINAL_INACTIVE_STEP_STATUSES.has(rawStatus) &&
+      rawStatus !== 5
+    );
+  });
+  const liveContext: LiveHudContextInfo = {
+    latestSessionTurn: turns,
+    trailingActiveModelStep,
+    latestTurnRunning:
+      isLatestTurnAborted || isLatestTurnClosed
+        ? false
+        : Boolean(input.isStreaming || trailingActiveModelStep || hasActiveNonTerminalStepInLatestTurn),
+  };
   let effectiveUsageContextEntries = usageContextEntries;
   let effectiveContextInput = input;
   if (usageContextEntries.length === 0 && input.inheritedContextStep) {
@@ -2432,6 +2660,7 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
   }
   const {
     latestStep,
+    latestUsageStep,
     sessionPeakContextTokens,
     activeStage,
     hasExplicitModelEvidence,
@@ -2442,7 +2671,8 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
   } = resolveContextStagesAndActiveSlot(
     effectiveUsageContextEntries,
     effectiveContextInput,
-    compactionContextEntries
+    compactionContextEntries,
+    liveContext
   );
   const activeModelCompactionCount = activeStage.compactionCount ?? 0;
   const peakContextTokens = activeStage.peakContextTokens;
@@ -2450,9 +2680,11 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
   const capacityTokensCompact = activeStage.capacityTokensCompact;
   const capacitySource = activeStage.capacitySource;
   const hasExplicitDbCapacity = !activeStage.isFallbackCapacity;
-  const stepCached = safeTokens(latestStep?.cachedTokens ?? latestStep?.cachedReadTokens);
-  const stepUncached = safeTokens(latestStep?.rawInput ?? latestStep?.rawInputTokens) +
-    safeTokens(latestStep?.cacheWriteTokens);
+  const latestHasUsage = latestStep?.hasUsage !== false;
+  const stepCached = latestHasUsage ? safeTokens(latestStep?.cachedTokens ?? latestStep?.cachedReadTokens) : 0;
+  const stepUncached = latestHasUsage
+    ? safeTokens(latestStep?.rawInput ?? latestStep?.rawInputTokens) + safeTokens(latestStep?.cacheWriteTokens)
+    : 0;
   const rawPromptTokens = stepCached + stepUncached;
   const fallbackEstimatedTokens =
     rawPromptTokens === 0 ? safeTokens(latestStep?.generation?.estimatedTokensUsed) : 0;
@@ -2463,7 +2695,7 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
   const denominator = Math.max(capacityTokens, usedTokens, 1);
   const cachedBarRatio = stepCached / denominator * 100;
   const uncachedBarRatio = effectiveStepUncached / denominator * 100;
-  const latestOutput = safeTokens(latestStep?.outputTokens);
+  const latestOutput = latestHasUsage ? safeTokens(latestStep?.outputTokens) : 0;
   let latestActiveForegroundKind: 'model' | 'tool' | null = null;
   const lastCtx = findLastSubstantiveStep(contextSteps);
   const lastCtxType = lastCtx ? (lastCtx.step_type ?? lastCtx.stepType ?? 0) : 0;
@@ -2493,7 +2725,12 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
       ) {
         detectedRunningSubagents++;
       }
-      if (input.allowDbActiveStepInference && latestActiveForegroundKind === null) {
+      if (
+        input.allowDbActiveStepInference &&
+        latestActiveForegroundKind === null &&
+        candidateStatus !== 9 &&
+        !isWaitingSubagentToolName(candidate.toolCallName)
+      ) {
         if (candidateType === 15) {
           latestActiveForegroundKind = 'model';
         } else if (!NON_TOOL_STEP_TYPES.has(candidateType)) {
@@ -2577,7 +2814,7 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
       lastExplicitMainStepModel = explicitStepModel;
     }
     const isLiveLatestStep = Boolean(
-      input.isStreaming && latestStep && step === latestStep && !isStepCompleted(step)
+      input.isStreaming && latestUsageStep && step === latestUsageStep && !isStepCompleted(step)
     );
     const contextualMainFallback = isLiveLatestStep
       ? defaultFallbackModel
@@ -2698,7 +2935,11 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
       hasSubagentStepInTurn = true;
     }
     const complete = isStepCompleted(step);
-    const activeNow = availability !== 'cached' && isStepActiveNow(step, isStreaming, allowForegroundActiveInTurn);
+    const activeNow =
+      availability !== 'cached' &&
+      isStepActiveNow(step, isStreaming, allowForegroundActiveInTurn, {
+        allowWaitingStatus: Boolean(input.isStreaming),
+      });
     const hasInterval = validSeconds(start) && validSeconds(end) && end > start;
     if (complete) {
       trackWallEnd(end ?? step.finishedGeneratingSeconds ?? step.completedAtSeconds ?? start);
@@ -3185,6 +3426,7 @@ interface CachedConversationState {
     generation: ParsedGenMetadata;
     timestampSeconds: number | null;
   }>;
+  isCompactTerminalChild?: boolean;
 }
 
 /**
@@ -3200,6 +3442,8 @@ export class ConversationMetricsEngine {
   private pricingResolveInFlight: Promise<Record<string, ApiPricingEntry>> | null = null;
   private hasLoadedRemotePricing = false;
   private readonly cache = new Map<string, CachedConversationState>();
+  private readonly terminalChildCache = new Map<string, CachedConversationState>();
+  private readonly protectedMainDbPaths = new Map<string, number>();
   private readonly pendingReads = new Map<string, Promise<CachedConversationState | null>>();
   private readonly verifiedSniffedChildrenByDb = new Map<string, { fileId: string; stepCount: number; children: Set<string> }>();
   private readonly recentActiveChildUntilByDb = new Map<string, number>();
@@ -3331,15 +3575,52 @@ export class ConversationMetricsEngine {
   }
 
   private setCachedState(dbPath: string, state: CachedConversationState): void {
+    this.terminalChildCache.delete(dbPath);
     if (this.cache.has(dbPath)) {
       this.cache.delete(dbPath);
     }
     this.cache.set(dbPath, state);
     while (this.cache.size > MAX_CACHED_CONVERSATIONS) {
-      const oldestKey = this.cache.keys().next().value;
+      let oldestKey: string | undefined;
+      for (const candidateKey of this.cache.keys()) {
+        if (candidateKey !== dbPath && !this.protectedMainDbPaths.has(candidateKey)) {
+          oldestKey = candidateKey;
+          break;
+        }
+      }
       if (oldestKey === undefined) break;
       this.cache.delete(oldestKey);
     }
+  }
+
+  private setTerminalChildCache(dbPath: string, state: CachedConversationState): void {
+    if (this.terminalChildCache.has(dbPath)) {
+      this.terminalChildCache.delete(dbPath);
+    }
+    this.terminalChildCache.set(dbPath, state);
+    while (this.terminalChildCache.size > MAX_TERMINAL_CHILD_CACHE_ENTRIES) {
+      const oldestKey = this.terminalChildCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.terminalChildCache.delete(oldestKey);
+    }
+  }
+
+  private demoteTerminalChildToCompactCache(dbPath: string, state: CachedConversationState): void {
+    if (state.fromErrorFallback || this.protectedMainDbPaths.has(dbPath)) return;
+    const compact: CachedConversationState = state.isCompactTerminalChild
+      ? state
+      : {
+          ...state,
+          rawSteps: [],
+          generations: new Map(),
+          stepPrefixCutoffIdx: -1,
+          stepPrefixDigest: '',
+          genPrefixCutoffIdx: -1,
+          genPrefixDigest: '',
+          isCompactTerminalChild: true,
+        };
+    this.cache.delete(dbPath);
+    this.setTerminalChildCache(dbPath, compact);
   }
 
   private async readSingleDbState(
@@ -3377,7 +3658,7 @@ export class ConversationMetricsEngine {
       return null;
     }
 
-    const cached = this.cache.get(dbPath);
+    const cached = this.cache.get(dbPath) ?? this.terminalChildCache.get(dbPath);
     const existing = cached?.fileId === dbStat.fileId ? cached : undefined;
     const walMtimeMs = walStat?.mtimeMs ?? 0;
     const walSize = walStat?.size ?? 0;
@@ -3391,11 +3672,17 @@ export class ConversationMetricsEngine {
       existing.walMtimeMs === walMtimeMs &&
       existing.walSize === walSize
     ) {
-      this.setCachedState(dbPath, existing);
+      if (existing.isCompactTerminalChild) {
+        this.setTerminalChildCache(dbPath, existing);
+      } else {
+        this.setCachedState(dbPath, existing);
+      }
       return existing;
     }
 
-    const canReuseIncremental = Boolean(existing && !existing.fromErrorFallback);
+    const canReuseIncremental = Boolean(
+      existing && !existing.fromErrorFallback && !existing.isCompactTerminalChild
+    );
     const prevStepPrefixCutoffIdx =
       canReuseIncremental && existing!.stepPrefixCutoffIdx >= 0
         ? existing!.stepPrefixCutoffIdx
@@ -3655,7 +3942,20 @@ export class ConversationMetricsEngine {
             }
           }
         }
-        if (generation.responseModel || generation.modelDisplayName || generation.plannerModelName || generation.modelEnum || generation.planModelEnum || generation.executionModelEnum || generation.maxContextTokens) {
+        const hasEstimatedTokensUsed =
+          typeof generation.estimatedTokensUsed === 'number' &&
+          Number.isFinite(generation.estimatedTokensUsed) &&
+          generation.estimatedTokensUsed > 0;
+        if (
+          generation.responseModel ||
+          generation.modelDisplayName ||
+          generation.plannerModelName ||
+          generation.modelEnum ||
+          generation.planModelEnum ||
+          generation.executionModelEnum ||
+          generation.maxContextTokens ||
+          hasEstimatedTokensUsed
+        ) {
           const modelOnlyGen: ParsedGenMetadata = {
             ...(generation.responseModel ? { responseModel: generation.responseModel } : {}),
             ...(generation.modelDisplayName ? { modelDisplayName: generation.modelDisplayName } : {}),
@@ -3664,10 +3964,24 @@ export class ConversationMetricsEngine {
             ...(generation.planModelEnum ? { planModelEnum: generation.planModelEnum } : {}),
             ...(generation.executionModelEnum ? { executionModelEnum: generation.executionModelEnum } : {}),
             ...(generation.maxContextTokens ? { maxContextTokens: generation.maxContextTokens } : {}),
+            ...(hasEstimatedTokensUsed ? { estimatedTokensUsed: generation.estimatedTokensUsed } : {}),
           };
           for (const step of linked) {
-            if (!step.generation && (!generation.executionId || !step.executionId || step.executionId === generation.executionId)) {
-              step.generation = modelOnlyGen;
+            if (!generation.executionId || !step.executionId || step.executionId === generation.executionId) {
+              if (!step.generation) {
+                step.generation = modelOnlyGen;
+              } else if (
+                hasEstimatedTokensUsed &&
+                !(
+                  typeof step.generation.estimatedTokensUsed === 'number' &&
+                  step.generation.estimatedTokensUsed > 0
+                )
+              ) {
+                step.generation = {
+                  ...step.generation,
+                  estimatedTokensUsed: generation.estimatedTokensUsed,
+                };
+              }
             }
           }
           attachCompactionStepModel(generation);
@@ -3677,12 +3991,58 @@ export class ConversationMetricsEngine {
       // 第 2 遍：回填缺失内联 field 9 / cacheWriteTokens 的 stepType=15，并收集压缩步 (step_type=23)、重试/中断等独立计费 gen_metadata
       const unmatchedUsageGenerations: Array<{ generation: ParsedGenMetadata; timestampSeconds: number | null }> = [];
       const genCountByStepIdx = new Map<number, number>();
-      for (const [, generation] of sortedGenerations) {
+      const singleStepCompetitors = new Map<number, number[]>();
+      for (const [genIdx, generation] of sortedGenerations) {
         const u = generation.usage;
         if (!u || u.rawInputTokens + u.cachedReadTokens + u.cacheWriteTokens + u.outputTokens <= 0) continue;
-        for (const step of resolveCandidate15Steps(generation)) {
+        const allLinked = resolveCandidate15Steps(generation);
+        for (const step of allLinked) {
           genCountByStepIdx.set(step.idx, (genCountByStepIdx.get(step.idx) ?? 0) + 1);
         }
+        if (matchedGenIdxs.has(genIdx)) continue;
+        const missingCandidates = allLinked.filter(
+          step =>
+            !claimedUsageStepIdxs.has(step.idx) &&
+            !step.hasUsage &&
+            (!generation.executionId || !step.executionId || step.executionId === generation.executionId)
+        );
+        if (missingCandidates.length === 1) {
+          const targetIdx = missingCandidates[0]!.idx;
+          const list = singleStepCompetitors.get(targetIdx) ?? [];
+          list.push(genIdx);
+          singleStepCompetitors.set(targetIdx, list);
+        }
+      }
+      // 竞争仲裁（对齐 ssh-remote-rpc.ts）：多条 gen_metadata 竞争同一缺失内联 usage 的 stepType=15 时，
+      // 优先选择 outputTokens > 0 且时间靠后（最大 genIdx）的最终响应回填步骤，早先失败/中断重试留给 unmatchedUsageGenerations。
+      for (const [stepIdx, genIdxList] of singleStepCompetitors.entries()) {
+        const targetStep = stepByIndex.get(stepIdx);
+        if (!targetStep || claimedUsageStepIdxs.has(stepIdx) || targetStep.hasUsage) continue;
+        let winnerGenIdx = genIdxList[genIdxList.length - 1]!;
+        for (let k = genIdxList.length - 1; k >= 0; k--) {
+          const candidateIdx = genIdxList[k]!;
+          const candidateGen = generations.get(candidateIdx);
+          if ((candidateGen?.usage?.outputTokens ?? 0) > 0) {
+            winnerGenIdx = candidateIdx;
+            break;
+          }
+        }
+        const winnerGen = generations.get(winnerGenIdx);
+        const u = winnerGen?.usage;
+        if (!winnerGen || !u) continue;
+        const linked = resolveCandidate15Steps(winnerGen);
+        targetStep.hasUsage = true;
+        targetStep.rawInputTokens = u.rawInputTokens;
+        targetStep.outputTokens = u.outputTokens;
+        targetStep.cacheWriteTokens = u.cacheWriteTokens;
+        targetStep.cachedReadTokens = u.cachedReadTokens;
+        targetStep.reasoningTokens = u.reasoningTokens;
+        targetStep.candidateTokens = u.candidateTokens;
+        targetStep.generation = canAttachAuthoritativeTiming(winnerGen, linked.length, targetStep)
+          ? winnerGen
+          : stripTimingFromGeneration(winnerGen);
+        claimedUsageStepIdxs.add(targetStep.idx);
+        matchedGenIdxs.add(winnerGenIdx);
       }
       for (const [genIdx, generation] of sortedGenerations) {
         if (matchedGenIdxs.has(genIdx) || !generation.usage) continue;
@@ -4115,6 +4475,8 @@ export class ConversationMetricsEngine {
     }
 
     if (!dbPathOverride) {
+      this.protectedMainDbPaths.set(dbPath, (this.protectedMainDbPaths.get(dbPath) ?? 0) + 1);
+      try {
       const pendingChildren = [...candidateChildIds].map(childId => ({
         childId,
         parentId: mainIdLower,
@@ -4374,6 +4736,7 @@ export class ConversationMetricsEngine {
         evaluatedRecentChildren.push({ record, explicitActive, childTurnTerminated });
       }
       // 第二阶段：基于全局实锤活跃兄弟数统一结算过渡防抖保活（绝不混入前台 isStreaming）
+      const terminatedRecentChildIds = new Set<string>();
       for (const { record, explicitActive, childTurnTerminated } of evaluatedRecentChildren) {
         const { childId, childDbPath, childState, latestChildMtime } = record;
         let childActive = explicitActive;
@@ -4402,14 +4765,27 @@ export class ConversationMetricsEngine {
           }
         } else if (childTurnTerminated) {
           this.recentActiveChildUntilByDb.delete(childDbPath);
+          terminatedRecentChildIds.add(childId);
         }
         if (childActive) {
           activeChildSubagents++;
           activeVerifiedChildIds.add(childId);
         }
       }
-      if (!mainState.fromErrorFallback && this.cache.has(dbPath)) {
+      // 将已确认终态且非活跃的历史子库降级为轻量不可变聚合缓存（释放 rawSteps/generations 并提容至 512），消除超长 Swarm 会话 LRU 抖动风暴
+      for (const record of verifiedChildRecords) {
+        if (activeVerifiedChildIds.has(record.childId)) continue;
+        if (!record.recent || terminatedRecentChildIds.has(record.childId)) {
+          this.demoteTerminalChildToCompactCache(record.childDbPath, record.childState);
+        }
+      }
+      if (!mainState.fromErrorFallback && !mainState.isCompactTerminalChild) {
         this.setCachedState(dbPath, mainState);
+      }
+      } finally {
+        const nextRefs = (this.protectedMainDbPaths.get(dbPath) ?? 1) - 1;
+        if (nextRefs <= 0) this.protectedMainDbPaths.delete(dbPath);
+        else this.protectedMainDbPaths.set(dbPath, nextRefs);
       }
     }
 
@@ -4431,12 +4807,18 @@ export class ConversationMetricsEngine {
                 Boolean(step.toolCallName && SUBAGENT_TOOL_NAMES.has(step.toolCallName)));
             if (!isSubStep) return step;
             if (step.childConversationIds && step.childConversationIds.length > 0) {
-              const allVerified = step.childConversationIds.every((cid) => verifiedChildIds.has(cid.toLowerCase()));
-              const noneActive = step.childConversationIds.every((cid) => !activeVerifiedChildIds.has(cid.toLowerCase()));
-              if (allVerified && noneActive) {
-                return { ...step, status: 3 };
+              const linkedVerified = step.childConversationIds
+                .map((cid) => cid.toLowerCase())
+                .filter((cid) => verifiedChildIds.has(cid));
+              if (linkedVerified.length > 0) {
+                if (
+                  failedChildCount === 0 &&
+                  linkedVerified.every((cid) => !activeVerifiedChildIds.has(cid))
+                ) {
+                  return { ...step, status: 3 };
+                }
+                return step;
               }
-              return step;
             }
             // 无显式内联 UUID 的历史批次派发步（如通过 summaries/嗅探识别的 Swarm 步），若其后已有新的模型生成步或全部验证子库均已完结，不再重复占活跃位
             if (failedChildCount === 0 && (activeChildSubagents === 0 || idx < latestMainModelStepPos)) {
@@ -4566,6 +4948,8 @@ export class ConversationMetricsEngine {
 
   public clearCache(): void {
     this.cache.clear();
+    this.terminalChildCache.clear();
+    this.protectedMainDbPaths.clear();
     this.verifiedSniffedChildrenByDb.clear();
     this.recentActiveChildUntilByDb.clear();
     this.coldSniffedByDb.clear();

@@ -132,13 +132,17 @@ function nextRows(before: Rows, acc: Account): Rows {
   return after;
 }
 
+const NON_SENSITIVE_STATE_ROW_KEYS = new Set<string>(['antigravityOnboarding']);
+
 function sanitizeJournalRows(rows: Rows): Rows {
   const result: Rows = {};
   for (const [k, v] of Object.entries(rows || {})) {
-    if (k === TOKEN || k.toLowerCase().includes('token') || k.toLowerCase().includes('oauth')) {
+    if (NON_SENSITIVE_STATE_ROW_KEYS.has(k)) {
+      result[k] = v;
+    } else if (k === TOKEN || k.toLowerCase().includes('token') || k.toLowerCase().includes('oauth')) {
       result[k] = '[REDACTED_OAUTH_TOKEN]';
     } else {
-      result[k] = v;
+      result[k] = '[REDACTED_STATE_ROW]';
     }
   }
   return result;

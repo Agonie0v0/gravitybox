@@ -15,6 +15,7 @@ import { dictionaryFromEntries } from '../dist/dictionary.js';
 import {
   supportsSshRemoteBridge,
   sanitizeHostLabel,
+  cleanHostLabel,
   parseSshTunnelProcesses,
   probeMainWorldSshRemote,
   matchMainLogRemotePort,
@@ -180,6 +181,11 @@ test('sanitizeHostLabel 清理控制字符并限制长度', () => {
   assert.equal(sanitizeHostLabel('  demo-ssh\n\r\t-host  '), 'demo-ssh -host');
   assert.equal(sanitizeHostLabel('\u0000\u001b'), '');
   assert.equal(sanitizeHostLabel('a'.repeat(300)).length, 256);
+
+  assert.equal(cleanHostLabel('SSH: prod-gpu-01'), 'prod-gpu-01');
+  assert.equal(cleanHostLabel('SSH · dev-box-02'), 'dev-box-02');
+  assert.equal(cleanHostLabel('ssh-demo'), 'ssh-demo');
+  assert.equal(cleanHostLabel('demo-ssh-host'), 'demo-ssh-host');
 });
 
 test('parseSshTunnelProcesses 仅认准父进程为官方 Antigravity 且带 -D 端口的 ssh 进程', () => {

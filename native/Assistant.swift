@@ -46,6 +46,18 @@ extension Assistant {
 final class MenuFloatingPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    override func sendEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            if !isKeyWindow {
+                makeKey()
+            }
+        default:
+            break
+        }
+        super.sendEvent(event)
+    }
 }
 
 final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
@@ -127,9 +139,6 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     var autoRestartAttempts = 0
     var lastAutoRestartAt = Date.distantPast
     var selfHealingPending = false
-    /// 汉化开关命令在途时的乐观目标：期间到达的陈旧状态快照不得把开关弹回旧状态。
-    var pendingTranslationTarget: Bool?
-    var translationCommandGeneration = 0
     var pendingLanguageTarget: String?
     var languageCommandGeneration = 0
     var pendingHudTarget: Bool?
@@ -148,7 +157,16 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     var overviewEnvironmentKey: String = "all"
     var remoteSessions: [[String: Any]] = []
     var remoteQuotaRefreshing = false
-    private var isBreathing = false
+    private(set) var environmentsRevision: Int = 0
+    private(set) var focusedEnvironmentId: String = "local"
+    private(set) var backendEnvironmentNodes: [CanonicalHostEnvironment] = []
+    private(set) var hasAuthoritativeEnvironmentsPayload: Bool = false
+    private(set) var activeNodeScope: EnvironmentScope = .local
+    var activeNodeFollowFocus: Bool { !userPinnedContext }
+    private(set) var usageFilterScope: EnvironmentScope = .all
+    private(set) var usageAvailableEnvironments: [[String: Any]] = []
+    private(set) var usageEnvironmentShareById: [String: Double] = [:]
+    private(set) var isBreathing = false
     private var breathingMotion: DesignMotion?
     var lastTaskRevision = -1
     var statusValue = LiveStatus()
@@ -188,10 +206,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     var accountListWaiters: [(Result<[String: Any], Error>) -> Void] = []
     private let stateWatchQueue = DispatchQueue(label: "local.gravitybox.state-watch", qos: .utility)
     private var stateWatchWorkItem: DispatchWorkItem?
-    var antigravityWasRunning = false
     var suppressLifecycleAutoQuitUntil: Date = .distantPast
-    var workspaceLaunchObserver: NSObjectProtocol?
-    var workspaceTerminateObserver: NSObjectProtocol?
     static var applicationChannel = "stable"
     static var selectedTarget: DesktopApplicationTarget { DesktopApplicationTarget(channel: applicationChannel) }
     var targetApplication: DesktopApplicationTarget { Self.selectedTarget }
@@ -236,10 +251,9 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
                 RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
             }
         }
-        if let peer = Self.findExistingMainPeer() {
+        if Self.findExistingMainPeer() != nil {
             if !CommandLine.arguments.contains("--launched-by-antigravity") {
                 DistributedNotificationCenter.default().postNotificationName(NSNotification.Name("local.gravitybox.show-panel"), object: nil, userInfo: nil, deliverImmediately: true)
-                peer.activate()
             }
             quitting = true; NSApp.terminate(nil); return
         }
@@ -263,6 +277,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         if configuration.value.navigationVersion != 5 {
             configuration.value.migrateNavigation(); try? configuration.save()
         }
+        syncUsageFilterScopeFromConfiguration()
         loadUIBootstrapSnapshot()
         installApplicationMenu()
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -272,11 +287,12 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         item.button?.action = #selector(statusItemClicked(_:))
         item.button?.sendAction(on: [.leftMouseDown, .rightMouseDown])
         updateStatusItemState()
-        DistributedNotificationCenter.default().addObserver(self, selector: #selector(showPanel), name: NSNotification.Name("local.gravitybox.show-panel"), object: nil)
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(handleAppIconReopen), name: NSNotification.Name("local.gravitybox.show-panel"), object: nil)
         bridge.launch { [weak self] result in
             guard let self else { return }
             switch result {
             case .success:
+                self.syncBackendProxyConfiguration()
                 self.refresh()
             case .failure(let error):
                 self.showMessage(error.localizedDescription, error: true)
@@ -286,10 +302,21 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         let data = NSAppleEventManager.shared().currentAppleEvent?.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))
         let loginLaunch = data?.enumCodeValue == OSType(keyAELaunchedAsLogInItem)
         let launchedByAntigravity = CommandLine.arguments.contains("--launched-by-antigravity")
-        if !loginLaunch && !launchedByAntigravity { showPanel() }
-        installAntigravityLifecycleObserver()
+        switch Self.startupLaunchAction(
+            launchAntigravityOnStart: configuration.value.launchAntigravityOnStart,
+            loginLaunch: loginLaunch,
+            restartedAfterUpdate: restartedAfterUpdate,
+            launchedByAntigravity: launchedByAntigravity
+        ) {
+        case .launchAntigravityInBackground:
+            launchAntigravityDirectly()
+        case .stayInMenuBar:
+            break
+        case .showMainPanel:
+            showPanel()
+        }
         installQuotaScheduleObservers()
-        syncLifecycleAgentRegistration()
+        cleanupLegacyLifecycleAgent()
         // 登录项启动时没有窗口，历史上因此从未创建定时器，菜单栏配额永远不更新。
         configureRefreshTimer()
         if quotaRefreshTimer == nil { configureQuotaRefreshTimer() }
@@ -361,26 +388,26 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         guard !pool.isEmpty else { return nil }
         if !statusValue.liveAccountEmail.isEmpty,
            let matched = pool.first(where: { ($0["email"] as? String ?? "").caseInsensitiveCompare(statusValue.liveAccountEmail) == .orderedSame }) {
-            return matched
+            return fusedAccount(matched)
         }
         let targetId = !activeAccountId.isEmpty ? activeAccountId : (accountsPage?.activeId ?? "")
         if !targetId.isEmpty,
            let matched = pool.first(where: { $0["id"] as? String == targetId }) {
-            return matched
+            return fusedAccount(matched)
         }
-        return pool.first
+        return pool.first.map { fusedAccount($0) }
     }
 
     func resolvedMenuAccount() -> [String:Any]? {
         if !statusValue.liveAccountEmail.isEmpty,
            let matched = cachedAccounts.first(where: { ($0["email"] as? String ?? "").caseInsensitiveCompare(statusValue.liveAccountEmail) == .orderedSame }) {
-            return matched
+            return fusedAccount(matched)
         }
         if !activeAccountId.isEmpty,
            let matched = cachedAccounts.first(where: { $0["id"] as? String == activeAccountId }) {
-            return matched
+            return fusedAccount(matched)
         }
-        return cachedAccounts.first
+        return cachedAccounts.first.map { fusedAccount($0) }
     }
 
     private var cachedBaseMenuIcon: NSImage?
@@ -456,10 +483,10 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         #if NATIVE_UI_TEST
         button.alphaValue = targetAlpha
         #else
-        if quotaRefreshing && reachable {
+        if quotaRefreshing && reachable && Design.shouldAnimate(in: button) {
             if !isBreathing {
                 isBreathing = true
-                startBreathingPulse(baseAlpha: targetAlpha)
+                startBreathingPulse(baseAlpha: targetAlpha, buttonOverride: buttonOverride)
             }
         } else {
             if isBreathing {
@@ -474,8 +501,15 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         #endif
     }
 
-    private func startBreathingPulse(baseAlpha: CGFloat) {
-        guard isBreathing, let button = item?.button else { return }
+    func startBreathingPulse(baseAlpha: CGFloat, buttonOverride: NSButton? = nil) {
+        guard isBreathing, let button = buttonOverride ?? item?.button else { return }
+        guard Design.shouldAnimate(in: button) else {
+            isBreathing = false
+            breathingMotion?.cancel()
+            breathingMotion = nil
+            button.alphaValue = baseAlpha
+            return
+        }
         breathingMotion?.cancel()
         let motion = DesignMotion()
         breathingMotion = motion
@@ -484,14 +518,30 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
             button?.alphaValue = p
         } completion: { [weak self, weak button] in
             guard let self, self.isBreathing, let button else { return }
+            guard Design.shouldAnimate(in: button) else {
+                self.isBreathing = false
+                self.breathingMotion?.cancel()
+                self.breathingMotion = nil
+                button.alphaValue = baseAlpha
+                return
+            }
             self.breathingMotion?.animate(in: button, from: lowAlpha, to: baseAlpha, curve: .breathe, threshold: 0.01) { [weak button] p in
                 button?.alphaValue = p
-            } completion: { [weak self] in
+            } completion: { [weak self, weak button] in
                 guard let self, self.isBreathing else { return }
-                self.startBreathingPulse(baseAlpha: baseAlpha)
+                DispatchQueue.main.async { [weak self, weak button] in
+                    guard let self, self.isBreathing else { return }
+                    self.startBreathingPulse(baseAlpha: baseAlpha, buttonOverride: button)
+                }
             }
         }
     }
+    #if NATIVE_UI_TEST
+    func triggerBreathingPulseForTesting(baseAlpha: CGFloat, button: NSButton) {
+        isBreathing = true
+        startBreathingPulse(baseAlpha: baseAlpha, buttonOverride: button)
+    }
+    #endif
     func scheduleConfigurationSave() {
         configSaveWorkItem?.cancel()
         let saveWork = DispatchWorkItem { [weak self] in try? self?.configuration.save() }
@@ -547,6 +597,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         )
         panel.isFloatingPanel = true
         panel.becomesKeyOnlyIfNeeded = false
+        panel.worksWhenModal = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.isOpaque = false
@@ -575,7 +626,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         guard let panel = menuPanel else { return }
         let current = panel.frame
         let anchorMaxY = menuPanelAnchorMaxY ?? current.maxY
-        let screenFrame = (item?.button?.window?.screen ?? panel.screen ?? NSScreen.main)?.visibleFrame
+        let screenFrame = (panel.screen ?? item?.button?.window?.screen ?? NSScreen.main)?.visibleFrame
             ?? NSScreen.screens.first?.visibleFrame
         var nextX = current.origin.x
         if let screenFrame {
@@ -671,7 +722,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
             let maxAvailableH = max(300, topY - (screenFrame.minY + 8))
             let finalSize = NSSize(width: desiredSize.width, height: min(desiredSize.height, maxAvailableH))
             let x = min(max(screenFrame.minX + 8, round(btnRect.midX - finalSize.width / 2)), screenFrame.maxX - finalSize.width - 8)
-            let y = round(topY - finalSize.height)
+            let y = max(screenFrame.minY + 8, round(topY - finalSize.height))
             finalFrame = NSRect(origin: NSPoint(x: x, y: y), size: finalSize)
             resolvedTopY = topY
         }
@@ -786,6 +837,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         removePopoverMonitors()
         popoverGlobalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
             guard let self, self.isMenuPanelShown else { return }
+            if NSApp.windows.contains(where: { $0.isVisible && $0.level.rawValue >= NSWindow.Level.popUpMenu.rawValue }) { return }
             let mouseLoc = NSEvent.mouseLocation
             if let popWin = self.menuPanel, popWin.frame.contains(mouseLoc) { return }
             if let btnWin = self.item?.button?.window, btnWin.frame.contains(mouseLoc) { return }
@@ -824,10 +876,15 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
                     self.showSettings()
                     return nil
                 case "o":
+                    let tab = self.menuPanelController?.selectedTab ?? 0
+                    let scope: EnvironmentScope = tab == 1
+                        ? self.activeNodeScope
+                        : EnvironmentScope(rawEnvironmentId: self.menuPanelController?.selectedEnvironmentId)
                     self.openMainWindowFromMenuPanel(
-                        tab: self.menuPanelController?.selectedTab ?? 0,
+                        tab: tab,
+                        scope: scope,
                         usagePeriod: self.menuPanelController?.selectedPeriod ?? 0,
-                        usageEnvironmentId: self.menuPanelController?.selectedEnvironmentId
+                        carryLocalToOverview: true
                     )
                     return nil
                 case "r":
@@ -953,17 +1010,33 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     }
 
     func openMainWindowFromMenuPanel(tab: Int, usagePeriod: Int, usageEnvironmentId: String? = nil) {
+        let scope = EnvironmentScope(rawEnvironmentId: usageEnvironmentId)
+        openMainWindowFromMenuPanel(
+            tab: tab,
+            scope: tab == 1 ? activeNodeScope : scope,
+            usagePeriod: usagePeriod,
+            carryLocalToOverview: false
+        )
+    }
+
+    /// Wave 2 symmetrical entry: carries the active environment scope from MenuPanel into Usage or Overview.
+    func openMainWindowFromMenuPanel(
+        tab: Int,
+        scope: EnvironmentScope,
+        usagePeriod: Int = 0,
+        carryLocalToOverview: Bool = true
+    ) {
         closeMenuPopover(animated: false)
         switch tab {
         case 0:
             let targetPeriod = max(0, min(3, usagePeriod))
             usageSelectedPeriod = targetPeriod
-            let resolvedEnv: String? = usageEnvironmentId.map {
-                let t = $0.trimmingCharacters(in: .whitespacesAndNewlines)
-                return t.isEmpty ? "all" : t
-            }
-            if let resolvedEnv {
-                usageSelectedEnvironment = resolvedEnv
+            let resolvedEnv = scope.rawEnvironmentId
+            usageSelectedEnvironment = resolvedEnv
+            usageFilterScope = scope
+            if let configuration, configuration.value.menuUsageEnvironmentId != resolvedEnv {
+                configuration.value.menuUsageEnvironmentId = resolvedEnv
+                scheduleConfigurationSave()
             }
             usageScrollOrigin = .zero
             usagePage?.periodSegment.selectedSegment = targetPeriod
@@ -973,6 +1046,18 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
                 usagePage.applyExternalFilter(period: targetPeriod, environmentId: resolvedEnv)
             }
         case 1:
+            switch scope {
+            case .remote(let envId):
+                if canonicalRemoteHosts().contains(where: { $0.environmentId == envId }) {
+                    selectOverviewEnvironment("env:\(envId)")
+                } else {
+                    selectOverviewEnvironment("all")
+                }
+            case .local:
+                selectOverviewEnvironment(carryLocalToOverview ? "local" : "all")
+            case .all:
+                selectOverviewEnvironment("all")
+            }
             selectPage(0)
         case 2:
             selectPage(1)
@@ -1448,6 +1533,16 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         }
     }
     func standbyRefreshMode(_ acc: [String: Any]) -> String? {
+        if let activeRemoteIds = acc["activeRemoteEnvIds"] as? [String], !activeRemoteIds.isEmpty {
+            return nil
+        }
+        if quotaSourceEnvironment(forAccount: acc) != nil {
+            return nil
+        }
+        let remoteHosts = canonicalRemoteHosts()
+        if !remoteHosts.isEmpty && SshEnvironmentResolver.matchingHosts(forAccount: acc, hosts: remoteHosts).contains(where: { $0.state == .online }) {
+            return nil
+        }
         guard let status = acc["standbyRefreshStatus"] as? [String: Any],
               let mode = status["mode"] as? String else { return nil }
         let trimmed = mode.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1510,10 +1605,11 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
             guard isEligibleForAutoQuotaRefresh(acc) else { continue }
             hasEligible = true
             let quota = acc["quota"] as? [String: Any]
-            let stamp = QuotaPresentation.number(acc["persisted_quota_last_updated"])
+            let rawStamp = QuotaPresentation.number(acc["persisted_quota_last_updated"])
                 ?? QuotaPresentation.number(quota?["last_updated"])
                 ?? QuotaPresentation.number(acc["quota_last_updated"])
                 ?? 0
+            let stamp = rawStamp > 10_000_000_000 ? rawStamp / 1000.0 : rawStamp
             if stamp <= 0 {
                 return 0
             }
@@ -1673,7 +1769,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     func windowDidDeminiaturize(_ notification:Notification){configureRefreshTimer();syncActivationPolicy();refresh()}
     func windowDidChangeOcclusionState(_ notification:Notification){configureRefreshTimer()}
 
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showPanel(); return true }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { handleAppIconReopen(); return true }
     @objc func showAccounts() { selectPage(1) }
     @objc func showUsage() { selectPage(2) }
     @objc func showSettings() { selectPage(3) }
@@ -1685,13 +1781,6 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         bridge.send(payload) { [weak self] result in switch result { case .success(let value): completion?(value); case .failure(let error): self?.showMessage(error.localizedDescription, error: true) } }
     }
     func refresh(taskPollOnly: Bool = false) {
-        #if !NATIVE_UI_TEST
-        if Self.isAntigravityRunning() {
-            antigravityWasRunning = true
-        } else if antigravityWasRunning {
-            checkAntigravityExitedAndQuitIfNeeded()
-        }
-        #endif
         guard !quitting else { return }
         if refreshInFlight {
             if taskPollOnly {
@@ -1711,11 +1800,18 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
             case .success(let value):
                 self.updateManager.cleanupAfterSuccessfulLaunch()
                 let prevRemoteSyncRevision = self.statusValue.remoteSyncRevision
-                self.reachable = true; self.recoveryAttempts = 0; self.autoRestartAttempts = 0; var raw=value["status"] as? [String:Any] ?? [:];raw["taskRevision"]=value["taskRevision"];raw["runningTasks"]=value["runningTasks"];self.statusValue=self.mergeStatusSnapshot(raw, previous:self.statusValue)
-                if self.statusValue.remoteSyncRevision > prevRemoteSyncRevision {
+                let prevEnvironmentsRevision = self.environmentsRevision
+                self.reachable = true; self.recoveryAttempts = 0; self.autoRestartAttempts = 0
+                var raw=value["status"] as? [String:Any] ?? [:]
+                raw["taskRevision"]=value["taskRevision"];raw["runningTasks"]=value["runningTasks"]
+                if raw["environments"] == nil, let topEnvs = value["environments"] { raw["environments"] = topEnvs }
+                if raw["environmentsRevision"] == nil, let topEnvRev = value["environmentsRevision"] { raw["environmentsRevision"] = topEnvRev }
+                if raw["focusedEnvironmentId"] == nil, let topFocused = value["focusedEnvironmentId"] { raw["focusedEnvironmentId"] = topFocused }
+                self.statusValue=self.mergeStatusSnapshot(raw, previous:self.statusValue)
+                self.syncEnvironmentsFromPayload(raw, notifyUI: true, notifyMenuPanel: false)
+                if self.statusValue.remoteSyncRevision > prevRemoteSyncRevision || self.environmentsRevision > prevEnvironmentsRevision {
                     self.usageLastFetchTimeByPeriod.removeAll()
                 }
-                self.syncRemoteSessionsFromPayload(raw["remoteSessions"] as? [[String: Any]], focusedKey: self.statusValue.focusedContextKey)
                 var taskRevAdvanced = false
                 if let rows=value["tasks"] as? [[String:Any]] {
                     self.taskRows=rows
@@ -1748,7 +1844,10 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
                 if !self.bridge.isOwnedProcessRunning && !self.bridge.isRestarting && !self.selfHealingPending && self.recoveryAttempts < 3 && Date() >= self.nextRecoveryAt {
                     self.recoveryAttempts += 1; self.nextRecoveryAt = Date().addingTimeInterval(Double(self.recoveryAttempts * 10))
                     self.bridge.launch { [weak self] launchResult in
-                        if case .success = launchResult { self?.refresh() }
+                        if case .success = launchResult {
+                            self?.syncBackendProxyConfiguration()
+                            self?.refresh()
+                        }
                     }
                 }
             }
@@ -1818,6 +1917,9 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
             }
         }
         updateQuotaRefreshControls()
+        if menuPanelController?.isViewLoaded == true {
+            menuPanelController?.syncDebugPortBanner()
+        }
     }
     func showMessage(_ message: String, error: Bool = false) {
         guard error, !message.isEmpty else { lastOperationError = nil; pageHost.setAccessibilityHelp(nil); return }
@@ -1850,10 +1952,18 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
                     let wasReachable = self.reachable
                     let taskChanged = self.statusValue.taskRevision != rawTaskRev
                     let prevRemoteSyncRevision = self.statusValue.remoteSyncRevision
+                    let prevEnvironmentsRevision = self.environmentsRevision
                     self.reachable = true
                     self.recoveryAttempts = 0
                     self.statusValue = self.mergeStatusSnapshot(raw, previous: self.statusValue)
-                    if self.statusValue.remoteSyncRevision > prevRemoteSyncRevision {
+                    if raw["environments"] != nil
+                        || raw["environmentsRevision"] != nil
+                        || raw["focusedEnvironmentId"] != nil
+                        || raw["remoteSessions"] != nil
+                        || raw["focusedContextKey"] != nil {
+                        self.syncEnvironmentsFromPayload(raw, notifyUI: true, notifyMenuPanel: false)
+                    }
+                    if self.statusValue.remoteSyncRevision > prevRemoteSyncRevision || self.environmentsRevision > prevEnvironmentsRevision {
                         self.usageLastFetchTimeByPeriod.removeAll()
                     }
                     self.handlePricingRevisionIfChanged()
@@ -1888,16 +1998,6 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         if raw["remoteObservedVersion"] == nil { merged.remoteObservedVersion = previous.remoteObservedVersion }
         if raw["remoteSyncRevision"] == nil { merged.remoteSyncRevision = previous.remoteSyncRevision }
         if raw["remoteSessions"] == nil { merged.remoteSessions = previous.remoteSessions }
-        if let target = pendingTranslationTarget {
-            merged.translationEnabled = target
-            if merged.mode == "debug-port-missing" {
-                if !target && !effectiveHudEnabled() { merged.mode = "paused" }
-            } else if target {
-                if merged.mode == "paused" || merged.mode == "error" || merged.mode == "starting" { merged.mode = "waiting" }
-            } else {
-                merged.mode = "paused"
-            }
-        }
         if let hudTarget = pendingHudTarget {
             merged.hudEnabled = hudTarget
         }
@@ -1909,41 +2009,109 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         return merged
     }
 
+    static let remoteSessionsDidChangeNotification = Notification.Name("local.gravitybox.remoteSessionsDidChange")
+
+    func syncUsageFilterScopeFromConfiguration() {
+        let raw = configuration?.value.menuUsageEnvironmentId ?? "all"
+        let scope = EnvironmentScope(rawEnvironmentId: raw)
+        usageFilterScope = scope
+        usageSelectedEnvironment = scope.rawEnvironmentId
+    }
+
+    var isMenuQuotaFollowingFocus: Bool {
+        guard !userPinnedContext, case .remote(let activeEnvId) = activeNodeScope else { return false }
+        if focusedEnvironmentId != "local" && focusedEnvironmentId == activeEnvId {
+            return true
+        }
+        let focusedKey = statusValue.focusedContextKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard focusedKey.hasPrefix("remote:") else { return false }
+        let focusedRemoteKey = String(focusedKey.dropFirst("remote:".count))
+        if let matchedSession = remoteSessions.first(where: { ($0["remoteKey"] as? String) == focusedRemoteKey }) {
+            return remoteEnvironmentId(for: matchedSession) == activeEnvId
+        }
+        return false
+    }
+
     func remoteEnvironmentId(for session: [String: Any]) -> String {
-        if let envId = (session["environmentId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !envId.isEmpty {
+        if let envId = ((session["environmentId"] as? String) ?? (session["id"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !envId.isEmpty {
             return envId
         }
         let rawHost = (session["hostLabel"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let host = rawHost.isEmpty ? "ssh" : rawHost.lowercased()
-        return "host:\(host)"
+        let cleaned = SshEnvironmentResolver.cleanHostLabel(rawHost)
+        return cleaned.isEmpty ? "ssh:remote" : "ssh:\(cleaned.lowercased())"
+    }
+
+    func canonicalAllEnvironments(includeLocal: Bool = false, includeHistorical: Bool = true) -> [CanonicalHostEnvironment] {
+        let merged = SshEnvironmentResolver.mergeEnvironments(
+            primaryNodes: hasAuthoritativeEnvironmentsPayload ? backendEnvironmentNodes : [],
+            legacyRemoteSessions: remoteSessions,
+            availableEnvironments: usageAvailableEnvironments,
+            usageShareByEnvId: usageEnvironmentShareById
+        )
+        return merged.filter { node in
+            if !includeLocal && node.isLocal { return false }
+            if !includeHistorical && !node.isLocal && node.state == .historicalOnly { return false }
+            return true
+        }
+    }
+
+    func canonicalRemoteHosts() -> [CanonicalHostEnvironment] {
+        canonicalAllEnvironments(includeLocal: false, includeHistorical: false)
+    }
+
+    func usageRemoteEnvironments() -> [CanonicalHostEnvironment] {
+        canonicalAllEnvironments(includeLocal: false, includeHistorical: true)
+    }
+
+    func environmentNode(for environmentId: String) -> CanonicalHostEnvironment? {
+        let normalized = EnvironmentScope(rawEnvironmentId: environmentId).rawEnvironmentId
+        if normalized == "all" { return nil }
+        return canonicalAllEnvironments(includeLocal: true, includeHistorical: true)
+            .first { $0.environmentId == normalized }
+    }
+
+    func selectedActiveNodeHost() -> CanonicalHostEnvironment? {
+        guard case .remote(let envId) = activeNodeScope else { return nil }
+        return canonicalRemoteHosts().first { $0.environmentId == envId }
+    }
+
+    func quotaFreshness(forHost host: CanonicalHostEnvironment, now: Date = Date()) -> QuotaFreshness {
+        SshEnvironmentResolver.resolveQuotaFreshness(
+            forHost: host,
+            staleThresholdSeconds: quotaStaleThresholdSeconds,
+            now: now
+        )
+    }
+
+    func quotaFreshness(forAccount account: [String: Any], now: Date = Date()) -> QuotaFreshness {
+        SshEnvironmentResolver.resolveQuotaFreshness(
+            forAccount: account,
+            staleThresholdSeconds: quotaStaleThresholdSeconds,
+            now: now
+        )
+    }
+
+    func fusedAccount(_ account: [String: Any]) -> [String: Any] {
+        SshEnvironmentResolver.fuseAccountQuota(account: account, hosts: canonicalRemoteHosts())
+    }
+
+    func fusedAccountsForDisplay() -> [[String: Any]] {
+        SshEnvironmentResolver.fuseAccountsQuota(accounts: cachedAccounts, hosts: canonicalRemoteHosts())
+    }
+
+    func quotaSourceEnvironment(forAccount account: [String: Any]) -> CanonicalHostEnvironment? {
+        guard let sourceId = (account["quotaSourceEnvironmentId"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !sourceId.isEmpty,
+              sourceId != "local" else { return nil }
+        return environmentNode(for: sourceId)
     }
 
     func overviewRemoteEnvironments() -> [(environmentId: String, hostLabel: String, session: [String: Any])] {
-        var order: [String] = []
-        var grouped: [String: (hostLabel: String, session: [String: Any])] = [:]
-        func score(_ s: [String: Any]) -> (Int, Double) {
-            let connectedScore = ((s["state"] as? String) == "connected") ? 1 : 0
-            let focusTs = (s["lastFocusedAt"] as? Double) ?? (s["observedAt"] as? Double) ?? 0
-            return (connectedScore, focusTs)
-        }
-        for row in remoteSessions {
-            let envId = remoteEnvironmentId(for: row)
-            let rawHost = (row["hostLabel"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let host = rawHost.isEmpty ? "SSH" : rawHost
-            if let existing = grouped[envId] {
-                let sNew = score(row)
-                let sOld = score(existing.session)
-                if sNew.0 > sOld.0 || (sNew.0 == sOld.0 && sNew.1 > sOld.1) {
-                    grouped[envId] = (host, row)
-                }
-            } else {
-                order.append(envId)
-                grouped[envId] = (host, row)
-            }
-        }
-        return order.compactMap { id in
-            guard let item = grouped[id] else { return nil }
-            return (environmentId: id, hostLabel: item.hostLabel, session: item.session)
+        canonicalRemoteHosts().map {
+            (environmentId: $0.environmentId, hostLabel: $0.hostLabel, session: $0.rawSession)
         }
     }
 
@@ -1954,80 +2122,395 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     }
 
     func selectOverviewEnvironment(_ environmentKey: String) {
-        let nextKey: String
-        if environmentKey == "local" && !remoteSessions.isEmpty {
-            nextKey = "local"
-        } else if environmentKey.hasPrefix("env:") {
-            let envId = String(environmentKey.dropFirst("env:".count))
-            let exists = overviewRemoteEnvironments().contains { $0.environmentId == envId }
-            nextKey = exists ? environmentKey : "all"
-        } else {
-            nextKey = "all"
+        let nextScope = EnvironmentScope(rawEnvironmentId: environmentKey)
+        let liveOrHistHosts = canonicalAllEnvironments(includeLocal: false, includeHistorical: true)
+        let hasAnySsh = !liveOrHistHosts.isEmpty
+        let resolvedScope: EnvironmentScope
+        switch nextScope {
+        case .all:
+            resolvedScope = .all
+        case .local:
+            resolvedScope = hasAnySsh ? .local : .all
+        case .remote(let envId):
+            resolvedScope = liveOrHistHosts.contains(where: { $0.environmentId == envId }) ? .remote(environmentId: envId) : .all
         }
-        overviewEnvironmentKey = nextKey
+        overviewEnvironmentKey = resolvedScope.overviewKey
+        usageFilterScope = resolvedScope
+        usageSelectedEnvironment = resolvedScope.rawEnvironmentId
         overview?.handleOverviewEnvironmentChanged()
         updateQuotaRefreshControls()
     }
 
-    func syncRemoteSessionsFromPayload(_ sessions: [[String: Any]]?, focusedKey: String?, notifyUI: Bool = true) {
-        if let sessions {
+    func syncEnvironmentsFromPayload(_ payload: [String: Any], notifyUI: Bool = true, notifyMenuPanel: Bool = true) {
+        if let rev = (payload["environmentsRevision"] as? NSNumber)?.intValue ?? (payload["environmentsRevision"] as? Int) {
+            environmentsRevision = rev
+        }
+        if let rawNodes = payload["environments"] as? [[String: Any]] {
+            hasAuthoritativeEnvironmentsPayload = true
+            backendEnvironmentNodes = SshEnvironmentResolver.parseEnvironments(from: rawNodes)
+        }
+        if let sessions = payload["remoteSessions"] as? [[String: Any]] {
             remoteSessions = sessions
         }
-        let validKeys = Set(remoteSessions.compactMap { row -> String? in
-            guard let rk = row["remoteKey"] as? String, !rk.isEmpty else { return nil }
-            return "remote:\(rk)"
-        })
-        if selectedContextKey != "local" && !validKeys.contains(selectedContextKey) {
-            selectedContextKey = "local"
-            userPinnedContext = false
+        if let focusedKey = payload["focusedContextKey"] as? String {
+            statusValue.focusedContextKey = focusedKey
         }
-        if !userPinnedContext {
-            if let focusedKey, validKeys.contains(focusedKey) {
-                selectedContextKey = focusedKey
-            } else if let focusedKey, focusedKey == "local" {
-                selectedContextKey = "local"
-            } else if selectedContextKey != "local" && !validKeys.contains(selectedContextKey) {
-                selectedContextKey = "local"
+
+        if let explicitFocusedEnv = (payload["focusedEnvironmentId"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !explicitFocusedEnv.isEmpty {
+            focusedEnvironmentId = explicitFocusedEnv
+        } else if let focusedNode = backendEnvironmentNodes.first(where: { $0.focused }) {
+            focusedEnvironmentId = focusedNode.environmentId
+        } else {
+            let focusedKey = statusValue.focusedContextKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            if focusedKey.hasPrefix("remote:") {
+                let rk = String(focusedKey.dropFirst("remote:".count))
+                if let matched = remoteSessions.first(where: { ($0["remoteKey"] as? String) == rk }) {
+                    focusedEnvironmentId = remoteEnvironmentId(for: matched)
+                } else if let matchedNode = backendEnvironmentNodes.first(where: { $0.primaryRemoteKey == rk }) {
+                    focusedEnvironmentId = matchedNode.environmentId
+                } else {
+                    focusedEnvironmentId = "local"
+                }
+            } else {
+                focusedEnvironmentId = "local"
             }
         }
-        let validEnvKeys = Set(overviewRemoteEnvironments().map { "env:\($0.environmentId)" })
-        if remoteSessions.isEmpty {
-            overviewEnvironmentKey = "all"
-        } else if overviewEnvironmentKey.hasPrefix("env:") && !validEnvKeys.contains(overviewEnvironmentKey) {
-            overviewEnvironmentKey = "all"
+
+        reconcileActiveNodeAndOverviewScopes()
+
+        if notifyUI {
+            overview?.syncRemoteSessionsUI()
+            if notifyMenuPanel {
+                menuPanelController?.syncFromAssistant()
+            }
+            NotificationCenter.default.post(name: Self.remoteSessionsDidChangeNotification, object: self)
         }
+    }
+
+    func syncRemoteSessionsFromPayload(_ sessions: [[String: Any]]?, focusedKey: String?, notifyUI: Bool = true) {
+        if let sessions {
+            // Explicit legacy/test session injection supersedes prior authoritative environments list
+            // unless the caller invokes `syncEnvironmentsFromPayload`.
+            hasAuthoritativeEnvironmentsPayload = false
+            backendEnvironmentNodes = []
+            remoteSessions = sessions
+        }
+        if let focusedKey {
+            statusValue.focusedContextKey = focusedKey
+        }
+        var payload: [String: Any] = [:]
+        if let sessions {
+            payload["remoteSessions"] = sessions
+        }
+        if let focusedKey {
+            payload["focusedContextKey"] = focusedKey
+        }
+        syncEnvironmentsFromPayload(payload, notifyUI: notifyUI)
+    }
+
+    func syncUsageEnvironmentsFromReport(_ report: [String: Any]) {
+        let summary = report["summary"] as? [String: Any]
+        if let envNodes = (report["environments"] as? [[String: Any]]) ?? (summary?["environments"] as? [[String: Any]]),
+           !envNodes.isEmpty {
+            hasAuthoritativeEnvironmentsPayload = true
+            backendEnvironmentNodes = SshEnvironmentResolver.parseEnvironments(from: envNodes)
+        }
+        if let rev = (report["environmentsRevision"] as? NSNumber)?.intValue ?? (report["environmentsRevision"] as? Int) {
+            environmentsRevision = max(environmentsRevision, rev)
+        }
+        let avail = (report["availableEnvironments"] as? [[String: Any]])
+            ?? (report["available_environments"] as? [[String: Any]])
+            ?? (summary?["availableEnvironments"] as? [[String: Any]])
+            ?? (summary?["available_environments"] as? [[String: Any]])
+        if let avail {
+            usageAvailableEnvironments = avail
+            for item in avail {
+                let id = ((item["environmentId"] as? String) ?? (item["id"] as? String) ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !id.isEmpty, let pct = QuotaPresentation.number(item["sharePct"] ?? item["usageSharePct"]) {
+                    usageEnvironmentShareById[id] = pct
+                }
+            }
+        }
+        if let breakdown = (report["environmentBreakdown"] as? [String: Any])
+            ?? (report["environment_breakdown"] as? [String: Any])
+            ?? (summary?["environmentBreakdown"] as? [String: Any])
+            ?? (summary?["environment_breakdown"] as? [String: Any]) {
+            if let localPct = QuotaPresentation.number(breakdown["localSharePct"] ?? breakdown["local_share_pct"]) {
+                usageEnvironmentShareById["local"] = localPct
+            }
+            if let byEnv = (breakdown["byEnvironment"] as? [[String: Any]]) ?? (breakdown["by_environment"] as? [[String: Any]]) {
+                for entry in byEnv {
+                    let id = ((entry["environmentId"] as? String) ?? (entry["id"] as? String) ?? "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !id.isEmpty, let pct = QuotaPresentation.number(entry["sharePct"] ?? entry["share_pct"]) {
+                        usageEnvironmentShareById[id] = pct
+                    }
+                }
+            }
+        }
+    }
+
+    private func reconcileActiveNodeAndOverviewScopes() {
+        let liveHosts = canonicalRemoteHosts()
+        let liveById = Dictionary(uniqueKeysWithValues: liveHosts.map { ($0.environmentId, $0) })
+
+        // Reconnect port changes preserve the lock because matching is strictly by stable `environmentId`.
+        if case .remote(let envId) = activeNodeScope, liveById[envId] == nil {
+            activeNodeScope = .local
+            userPinnedContext = false
+        }
+
+        if !userPinnedContext {
+            if focusedEnvironmentId != "local", liveById[focusedEnvironmentId] != nil {
+                activeNodeScope = .remote(environmentId: focusedEnvironmentId)
+            } else {
+                activeNodeScope = .local
+            }
+        }
+
+        syncLegacySelectedContextKey(using: liveById)
+
+        let allHosts = canonicalAllEnvironments(includeLocal: false, includeHistorical: true)
+        if allHosts.isEmpty {
+            overviewEnvironmentKey = "all"
+        } else if overviewEnvironmentKey.hasPrefix("env:") {
+            let envId = String(overviewEnvironmentKey.dropFirst("env:".count))
+            if !allHosts.contains(where: { $0.environmentId == envId }) {
+                overviewEnvironmentKey = "all"
+            }
+        }
+    }
+
+    private func syncLegacySelectedContextKey(using liveById: [String: CanonicalHostEnvironment]? = nil) {
+        switch activeNodeScope {
+        case .all, .local:
+            selectedContextKey = "local"
+        case .remote(let envId):
+            let host = liveById?[envId] ?? canonicalRemoteHosts().first(where: { $0.environmentId == envId })
+            if let rk = host?.primaryRemoteKey, !rk.isEmpty {
+                selectedContextKey = "remote:\(rk)"
+            } else {
+                selectedContextKey = "remote:\(envId)"
+            }
+        }
+    }
+
+    func setActiveNodeScope(_ scope: EnvironmentScope, userInitiated: Bool = true, notifyUI: Bool = true) {
+        let normalizedScope: EnvironmentScope
+        let liveHosts = canonicalRemoteHosts()
+        let liveById = Dictionary(uniqueKeysWithValues: liveHosts.map { ($0.environmentId, $0) })
+
+        switch scope {
+        case .all, .local:
+            normalizedScope = .local
+        case .remote(let envId):
+            normalizedScope = liveById[envId] != nil ? .remote(environmentId: envId) : .local
+        }
+
+        activeNodeScope = normalizedScope
+        if normalizedScope == .local && !userInitiated {
+            userPinnedContext = false
+        } else if userInitiated {
+            userPinnedContext = true
+        }
+        syncLegacySelectedContextKey(using: liveById)
+
         if notifyUI {
             overview?.syncRemoteSessionsUI()
             menuPanelController?.syncFromAssistant()
+            updateQuotaRefreshControls()
         }
     }
 
-    func selectedRemoteSession() -> [String: Any]? {
-        guard selectedContextKey.hasPrefix("remote:") else { return nil }
-        let targetKey = String(selectedContextKey.dropFirst("remote:".count))
-        return remoteSessions.first { ($0["remoteKey"] as? String) == targetKey }
-    }
-
-    func selectQuotaContext(_ contextKey: String, userInitiated: Bool = true) {
-        let nextKey: String
-        if contextKey.hasPrefix("remote:") {
-            let rk = String(contextKey.dropFirst("remote:".count))
-            let exists = remoteSessions.contains { ($0["remoteKey"] as? String) == rk }
-            nextKey = exists ? contextKey : "local"
-        } else {
-            nextKey = "local"
+    func setUsageFilterScope(
+        _ scope: EnvironmentScope,
+        persist: Bool = true,
+        syncOverview: Bool = true,
+        syncUsagePage: Bool = true,
+        syncMenuPanel: Bool = true
+    ) {
+        usageFilterScope = scope
+        let envId = scope.rawEnvironmentId
+        usageSelectedEnvironment = envId
+        if persist, configuration?.value.menuUsageEnvironmentId != envId {
+            configuration?.value.menuUsageEnvironmentId = envId
+            scheduleConfigurationSave()
         }
-        selectedContextKey = nextKey
-        userPinnedContext = userInitiated && nextKey != "local" ? true : (userInitiated ? true : userPinnedContext)
-        if nextKey == "local" && !userInitiated {
-            userPinnedContext = false
+        if syncOverview {
+            overviewEnvironmentKey = scope.overviewKey
+            overview?.handleOverviewEnvironmentChanged()
         }
-        overview?.syncRemoteSessionsUI()
-        menuPanelController?.syncFromAssistant()
+        if syncUsagePage, let usagePage, usagePage.selectedEnvironmentId != envId {
+            usagePage.applyExternalFilter(period: usageSelectedPeriod, environmentId: envId)
+        }
+        if syncMenuPanel {
+            menuPanelController?.syncFromAssistant()
+        }
         updateQuotaRefreshControls()
     }
 
-    func refreshRemoteQuota(remoteKey: String? = nil, completion: (() -> Void)? = nil) {
+    /// Projects MenuPanel Tab 0 (`usageFilterScope`) to Tab 1 (`activeNodeScope`):
+    /// - `.local` -> `.local`
+    /// - `.remote(X)` -> `.remote(X)` if live/recent; if `historical_only` or missing -> safe fallback to `.local`
+    /// - `.all` -> keeps current `activeNodeScope`
+    func projectUsageFilterScopeToActiveNode(from usageScope: EnvironmentScope) -> (scope: EnvironmentScope, fellBackFromHistorical: Bool) {
+        let liveHosts = canonicalRemoteHosts()
+        switch usageScope {
+        case .all:
+            return (activeNodeScope, false)
+        case .local:
+            return (.local, false)
+        case .remote(let envId):
+            if liveHosts.contains(where: { $0.environmentId == envId }) {
+                return (.remote(environmentId: envId), false)
+            }
+            return (.local, true)
+        }
+    }
+
+    /// Projects MenuPanel Tab 1 (`activeNodeScope`) back to Tab 0 (`usageFilterScope`).
+    func projectActiveNodeScopeToUsageFilter(from nodeScope: EnvironmentScope, wasUserPinned: Bool) -> EnvironmentScope? {
+        switch nodeScope {
+        case .remote(let envId):
+            return wasUserPinned ? .remote(environmentId: envId) : nil
+        case .local:
+            // Symmetrical fix: if user pinned back to `.local` in Tab 1 while Tab 0 was viewing a remote host, reflect `.local` in Tab 0.
+            if wasUserPinned && usageFilterScope.isRemote {
+                return .local
+            }
+            return nil
+        case .all:
+            return nil
+        }
+    }
+
+    /// Performs symmetrical environment synchronization between MenuPanel Tab 0 (Usage) and Tab 1 (Quota).
+    /// Returns `true` if a `historical_only` selection safely fell back to `.local`.
+    @discardableResult
+    func syncMenuTabEnvironmentTransition(from prevTab: Int, to nextTab: Int) -> Bool {
+        switch (prevTab, nextTab) {
+        case (0, 1):
+            let projection = projectUsageFilterScopeToActiveNode(from: usageFilterScope)
+            if projection.fellBackFromHistorical {
+                setActiveNodeScope(.local, userInitiated: true, notifyUI: false)
+                return true
+            }
+            if usageFilterScope != .all {
+                setActiveNodeScope(projection.scope, userInitiated: true, notifyUI: false)
+            }
+            return false
+        case (1, 0):
+            if let nextUsage = projectActiveNodeScopeToUsageFilter(from: activeNodeScope, wasUserPinned: userPinnedContext) {
+                setUsageFilterScope(nextUsage, persist: true, syncOverview: false, syncUsagePage: false, syncMenuPanel: false)
+            }
+            return false
+        default:
+            return false
+        }
+    }
+
+    /// Builds unified `EnvironmentContextPill` items for any UI touchpoint.
+    func buildContextPillItems(
+        includeAll: Bool,
+        includeHistorical: Bool,
+        includeSharePct: Bool = false
+    ) -> [EnvironmentContextPill.Item] {
+        var result: [EnvironmentContextPill.Item] = []
+        let allTitle = L10n.t("ssh.scope.all", fallback: "全部")
+        let localTitle = L10n.t("ssh.scope.local", fallback: "本机")
+
+        func formatShare(_ pct: Double?) -> String? {
+            guard includeSharePct, let pct, pct.isFinite else { return nil }
+            if pct > 0 && pct < 1 { return "<1%" }
+            return "\(Int(pct.rounded()))%"
+        }
+
+        if includeAll {
+            let totalSec: String? = includeSharePct && !usageEnvironmentShareById.isEmpty ? "100%" : nil
+            result.append(EnvironmentContextPill.Item(
+                scope: .all,
+                hostLabel: allTitle,
+                secondaryText: totalSec
+            ))
+        }
+        result.append(EnvironmentContextPill.Item(
+            scope: .local,
+            hostLabel: localTitle,
+            secondaryText: formatShare(usageEnvironmentShareById["local"])
+        ))
+
+        let hosts = canonicalAllEnvironments(includeLocal: false, includeHistorical: includeHistorical)
+        for host in hosts {
+            let secondary: String?
+            if includeSharePct {
+                secondary = formatShare(host.usageSharePct ?? usageEnvironmentShareById[host.environmentId])
+            } else if host.windowCount > 1 {
+                secondary = L10n.t("accounts.ssh.remote_window_count", ["count": host.windowCount], fallback: "\(host.windowCount) 个窗口")
+            } else {
+                secondary = nil
+            }
+            result.append(EnvironmentContextPill.Item(
+                scope: .remote(environmentId: host.environmentId),
+                hostLabel: host.cleanHostLabel,
+                state: host.state,
+                windowCount: host.windowCount,
+                email: host.email.isEmpty ? nil : host.email,
+                secondaryText: secondary
+            ))
+        }
+        return result
+    }
+
+    func selectedMenuQuotaHost() -> CanonicalHostEnvironment? {
+        if let direct = selectedActiveNodeHost() {
+            return direct
+        }
+        guard selectedContextKey.hasPrefix("remote:") else { return nil }
+        let targetKey = String(selectedContextKey.dropFirst("remote:".count))
+        let hosts = canonicalRemoteHosts()
+        if let direct = hosts.first(where: { $0.primaryRemoteKey == targetKey }) {
+            return direct
+        }
+        guard let matchedSession = remoteSessions.first(where: { ($0["remoteKey"] as? String) == targetKey }) else {
+            return nil
+        }
+        let envId = remoteEnvironmentId(for: matchedSession)
+        return hosts.first { $0.environmentId == envId }
+    }
+
+    func selectMenuQuotaHost(_ environmentId: String, userInitiated: Bool = true) {
+        let scope = EnvironmentScope(rawEnvironmentId: environmentId)
+        setActiveNodeScope(scope == .all ? .local : scope, userInitiated: userInitiated, notifyUI: true)
+    }
+
+    func selectQuotaContext(_ contextKey: String, userInitiated: Bool = true) {
+        if contextKey.hasPrefix("remote:") {
+            let rk = String(contextKey.dropFirst("remote:".count))
+            if let host = canonicalRemoteHosts().first(where: { $0.primaryRemoteKey == rk || $0.environmentId == rk }) {
+                setActiveNodeScope(.remote(environmentId: host.environmentId), userInitiated: userInitiated, notifyUI: true)
+                return
+            }
+            if let matched = remoteSessions.first(where: { ($0["remoteKey"] as? String) == rk }) {
+                let envId = remoteEnvironmentId(for: matched)
+                setActiveNodeScope(.remote(environmentId: envId), userInitiated: userInitiated, notifyUI: true)
+                return
+            }
+        }
+        setActiveNodeScope(.local, userInitiated: userInitiated, notifyUI: true)
+    }
+
+    @objc func refreshAllQuotasIncludingRemotes() {
+        refreshAccountQuotas()
+        guard reachable else { return }
+        let onlineHosts = canonicalRemoteHosts().filter { $0.state.isOnlineOrAuthExpired }
+        guard !onlineHosts.isEmpty else { return }
+        refreshRemoteQuota(remoteKey: nil, environmentId: nil)
+    }
+
+    func refreshRemoteQuota(remoteKey: String? = nil, environmentId: String? = nil, completion: (() -> Void)? = nil) {
         guard !remoteQuotaRefreshing, reachable else { completion?(); return }
         remoteQuotaRefreshing = true
         updateQuotaRefreshControls()
@@ -2035,6 +2518,14 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         var payload: [String: Any] = ["command": "remote_quota_refresh"]
         if let remoteKey, !remoteKey.isEmpty {
             payload["remoteKey"] = remoteKey
+        }
+        if let environmentId, !environmentId.isEmpty {
+            payload["environmentId"] = environmentId
+            if payload["remoteKey"] == nil,
+               let matchedKey = environmentNode(for: environmentId)?.primaryRemoteKey,
+               !matchedKey.isEmpty {
+                payload["remoteKey"] = matchedKey
+            }
         }
         bridge.send(payload) { [weak self] response in
             guard let self else { return }
@@ -2046,9 +2537,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
                 if let focused = value["focusedContextKey"] as? String {
                     self.statusValue.focusedContextKey = focused
                 }
-                if let sessions = value["remoteSessions"] as? [[String: Any]] {
-                    self.syncRemoteSessionsFromPayload(sessions, focusedKey: self.statusValue.focusedContextKey)
-                }
+                self.syncEnvironmentsFromPayload(value, notifyUI: true)
             }
             self.updateQuotaRefreshControls()
             self.menuPanelController?.syncFromAssistant()

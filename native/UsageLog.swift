@@ -62,14 +62,13 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
     private var handlingJumpToPage = false
     var searchDebounce: DispatchWorkItem?
     let period = DesignSegmentedControl(labels: [L10n.t("usage.period.today"), L10n.t("usage.period.7d"), L10n.t("usage.period.30d"), L10n.t("usage.period.all")], trackingMode: .selectOne, target: nil, action: nil)
-    let environmentPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    let environmentPill = EnvironmentContextPill(style: .headerPill, compact: false, minWidth: 68, maxWidth: 180, height: 26)
     let accountPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     let filterRow: NSStackView
     var selectedEnvironmentId: String
     var selectedAccountId: String
     private var availableEnvironments: [[String: Any]] = []
     private var availableAccounts: [[String: Any]] = []
-    private var unattributedRequests = 0
     let status = text(L10n.t("usage_log.loading"), size: 11, color: Design.secondary, wrap: true)
     let previous = button(L10n.t("usage_log.prev_page"), target: nil, action: #selector(previousPage))
     let next = button(L10n.t("usage_log.next_page"), target: nil, action: #selector(nextPage))
@@ -83,7 +82,15 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
     private let headerTitleLabel = text(L10n.t("usage_log.title"), size: 18, weight: .semibold)
     private var closeButtonRef: NSButton!
     private var languageObserver: NSObjectProtocol?
-    var rows: [[String: Any]] = []; var offset = 0; var total = 0; var requestRevision = 0
+    private var cachedHasSshRows = false
+    private var cachedRemoteHosts: [CanonicalHostEnvironment] = []
+    var rows: [[String: Any]] = [] {
+        didSet {
+            cachedHasSshRows = rows.contains(where: Self.isSshEventRow)
+            cachedRemoteHosts = app?.canonicalRemoteHosts() ?? []
+        }
+    }
+    var offset = 0; var total = 0; var requestRevision = 0
     var onDismiss: (() -> Void)?
     let periods = ["today", "7d", "30d", "all"]
 
@@ -93,32 +100,32 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
             NotificationCenter.default.removeObserver(languageObserver)
         }
     }
-    init(app: Assistant, period selected: String, environmentId: String = "all", accountId: String = "all") {
+    init(app: Assistant, period selected: String, environmentId: String? = nil, accountId: String? = nil) {
         self.app = app
-        let trimmedEnv = environmentId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let inheritedEnv = environmentId ?? (app.usagePage?.selectedEnvironmentId ?? app.usageFilterScope.rawEnvironmentId)
+        let trimmedEnv = inheritedEnv.trimmingCharacters(in: .whitespacesAndNewlines)
         self.selectedEnvironmentId = trimmedEnv.isEmpty ? "all" : trimmedEnv
-        let trimmedAcc = accountId.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.selectedAccountId = trimmedAcc.isEmpty ? "all" : trimmedAcc
+        let inheritedAcc = accountId ?? (app.usagePage?.selectedAccountId ?? app.usageSelectedAccount)
+        let trimmedAcc = inheritedAcc.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.selectedAccountId = (trimmedAcc.isEmpty || trimmedAcc == "unattributed") ? "all" : trimmedAcc
         if let latest = app.usagePage?.latestReport {
             self.availableEnvironments = UsageFilterSupport.extractAvailableEnvironments(from: latest)
             self.availableAccounts = UsageFilterSupport.extractAvailableAccounts(from: latest)
-            self.unattributedRequests = UsageFilterSupport.extractUnattributedStats(from: latest).requests
         }
-        environmentPopup.controlSize = .regular
-        environmentPopup.setAccessibilityLabel(L10n.t("usage_log.env.a11y"))
-        environmentPopup.setContentHuggingPriority(.required, for: .horizontal)
-        environmentPopup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        environmentPill.setAccessibilityLabel(L10n.t("usage_log.env.a11y"))
         accountPopup.controlSize = .regular
+        accountPopup.toolTip = nil
         accountPopup.setAccessibilityLabel(L10n.t("usage_log.account.a11y"))
         accountPopup.setContentHuggingPriority(.required, for: .horizontal)
         accountPopup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        filterRow = horizontal([environmentPopup, accountPopup, flexibleSpace()], spacing: 8)
+        filterRow = horizontal([environmentPill, accountPopup, flexibleSpace()], spacing: 8)
         filterRow.alignment = .centerY
         filterRow.detachesHiddenViews = true
         filterRow.identifier = NSUserInterfaceItemIdentifier("usage-log-filter-row")
         super.init()
-        environmentPopup.target = self
-        environmentPopup.action = #selector(environmentChanged(_:))
+        environmentPill.onSelectScope = { [weak self] scope in
+            self?.applyEnvironmentSelection(scope.rawEnvironmentId)
+        }
         accountPopup.target = self
         accountPopup.action = #selector(accountChanged(_:))
         sheet.title = L10n.t("usage_log.title"); sheet.isReleasedWhenClosed = false; table.rowHeight = 64; table.backgroundColor = .clear
@@ -247,39 +254,107 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
             status.stringValue = pageStatus()
         }
         updateEmptyState(failed: lastReadErrorMessage != nil)
-        environmentPopup.setAccessibilityLabel(L10n.t("usage_log.env.a11y"))
+        environmentPill.setAccessibilityLabel(L10n.t("usage_log.env.a11y"))
         accountPopup.setAccessibilityLabel(L10n.t("usage_log.account.a11y"))
         syncFilterControls()
         table.reloadData()
     }
 
+    private func buildEnvironmentPillItems() -> [EnvironmentContextPill.Item] {
+        var items = app?.buildContextPillItems(includeAll: true, includeHistorical: true, includeSharePct: false) ?? [
+            EnvironmentContextPill.Item(scope: .all, hostLabel: L10n.t("ssh.scope.all", fallback: "全部")),
+            EnvironmentContextPill.Item(scope: .local, hostLabel: L10n.t("ssh.scope.local", fallback: "本机"))
+        ]
+        var seenIds = Set(items.map(\.id))
+
+        for env in availableEnvironments {
+            let id = ((env["environmentId"] as? String) ?? (env["id"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !id.isEmpty, !seenIds.contains(id) else { continue }
+            let kindStr = ((env["kind"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard kindStr == "ssh" || id.hasPrefix("ssh:") || id.hasPrefix("host:") else { continue }
+            seenIds.insert(id)
+            let rawHost = ((env["host_label"] as? String)
+                ?? (env["hostLabel"] as? String)
+                ?? (env["label"] as? String)
+                ?? id).trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanHost = SshEnvironmentResolver.cleanHostLabel(rawHost)
+            let hostLabel = cleanHost.isEmpty ? id : cleanHost
+            let rawState = (env["lifecycleState"] as? String) ?? (env["state"] as? String)
+            let state: SshHostState
+            if let rawState, !rawState.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                state = SshHostState(rawSessionState: rawState)
+            } else if (env["online"] as? Bool) == true {
+                state = .online
+            } else {
+                state = .historicalOnly
+            }
+            let winCount = state.isOfflineLike ? 0 : ((env["windowCount"] as? Int) ?? (env["window_count"] as? Int) ?? 1)
+            items.append(EnvironmentContextPill.Item(
+                scope: .remote(environmentId: id),
+                hostLabel: hostLabel,
+                state: state,
+                windowCount: winCount
+            ))
+        }
+
+        for row in rows where Self.isSshEventRow(row) {
+            let envId = ((row["environment_id"] as? String) ?? (row["environmentId"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !envId.isEmpty, !seenIds.contains(envId) else { continue }
+            seenIds.insert(envId)
+            let hostLabel = UsageFilterSupport.cleanedHostLabel(
+                from: row,
+                environments: availableEnvironments,
+                canonicalHosts: app?.canonicalRemoteHosts() ?? []
+            )
+            items.append(EnvironmentContextPill.Item(
+                scope: .remote(environmentId: envId),
+                hostLabel: hostLabel,
+                state: .historicalOnly,
+                windowCount: 0
+            ))
+        }
+
+        let currentScope = EnvironmentScope(rawEnvironmentId: selectedEnvironmentId)
+        if case .remote(let remoteEnvId) = currentScope, !seenIds.contains(currentScope.rawEnvironmentId) {
+            let fallbackHost = SshEnvironmentResolver.cleanHostLabel(remoteEnvId)
+            items.append(EnvironmentContextPill.Item(
+                scope: currentScope,
+                hostLabel: fallbackHost.isEmpty ? remoteEnvId : fallbackHost,
+                state: .historicalOnly,
+                windowCount: 0
+            ))
+        }
+        return items
+    }
+
     func syncFilterControls() {
-        let latestReport = app?.usagePage?.latestReport ?? [:]
-        let latestBreakdown = UsageFilterSupport.extractEnvironmentBreakdown(from: latestReport)
-        let hasSsh = UsageFilterSupport.hasSshEnvironment(environments: availableEnvironments, breakdown: latestBreakdown, rows: rows)
-        UsageFilterSupport.syncEnvironmentPopup(
-            environmentPopup,
-            environments: availableEnvironments,
-            selectedId: selectedEnvironmentId,
-            allTitle: L10n.t("usage_log.env.all"),
-            localTitle: L10n.t("usage_log.env.local_label"),
-            sshFormatKey: "usage_log.env.ssh_label",
-            maxWidth: 210
-        )
-        let effectiveUnattributed = max(unattributedRequests, UsageFilterSupport.extractUnattributedStats(from: latestReport).requests)
-        UsageFilterSupport.syncAccountPopup(
+        let pillItems = buildEnvironmentPillItems()
+        let selectedScope = EnvironmentScope(rawEnvironmentId: selectedEnvironmentId)
+        environmentPill.update(items: pillItems, selectedScope: selectedScope)
+
+        let normalizedAcc = UsageFilterSupport.syncAccountPopup(
             accountPopup,
             accounts: availableAccounts,
             cachedAccounts: app?.cachedAccounts ?? [],
             selectedId: selectedAccountId,
             allTitle: L10n.t("usage_log.account.all"),
-            unattributedRequests: effectiveUnattributed,
-            unattributedTitle: L10n.t("usage.account.unattributed"),
-            maxWidth: 210
+            maxWidth: 210,
+            fitsSelectedTitleOnly: true
         )
-        environmentPopup.isHidden = !(hasSsh || selectedEnvironmentId != "all")
-        accountPopup.isHidden = !(accountPopup.numberOfItems > 1 || selectedAccountId != "all")
-        filterRow.isHidden = environmentPopup.isHidden && accountPopup.isHidden
+        if selectedAccountId == "unattributed"
+            || (!(availableAccounts.isEmpty && (app?.cachedAccounts ?? []).isEmpty) && normalizedAcc != selectedAccountId) {
+            selectedAccountId = normalizedAcc
+        }
+        accountPopup.toolTip = nil
+        let realAccountIds = Set(
+            (accountPopup.menu?.items ?? [])
+                .compactMap { $0.representedObject as? String }
+                .filter { !$0.isEmpty && $0 != "all" && $0 != "unattributed" }
+        )
+        accountPopup.isHidden = !(realAccountIds.count > 1 || selectedAccountId != "all")
+        filterRow.isHidden = environmentPill.isHidden && accountPopup.isHidden
     }
     func show(in window: NSWindow, onDismiss: @escaping () -> Void) {
         self.onDismiss = onDismiss
@@ -302,9 +377,9 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
         if let snapshotID { app?.bridge.send(["command":"usage_snapshot_release","snapshotId":snapshotID]) { _ in } }
         snapshotID = nil; closed = true; requestRevision += 1; searchDebounce?.cancel(); sheet.sheetParent?.endSheet(sheet) }
     @objc func periodChanged() { offset = 0; fetch() }
-    @objc func environmentChanged(_ sender: NSPopUpButton) {
-        let next = ((sender.selectedItem?.representedObject as? String) ?? "all").trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalized = next.isEmpty ? "all" : next
+    private func applyEnvironmentSelection(_ raw: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = trimmed.isEmpty ? "all" : trimmed
         guard normalized != selectedEnvironmentId else { return }
         if let snapshotID { app?.bridge.send(["command": "usage_snapshot_release", "snapshotId": snapshotID]) { _ in } }
         snapshotID = nil
@@ -314,7 +389,16 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
     }
     @objc func accountChanged(_ sender: NSPopUpButton) {
         let next = ((sender.selectedItem?.representedObject as? String) ?? "all").trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalized = next.isEmpty ? "all" : next
+        let normalized = (next.isEmpty || next == "unattributed") ? "all" : next
+        if let cell = sender.cell as? DesignPopUpCell {
+            cell.visualStyle = .headerPill
+            cell.customHeight = 26
+            cell.fitsSelectedTitleOnly = true
+            cell.isActiveState = (normalized != "all")
+        }
+        _ = Design.syncPopUpWidth(sender, maxWidth: 210)
+        sender.toolTip = nil
+        sender.needsDisplay = true
         guard normalized != selectedAccountId else { return }
         if let snapshotID { app?.bridge.send(["command": "usage_snapshot_release", "snapshotId": snapshotID]) { _ in } }
         snapshotID = nil
@@ -483,21 +567,13 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
                 self.snapshotID = value["snapshot_id"] as? String
                 self.rows = value["rows"] as? [[String: Any]] ?? []; self.total = intVal(value, "total")
                 let respEnvs = UsageFilterSupport.extractAvailableEnvironments(from: value)
-                if !respEnvs.isEmpty { self.availableEnvironments = respEnvs }
+                if !respEnvs.isEmpty {
+                    self.availableEnvironments = respEnvs
+                    activeApp.syncUsageEnvironmentsFromReport(value)
+                }
+                self.cachedRemoteHosts = activeApp.canonicalRemoteHosts()
                 let respAccounts = UsageFilterSupport.extractAvailableAccounts(from: value)
                 if !respAccounts.isEmpty { self.availableAccounts = respAccounts }
-                let respUnattributed = UsageFilterSupport.extractUnattributedStats(from: value).requests
-                let rowHasUnattributed = self.rows.contains { row in
-                    let email = ((row["accountEmail"] as? String) ?? (row["account_email"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    let accId = ((row["accountId"] as? String) ?? (row["account_id"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    let confidence = ((row["accountConfidence"] as? String) ?? (row["account_confidence"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    return (email.isEmpty && accId.isEmpty) || confidence == "unknown"
-                }
-                if respUnattributed > 0 {
-                    self.unattributedRequests = respUnattributed
-                } else if rowHasUnattributed {
-                    self.unattributedRequests = max(self.unattributedRequests, 1)
-                }
                 self.syncFilterControls()
                 let animateTable = Design.shouldAnimate(in: self.table)
                 if animateTable {
@@ -546,11 +622,12 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
     @objc func exportRows() {
         guard !exporting, !loading, total > 0, let activeApp = app else { return }
         exporting = true
+        status.textColor = Design.secondary
         refreshButton.isEnabled = false
         exportButton.isEnabled = false
         pageNumber.isEnabled = false
         period.isEnabled = false
-        environmentPopup.isEnabled = false
+        environmentPill.isEnabled = false
         accountPopup.isEnabled = false
         search.isEnabled = false
         previous.isEnabled = false
@@ -566,13 +643,16 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
             exportButton.isEnabled = total > 0 && self.snapshotID != nil
             pageNumber.isEnabled = total > 0
             period.isEnabled = true
-            environmentPopup.isEnabled = true
+            environmentPill.isEnabled = true
             accountPopup.isEnabled = true
             search.isEnabled = true
             previous.isEnabled = offset > 0
             next.isEnabled = offset + rows.count < total
             if let errorMsg {
                 status.stringValue = errorMsg
+                status.textColor = accessibleDangerColor()
+            } else {
+                status.textColor = Design.secondary
             }
         }
         func readPage() {
@@ -674,15 +754,32 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
         emptyIcon.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
         clearFiltersButton.isHidden = !filterActive || failed || loading
     }
+    private static func isSshEventRow(_ row: [String: Any]) -> Bool {
+        let rawEnvKind = ((row["environment_kind"] as? String) ?? (row["environmentKind"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawEnvId = ((row["environment_id"] as? String) ?? (row["environmentId"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return rawEnvKind == "ssh" || rawEnvId.hasPrefix("ssh:") || rawEnvId.hasPrefix("host:")
+    }
+
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat { 64 }
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { false }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard rows.indices.contains(row) else { return nil }
         let card = (tableView.makeView(withIdentifier:NSUserInterfaceItemIdentifier("usage-event-card"),owner:self) as? UsageEventCard) ?? UsageEventCard(frame:.zero)
-        let latestReport = app?.usagePage?.latestReport ?? [:]
-        let latestBreakdown = UsageFilterSupport.extractEnvironmentBreakdown(from: latestReport)
-        let showLocalBadge = UsageFilterSupport.hasSshEnvironment(environments: availableEnvironments, breakdown: latestBreakdown, rows: rows)
-        card.configure(rows[row], highlight: search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), showLocalEnvironmentBadge: showLocalBadge); return card
+        let showLocalBadge = selectedEnvironmentId != "local" && cachedHasSshRows
+        var rowPayload = rows[row]
+        if Self.isSshEventRow(rowPayload) {
+            let cleanHost = UsageFilterSupport.cleanedHostLabel(
+                from: rowPayload,
+                environments: availableEnvironments,
+                canonicalHosts: cachedRemoteHosts
+            )
+            let stripped = SshEnvironmentResolver.cleanHostLabel(cleanHost)
+            let resolvedCleanHost = stripped.isEmpty ? cleanHost : stripped
+            rowPayload["environment_kind"] = "ssh"
+            rowPayload["environment_label"] = resolvedCleanHost
+        }
+        card.configure(rowPayload, highlight: search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), showLocalEnvironmentBadge: showLocalBadge)
+        return card
     }
 }

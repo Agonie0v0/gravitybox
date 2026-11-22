@@ -176,6 +176,7 @@ export class UsageStatsManager {
   private lastSyncedEtag = '';
   private lastSyncedSha256 = '';
   private pricingRevisionSeq = 0;
+  private unchangedHealChecked = false;
   private onPricingUpdatedHook?: (info: { version?: string; healedCount?: number }) => void;
   private activeOfficialModels: string[] | null = null;
   private activeUnpricedOfficialModels: string[] | null = null;
@@ -1438,8 +1439,25 @@ export class UsageStatsManager {
         return result;
       }
       if (result.unchanged) {
-        return { ...result, healedCount: 0 };
+        let healedCount = 0;
+        if (force || !this.unchangedHealChecked) {
+          this.unchangedHealChecked = true;
+          try {
+            healedCount = await this.autoHealUnpricedHistory();
+          } catch {}
+          if (healedCount > 0) {
+            this.cachedSummariesByAccount.clear();
+            this.lastAggregationKeysByAccount.clear();
+            this.snapshots.clear();
+            this.pricingRevisionSeq += 1;
+            try {
+              this.onPricingUpdatedHook?.({ version: result.version, healedCount });
+            } catch {}
+          }
+        }
+        return { ...result, healedCount };
       }
+      this.unchangedHealChecked = true;
       this.cachedSummariesByAccount.clear();
       this.lastAggregationKeysByAccount.clear();
       this.snapshots.clear();

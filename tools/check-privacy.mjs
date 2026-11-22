@@ -112,6 +112,8 @@ const SECRET_PATTERNS = [
   { name: 'SSH 公钥', re: /\b(?:ssh-rsa|ssh-ed25519|ssh-ecdsa|ecdsa-sha2-nistp(?:256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)[ \t]+[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+/=])/g, allowSynthetic: true },
   { name: 'Google API Key', re: /\bAIza[0-9A-Za-z\-_]{35}\b/g, allowSynthetic: true },
   { name: 'Google OAuth Token', re: /\bya29\.[0-9A-Za-z\-_.]{24,}\b/g, allowSynthetic: true },
+  { name: 'Google OAuth Client Secret', re: /\bGOCSPX-[0-9A-Za-z\-_]{20,}\b/g, allowSynthetic: true },
+  { name: 'Google OAuth Client ID', re: /\b\d{10,}-[0-9a-z]{20,}\.apps\.googleusercontent\.com\b/gi, allowSynthetic: true },
   { name: 'GitHub Token', re: /\b(?:gh[pousr]_[0-9A-Za-z]{20,}|github_pat_[0-9A-Za-z_]{30,})\b/g, allowSynthetic: true },
   { name: 'API/Webhook Token', re: /\b(?:(?:sk-proj-|sk-ant-|sk-live-)[0-9A-Za-z\-_]{16,}|xox[baprs]-[0-9A-Za-z-]{16,}|AKIA[0-9A-Z]{16})\b/g, allowSynthetic: true },
   { name: 'SSH Session CSRF Token', re: /(?:agy_session_csrf_token|x-codeium-csrf-token)["'`]?\s*[:=]\s*["'`]([A-Za-z0-9._+\/=-]{16,})["'`]/gi, allowSynthetic: true },
