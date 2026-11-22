@@ -276,6 +276,7 @@ jobs:
           $ErrorActionPreference = 'Continue'
           gh release view $tag 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) { $exists = $true }
+          $global:LASTEXITCODE = 0
           $ErrorActionPreference = $prevErrorPref
 
           $doRelease = ($env:FORCE_RELEASE -eq 'true') -or (-not $exists)
