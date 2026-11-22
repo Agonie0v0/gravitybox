@@ -1,7 +1,15 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { join, relative, resolve, sep } from 'node:path';
+import { join, resolve } from 'node:path';
 import { bt } from './i18n.js';
+import {
+  appProcesses,
+  defaultAntigravityAppPath,
+  defaultAntigravityInstallDirs,
+  isPathUnder,
+  isWindows,
+  normalizePathForCompare,
+} from './platform/index.js';
 
 export type CacheCategory = 'safe' | 'stateful';
 export type CacheSection = 'runtime' | 'history';
@@ -242,6 +250,18 @@ export async function readProcessCommands(): Promise<string[] | null> {
   }
   const task = (async (): Promise<string[] | null> => {
     try {
+      if (isWindows()) {
+        const procs = await appProcesses([]);
+        const commands: string[] = [];
+        for (const proc of procs) {
+          if (proc.cmdLine.trim()) commands.push(proc.cmdLine.trim());
+          if (proc.exePath.trim() && proc.exePath.trim() !== proc.cmdLine.trim()) {
+            commands.push(proc.exePath.trim());
+          }
+        }
+        cachedProcessCommands = { at: Date.now(), commands };
+        return commands;
+      }
       const { stdout } = await execFileAsync('/bin/ps', ['-axo', 'command='], { timeout: 3000 });
       const commands = stdout.split('\n').map(line => line.trim()).filter(Boolean);
       cachedProcessCommands = { at: Date.now(), commands };
@@ -261,24 +281,67 @@ export async function readProcessCommands(): Promise<string[] | null> {
   }
 }
 
-export function hasAntigravityCommand(commands: string[], appPath = '/Applications/Antigravity.app'): boolean {
-  const appRoots = Array.from(new Set([appPath, '/Applications/Antigravity.app']));
+export function hasAntigravityCommand(commands: string[], appPath = defaultAntigravityAppPath()): boolean {
+  const winRoots = isWindows()
+    ? defaultAntigravityInstallDirs().map((dir) => join(dir, 'Antigravity'))
+    : [];
+  const appRoots = Array.from(
+    new Set([appPath, ...(isWindows() ? winRoots : ['/Applications/Antigravity.app'])]),
+  );
   const macOsPrefixes = appRoots.map(p => p + '/Contents/MacOS/');
   const frameworkPrefixes = appRoots.map(p => p + '/Contents/Frameworks/');
   const lsPrefixes = appRoots.map(p => p + '/Contents/Resources/bin/language_server');
-  return commands.some(trimmed =>
-    macOsPrefixes.some(prefix => trimmed.startsWith(prefix)) ||
-    frameworkPrefixes.some(prefix => trimmed.startsWith(prefix)) ||
-    lsPrefixes.some(prefix => trimmed.startsWith(prefix) || trimmed.includes(prefix))
-  );
+  const winRootPrefixes = appRoots
+    .filter((p) => !p.toLowerCase().endsWith('.app'))
+    .map((p) => {
+      const norm = normalizePathForCompare(p, 'win32');
+      return norm.endsWith('/') ? norm : `${norm}/`;
+    });
+
+  return commands.some((trimmed) => {
+    if (
+      macOsPrefixes.some((prefix) => trimmed.startsWith(prefix)) ||
+      frameworkPrefixes.some((prefix) => trimmed.startsWith(prefix)) ||
+      lsPrefixes.some((prefix) => trimmed.startsWith(prefix) || trimmed.includes(prefix))
+    ) {
+      return true;
+    }
+    if (winRootPrefixes.length > 0) {
+      const unquoted = trimmed.startsWith('"') ? trimmed.slice(1) : trimmed;
+      const normCmd = unquoted.replace(/^\\\\\?\\/, '').replaceAll('\\', '/').toLowerCase();
+      return winRootPrefixes.some((prefix) => normCmd.startsWith(prefix) || normCmd.includes(prefix));
+    }
+    return false;
+  });
 }
 
 export function hasBrowserProfileCommand(commands: string[], browserProfileDir: string): boolean {
   if (!browserProfileDir) return false;
+  if (isWindows()) {
+    const normTarget = normalizePathForCompare(browserProfileDir, 'win32');
+    return commands.some((trimmed) => {
+      const normCmd = trimmed.replaceAll('\\', '/').toLowerCase();
+      return normCmd.includes(normTarget);
+    });
+  }
   return commands.some(trimmed => trimmed.includes(browserProfileDir) && !trimmed.includes('/bin/ps'));
 }
 
-export async function antigravityRunning(appPath = '/Applications/Antigravity.app') {
+export async function antigravityRunning(appPath = defaultAntigravityAppPath()) {
+  if (isWindows()) {
+    try {
+      const prefixes = Array.from(
+        new Set([
+          appPath,
+          ...defaultAntigravityInstallDirs().map((dir) => join(dir, 'Antigravity')),
+        ]),
+      );
+      const procs = await appProcesses(prefixes);
+      return procs.length > 0;
+    } catch {
+      return false;
+    }
+  }
   const commands = await readProcessCommands();
   return commands ? hasAntigravityCommand(commands, appPath) : false;
 }
@@ -297,6 +360,7 @@ export interface CacheMaintenanceOptions {
   browserRunning?: () => Promise<boolean>;
   archiveDatabases?: (dbPaths: string[]) => Promise<unknown>;
   onMutated?: () => void | Promise<void>;
+  moveToSystemTrash?: (paths: string[]) => Promise<{ moved: string[] }>;
 }
 
 export interface SubTargetSpec {
@@ -333,7 +397,6 @@ export interface ConversationIndexSnapshot {
 }
 
 export function isStrictSubpath(parentDir: string, candidatePath: string): boolean {
-  const rel = relative(resolve(parentDir), resolve(candidatePath));
-  return Boolean(rel && !rel.startsWith('..') && !rel.includes(`..${sep}`) && rel !== '.');
+  return isPathUnder(resolve(candidatePath), resolve(parentDir));
 }
 

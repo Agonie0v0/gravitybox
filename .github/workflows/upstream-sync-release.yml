@@ -1,0 +1,353 @@
+name: Upstream Sync & Windows Release
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: 'Force build and publish Windows GitHub Release for current version'
+        type: boolean
+        default: false
+
+concurrency:
+  group: upstream-sync-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPO: Enzoo404/gravitybox
+  UPSTREAM_URL: https://github.com/Enzoo404/gravitybox.git
+
+jobs:
+  check:
+    name: Check upstream changes & release status
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should_run: ${{ steps.inspect.outputs.should_run }}
+      has_new_commits: ${{ steps.inspect.outputs.has_new_commits }}
+      should_release: ${{ steps.inspect.outputs.should_release }}
+      upstream_sha: ${{ steps.inspect.outputs.upstream_sha }}
+      upstream_version: ${{ steps.inspect.outputs.upstream_version }}
+      local_version: ${{ steps.inspect.outputs.local_version }}
+    steps:
+      - name: Checkout main (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Inspect upstream commits, version & release state
+        id: inspect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_RELEASE: ${{ inputs.force_release == true && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch upstream main --tags
+
+          UPSTREAM_SHA="$(git rev-parse upstream/main)"
+          LOCAL_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")"
+          UPSTREAM_VERSION="$(git show upstream/main:package.json | node -e "const fs=require('fs'); console.log(JSON.parse(fs.readFileSync(0,'utf8')).version)")"
+
+          if git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD; then
+            HAS_NEW_COMMITS="false"
+          else
+            HAS_NEW_COMMITS="true"
+          fi
+
+          if [ "$HAS_NEW_COMMITS" = "true" ]; then
+            TARGET_VERSION="$UPSTREAM_VERSION"
+          else
+            TARGET_VERSION="$LOCAL_VERSION"
+          fi
+
+          VERSION_BUMPED="false"
+          if [ "$UPSTREAM_VERSION" != "$LOCAL_VERSION" ]; then
+            VERSION_BUMPED="true"
+          fi
+
+          # Check if a newer upstream semver tag exists whose corresponding -win release is missing
+          LATEST_UPSTREAM_TAG="$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+          TAG_RELEASE_MISSING="false"
+          if [ -n "$LATEST_UPSTREAM_TAG" ]; then
+            LATEST_TAG_VER="${LATEST_UPSTREAM_TAG#v}"
+            if [ "$LATEST_TAG_VER" = "$TARGET_VERSION" ]; then
+              if ! gh release view "v${TARGET_VERSION}-win" >/dev/null 2>&1; then
+                TAG_RELEASE_MISSING="true"
+              fi
+            fi
+          fi
+
+          RELEASE_MISSING="false"
+          if ! gh release view "v${TARGET_VERSION}-win" >/dev/null 2>&1; then
+            RELEASE_MISSING="true"
+          fi
+
+          SHOULD_RELEASE="false"
+          if [ "$FORCE_RELEASE" = "true" ] || [ "$VERSION_BUMPED" = "true" ] || [ "$TAG_RELEASE_MISSING" = "true" ] || [ "$RELEASE_MISSING" = "true" ]; then
+            SHOULD_RELEASE="true"
+          fi
+
+          SHOULD_RUN="false"
+          if [ "$HAS_NEW_COMMITS" = "true" ] || [ "$SHOULD_RELEASE" = "true" ]; then
+            SHOULD_RUN="true"
+          fi
+
+          echo "has_new_commits=$HAS_NEW_COMMITS" >> "$GITHUB_OUTPUT"
+          echo "should_release=$SHOULD_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "should_run=$SHOULD_RUN" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "upstream_version=$UPSTREAM_VERSION" >> "$GITHUB_OUTPUT"
+          echo "local_version=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
+
+          echo "Check summary: has_new_commits=$HAS_NEW_COMMITS local_version=$LOCAL_VERSION upstream_version=$UPSTREAM_VERSION release_missing=$RELEASE_MISSING force=$FORCE_RELEASE -> should_run=$SHOULD_RUN should_release=$SHOULD_RELEASE"
+
+  sync-verify-release:
+    name: Sync, Verify & Release (Windows x64)
+    needs: check
+    if: ${{ needs.check.outputs.should_run == 'true' }}
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      issues: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout main (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            windows/app/package-lock.json
+
+      - name: Setup Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry & build outputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            windows/win-helper/target
+            windows/app/src-tauri/target
+          key: cargo-win-${{ hashFiles('windows/win-helper/Cargo.lock', 'windows/app/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-win-
+
+      - name: Merge upstream main safely (preserving Windows workflows)
+        id: merge
+        if: ${{ needs.check.outputs.has_new_commits == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ needs.check.outputs.upstream_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream $env:UPSTREAM_URL
+          git fetch upstream main --tags
+
+          $shortSha = $env:UPSTREAM_SHA.Substring(0, 8)
+          $prevErrorPref = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          git merge --no-commit --no-ff $env:UPSTREAM_SHA
+          $mergeExit = $LASTEXITCODE
+          $ErrorActionPreference = $prevErrorPref
+
+          # Always keep our Windows-only workflows intact:
+          # 1. Never allow upstream macOS workflows to return.
+          # 2. Keep .github/workflows unchanged vs HEAD so GITHUB_TOKEN can push cleanly.
+          git rm -rf --ignore-unmatch .github/workflows | Out-Null
+          git checkout HEAD -- .github/workflows
+
+          $unmerged = @(git diff --name-only --diff-filter=U | Where-Object { $_.Trim() })
+          if ($unmerged.Count -gt 0) {
+            git merge --abort
+            $conflictList = ($unmerged | ForEach-Object { "- ``$_``" }) -join "`n"
+            $runUrl = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"
+            $title = "Upstream sync conflict ($shortSha)"
+            $body = @"
+          Automatic sync with upstream ``$($env:UPSTREAM_REPO)`` (commit ``$($env:UPSTREAM_SHA)``) encountered merge conflicts and was safely aborted without modifying ``main``.
+
+          ### Conflicted files
+          $conflictList
+
+          ### Workflow run
+          $runUrl
+
+          ### Suggested resolution
+          ``````bash
+          git fetch upstream main
+          git merge upstream/main
+          git checkout HEAD -- .github/workflows
+          # resolve conflicts, then run: npm run verify
+          ``````
+          "@
+            gh label create "upstream-sync-conflict" --color "D93F0B" --description "Automated upstream sync conflict or verification failure" --force 2>$null | Out-Null
+            $existing = (gh issue list --label "upstream-sync-conflict" --state open --json number --jq '.[0].number // empty')
+            if ($existing -and $existing.Trim() -match '^\d+$') {
+              gh issue comment $existing.Trim() --body $body
+            } else {
+              gh issue create --title $title --label "upstream-sync-conflict" --body $body
+            }
+            Write-Host "::error::Upstream merge conflict detected; opened/updated issue and aborted safely."
+            exit 1
+          }
+
+          if ($mergeExit -ne 0) {
+            # Conflicts were strictly inside .github/workflows and have been cleanly resolved back to HEAD
+            Write-Host "Resolved workflow-only merge differences back to fork HEAD."
+          }
+
+          git commit -m "chore(sync): merge upstream $($env:UPSTREAM_REPO) ($shortSha)"
+          "merged=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Install Node dependencies & build Win32 helper
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm --prefix windows/app ci --no-audit --no-fund
+          npm run build:win-helper
+
+      - name: Run full Windows verification gate
+        id: verify
+        continue-on-error: true
+        run: npm run verify
+
+      - name: Report verification failure without pushing main
+        if: ${{ steps.verify.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ needs.check.outputs.upstream_sha }}
+          MERGED: ${{ steps.merge.outputs.merged }}
+        run: |
+          $runUrl = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"
+          if ($env:MERGED -eq 'true') {
+            $shortSha = $env:UPSTREAM_SHA.Substring(0, 8)
+            $title = "Upstream sync verification failed ($shortSha)"
+            $body = @"
+          Merging upstream ``$($env:UPSTREAM_REPO)`` (``$($env:UPSTREAM_SHA)``) succeeded without git conflicts, but ``npm run verify`` failed on ``windows-latest``. ``main`` was **not** updated.
+
+          ### Workflow run
+          $runUrl
+          "@
+            gh label create "upstream-sync-conflict" --color "D93F0B" --description "Automated upstream sync conflict or verification failure" --force 2>$null | Out-Null
+            $existing = (gh issue list --label "upstream-sync-conflict" --state open --json number --jq '.[0].number // empty')
+            if ($existing -and $existing.Trim() -match '^\d+$') {
+              gh issue comment $existing.Trim() --body $body
+            } else {
+              gh issue create --title $title --label "upstream-sync-conflict" --body $body
+            }
+          }
+          Write-Host "::error::Windows verification gate failed; main was not pushed."
+          exit 1
+
+      - name: Push verified merge commit to main
+        if: ${{ steps.merge.outputs.merged == 'true' }}
+        run: git push origin HEAD:main
+
+      - name: Resolve effective version and release decision
+        id: release_check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_RELEASE: ${{ inputs.force_release == true && 'true' || 'false' }}
+        run: |
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          $ver = [string]$pkg.version
+          $tag = "v$ver-win"
+          $exists = $false
+          $prevErrorPref = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          gh release view $tag 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) { $exists = $true }
+          $ErrorActionPreference = $prevErrorPref
+
+          $doRelease = ($env:FORCE_RELEASE -eq 'true') -or (-not $exists)
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "release_exists=$($exists.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "do_release=$($doRelease.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Resolved release check: version=$ver tag=$tag exists=$exists force=$($env:FORCE_RELEASE) -> do_release=$doRelease"
+
+      - name: Build Windows portable ZIP & self-contained NSIS installer
+        if: ${{ steps.release_check.outputs.do_release == 'true' }}
+        run: node tools/package-win.mjs --installer
+
+      - name: Verify all 4 release assets and publish GitHub Release
+        if: ${{ steps.release_check.outputs.do_release == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REL_VERSION: ${{ steps.release_check.outputs.version }}
+          REL_TAG: ${{ steps.release_check.outputs.tag }}
+          REL_EXISTS: ${{ steps.release_check.outputs.release_exists }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = $env:REL_VERSION
+          $tag = $env:REL_TAG
+          $zip = "成品/GravityBox-$ver-win-x64.zip"
+          $zipSha = "$zip.sha256"
+          $setup = "成品/GravityBox-$ver-win-x64-setup.exe"
+          $setupSha = "$setup.sha256"
+
+          foreach ($asset in @($zip, $zipSha, $setup, $setupSha)) {
+            if (-not (Test-Path $asset)) {
+              throw "Missing required release asset: $asset"
+            }
+          }
+
+          $zipHashLine = (Get-Content $zipSha -Raw).Trim()
+          $setupHashLine = (Get-Content $setupSha -Raw).Trim()
+          $notesFile = Join-Path $env:RUNNER_TEMP "release-notes-$tag.md"
+          $notes = @"
+          ## GravityBox v$ver for Windows (x64)
+
+          Windows 10/11 native build synced with upstream [$($env:UPSTREAM_REPO) v$ver](https://github.com/$($env:UPSTREAM_REPO)/releases/tag/v$ver).
+
+          ### Downloads
+          - **Installer (Recommended, user-level, no UAC)**: ``GravityBox-$ver-win-x64-setup.exe``
+          - **Portable ZIP (Self-contained)**: ``GravityBox-$ver-win-x64.zip``
+
+          Both packages include the exact same verified self-contained bundle (``GravityBox.exe`` Tauri 2 desktop & tray app, bundled Node 22 runtime, core backend, verified translation dictionaries, and native Rust ``gravitybox-win-helper.exe``).
+
+          ### SHA-256 Checksums
+          ``````text
+          $zipHashLine
+          $setupHashLine
+          ``````
+          "@
+          Set-Content -Path $notesFile -Value $notes -Encoding utf8
+
+          if ($env:REL_EXISTS -eq 'true') {
+            gh release upload $tag $zip $zipSha $setup $setupSha --clobber
+            gh release edit $tag --title "GravityBox v$ver (Windows)" --notes-file $notesFile
+          } else {
+            gh release create $tag $zip $zipSha $setup $setupSha `
+              --target main `
+              --title "GravityBox v$ver (Windows)" `
+              --notes-file $notesFile
+          }
+
+      - name: Upload verification report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-verify-report-windows
+          path: 质检报告/**
+          retention-days: 7
+          if-no-files-found: ignore

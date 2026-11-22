@@ -9,18 +9,22 @@ export function includeDictionaryPath(path) {
   return parts[0] !== 'dict' || !parts.slice(1).some(part => part.startsWith('.'));
 }
 
-/** Excludes Finder metadata and README screenshot previews from the code release digest. */
+/** Excludes Finder/Explorer metadata, README screenshots, and regenerable Windows build caches from the code release digest. */
 export function includeSourceDigestPath(relativePath) {
   const normalized = relativePath.replaceAll('\\', '/');
   const parts = normalized.split('/');
-  if (parts.includes('.DS_Store')) return false;
+  if (parts.includes('.DS_Store') || parts.includes('Thumbs.db')) return false;
   if (normalized === 'assets/screenshots' || normalized.startsWith('assets/screenshots/')) return false;
+  if (parts[0] === 'windows') {
+    if (parts.includes('target') || parts.includes('node_modules') || parts.includes('.vite')) return false;
+    if (normalized === 'windows/app/dist' || normalized.startsWith('windows/app/dist/')) return false;
+  }
   return includeDictionaryPath(normalized);
 }
 
 /**
  * 源码摘要：发布门禁的唯一真源。
- * 注意：tools/ 与 test/ 也计入，修改发布脚本本身同样会让旧 .cache/verified-release.json 失效，
+ * 注意：tools/、test/ 与 windows/ 源码也计入，修改发布脚本或 Windows 原生源码同样会让旧 .cache/verified-release.json 失效，
  * 必须重新执行 `npm run verify` 才能再次打包（失败关闭，而不是静默放行）。
  */
 export async function sourceDigest(root) {
@@ -34,6 +38,7 @@ export async function sourceDigest(root) {
     }
   }
   for (const directory of ['src','runtime','native','tools','test','dict','ui-strings','assets','licenses']) await walk(directory);
+  if (await exists(join(root, 'windows'))) await walk('windows');
   if (await exists(join(root, 'vendor'))) await walk('vendor');
   files.push('package.json','package-lock.json','tsconfig.json','README.md','THIRD_PARTY_NOTICES.md');
   for (const doc of [

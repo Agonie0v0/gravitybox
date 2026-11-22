@@ -1,0 +1,74 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Build, Test & Verify (Windows x64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            windows/app/package-lock.json
+
+      - name: Setup Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry & build outputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            windows/win-helper/target
+            windows/app/src-tauri/target
+          key: cargo-win-${{ hashFiles('windows/win-helper/Cargo.lock', 'windows/app/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-win-
+
+      - name: Install Node dependencies
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm --prefix windows/app ci --no-audit --no-fund
+
+      - name: Check development environment
+        run: npm run doctor
+
+      - name: Build Win32 helper release binary
+        run: npm run build:win-helper
+
+      - name: Run full verification gate
+        run: npm run verify
+
+      - name: Upload verification report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-report-windows
+          path: 质检报告/**
+          retention-days: 7
+          if-no-files-found: ignore

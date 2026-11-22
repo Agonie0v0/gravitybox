@@ -24,7 +24,7 @@ test('dictionary backups never enter release inputs or packaged resources', asyn
   assert.equal(await sourceDigest(root), before);
   await cp(join(root, 'dict'), join(root, 'packaged'), {
     recursive: true,
-    filter: source => includeDictionaryPath(join('dict', relative(join(root, 'dict'), source))),
+    filter: source => includeDictionaryPath(join('dict', relative(join(root, 'dict'), source)).replaceAll('\\', '/')),
   });
   assert.deepEqual(await readdir(join(root, 'packaged')), ['base.json']);
   await writeFile(join(root, 'dict/base.json'), '{"Save":"保存"}');

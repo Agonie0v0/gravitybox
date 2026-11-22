@@ -11,8 +11,9 @@
   </p>
 
   <p>
-    <a href="https://github.com/Enzoo404/gravitybox/releases/latest"><img src="https://img.shields.io/github/v/release/Enzoo404/gravitybox?style=flat-square&color=2563EB" alt="Latest Release"></a>
-    <a href="https://github.com/Enzoo404/gravitybox/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Enzoo404/gravitybox/ci.yml?branch=main&style=flat-square&logo=github" alt="CI Status"></a>
+    <a href="https://github.com/Agonie0v0/gravitybox/releases/latest"><img src="https://img.shields.io/github/v/release/Agonie0v0/gravitybox?style=flat-square&color=2563EB" alt="Latest Windows Release"></a>
+    <a href="https://github.com/Agonie0v0/gravitybox/actions/workflows/ci-windows.yml"><img src="https://img.shields.io/github/actions/workflow/status/Agonie0v0/gravitybox/ci-windows.yml?branch=main&style=flat-square&logo=github" alt="Windows CI Status"></a>
+    <img src="https://img.shields.io/badge/Windows-10%2F11%20%C2%B7%20x64-0078D4?style=flat-square&logo=windows&logoColor=white" alt="Windows 10/11 x64">
     <img src="https://img.shields.io/badge/macOS-14%2B%20%C2%B7%20Apple%20Silicon-111827?style=flat-square&logo=apple&logoColor=white" alt="macOS 14+ Apple Silicon">
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="MIT License"></a>
   </p>
@@ -22,6 +23,7 @@
   </p>
 
   <p>
+    <a href="#windows-edition">Windows Edition</a> ·
     <a href="#overview">Overview</a> ·
     <a href="#quick-start">Quick Start</a> ·
     <a href="#in-ide-telemetry-hud">Telemetry HUD</a> ·
@@ -31,6 +33,17 @@
     <a href="#architecture--build">Build</a>
   </p>
 </div>
+
+> [!NOTE]
+> **Windows Adaptation Fork (`Agonie0v0/gravitybox`)** — Forked from [Enzoo404/gravitybox](https://github.com/Enzoo404/gravitybox) with full native **Windows 10/11 (x64)** support (Tauri 2 + React 19 desktop & system tray UI, Rust Win32 helper, Windows Named Pipe IPC, Credential Manager, Recycle Bin trim, and bundled Node 22) while keeping macOS behavior intact.
+>
+> - **Windows Downloads**: Get the self-contained installer (`GravityBox-<version>-win-x64-setup.exe`), portable archive (`GravityBox-<version>-win-x64.zip`), and `.sha256` checksums from [GitHub Releases](https://github.com/Agonie0v0/gravitybox/releases/latest).
+> - **Windows Local Development (Hot Reload)**:
+>   - `npm run dev:win` — full-stack Windows dev (Vite HMR + Tauri Rust auto-rebuild/restart + backend `tsc --watch`).
+>   - `npm run dev:backend` — backend hot reload (`tsc --watch` + `runtime/` watch + `node --watch dist/main.js`).
+>   - `npm run verify` / `npm run package:win` / `npm run package:win:installer` — verification gate and self-contained packaging.
+>
+> <a id="windows-edition"></a>
 
 <br />
 

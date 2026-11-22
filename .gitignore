@@ -34,3 +34,13 @@
 # Local assistant instructions
 /AGENTS.md
 /.agents/
+
+# Windows build artifacts & subproject caches
+Thumbs.db
+desktop.ini
+/windows/win-helper/target/
+/windows/app/node_modules/
+/windows/app/dist/
+/windows/app/.vite/
+/windows/app/src-tauri/target/
+/windows/app/src-tauri/gen/

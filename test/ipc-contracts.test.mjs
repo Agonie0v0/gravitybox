@@ -11,6 +11,8 @@ import { AccountsManager } from "../dist/accounts.js";
 import { canonicalPayload, IdempotencyStore } from "../dist/ipc-idempotency.js";
 import { promisify } from "node:util";
 import { ProtobufWriter } from "../dist/protobuf.js";
+import { DatabaseSync } from "node:sqlite";
+import { resolveIpcEndpoint } from "../dist/platform/index.js";
 
 // Fixture state and hooks are scoped to this group; child cases run serially.
 describeContractGroup("IPC 契约 · audit-p1-backend", { concurrency: false }, async () => {
@@ -48,7 +50,7 @@ async function makeManager() {
 
 function exchange(directory, request, { timeout = 8000 } = {}) {
   return new Promise((resolve, reject) => {
-    const socket = createConnection(join(directory, 'control.sock'));
+    const socket = createConnection(resolveIpcEndpoint(directory));
     let value = '';
     const timer = setTimeout(() => { socket.destroy(); reject(new Error('IPC 超时')); }, timeout);
     const finish = error => { clearTimeout(timer); socket.destroy(); error ? reject(error) : resolve(value); };
@@ -186,7 +188,7 @@ async function until(fn, timeoutMs = 6000) {
 
 function rpc(directory, payload) {
   return new Promise((resolve, reject) => {
-    const socket = createConnection(join(directory, 'control.sock'));
+    const socket = createConnection(resolveIpcEndpoint(directory));
     let value = '';
     socket.setTimeout(4000, () => {
       socket.destroy();
@@ -240,12 +242,14 @@ test('Main IPC 集成测试: 0.9.0 账号管理、额度策略、Token 用量与
   const f9 = ProtobufWriter.encodeLengthDelimited(9, tInner);
   const genBlob = ProtobufWriter.encodeLengthDelimited(1, Buffer.concat([f19, f4, f9]));
 
-  await execFileAsync('/usr/bin/sqlite3', [
-    mockDbPath,
-    `CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB, status INTEGER, step_payload BLOB);
+  const mockDb = new DatabaseSync(mockDbPath);
+  try {
+    mockDb.exec(`CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB, status INTEGER, step_payload BLOB);
      CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);
-     INSERT INTO gen_metadata (idx, data) VALUES (1, X'${genBlob.toString('hex')}');`,
-  ]);
+     INSERT INTO gen_metadata (idx, data) VALUES (1, X'${genBlob.toString('hex')}');`);
+  } finally {
+    mockDb.close();
+  }
 
   // 2. 注入沙箱独立凭据，供 account_save_current 提取
   const standaloneDir = join(mockHomeDir, '.gemini');

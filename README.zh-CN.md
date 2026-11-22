@@ -11,8 +11,9 @@
   </p>
 
   <p>
-    <a href="https://github.com/Enzoo404/gravitybox/releases/latest"><img src="https://img.shields.io/github/v/release/Enzoo404/gravitybox?style=flat-square&color=2563EB" alt="Latest Release"></a>
-    <a href="https://github.com/Enzoo404/gravitybox/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Enzoo404/gravitybox/ci.yml?branch=main&style=flat-square&logo=github" alt="CI Status"></a>
+    <a href="https://github.com/Agonie0v0/gravitybox/releases/latest"><img src="https://img.shields.io/github/v/release/Agonie0v0/gravitybox?style=flat-square&color=2563EB" alt="Latest Windows Release"></a>
+    <a href="https://github.com/Agonie0v0/gravitybox/actions/workflows/ci-windows.yml"><img src="https://img.shields.io/github/actions/workflow/status/Agonie0v0/gravitybox/ci-windows.yml?branch=main&style=flat-square&logo=github" alt="Windows CI Status"></a>
+    <img src="https://img.shields.io/badge/Windows-10%2F11%20%C2%B7%20x64-0078D4?style=flat-square&logo=windows&logoColor=white" alt="Windows 10/11 x64">
     <img src="https://img.shields.io/badge/macOS-14%2B%20%C2%B7%20Apple%20Silicon-111827?style=flat-square&logo=apple&logoColor=white" alt="macOS 14+ Apple Silicon">
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="MIT License"></a>
   </p>
@@ -22,6 +23,7 @@
   </p>
 
   <p>
+    <a href="#windows-适配版">Windows 适配版</a> ·
     <a href="#概览">概览</a> ·
     <a href="#快速上手">快速上手</a> ·
     <a href="#对话状态栏-hud">对话状态栏 HUD</a> ·
@@ -31,6 +33,17 @@
     <a href="#架构与源码构建">源码构建</a>
   </p>
 </div>
+
+> [!NOTE]
+> **Windows 适配发行版（`Agonie0v0/gravitybox`）** — Fork 自上游 [Enzoo404/gravitybox](https://github.com/Enzoo404/gravitybox)，在保持 macOS 原生能力零回归的基础上完整适配 **Windows 10/11 (x64)**（Tauri 2 + React 19 主界面与系统托盘浮窗、Rust 原生 Win32 Helper、Windows Named Pipe IPC、Credential Manager 凭据互通、回收站清理及内置 Node 22 运行时）。
+>
+> - **Windows 下载安装**：前往 [GitHub Releases](https://github.com/Agonie0v0/gravitybox/releases/latest) 下载用户级免 UAC 安装包（`GravityBox-<version>-win-x64-setup.exe`）或自包含便携压缩包（`GravityBox-<version>-win-x64.zip`）及对应 `.sha256` 校验文件。
+> - **Windows 本地热重载开发**：
+>   - `npm run dev:win` — 全栈 Windows 开发模式（Vite 前端 HMR + Tauri Rust 自动重编译重启 + 后端 `tsc --watch`）。
+>   - `npm run dev:backend` — 后端热重载模式（`tsc --watch` + `runtime/` 监听 + `node --watch dist/main.js` 自动重启）。
+>   - `npm run verify` / `npm run package:win` / `npm run package:win:installer` — 全量门禁校验与自包含便携包 / NSIS 安装包构建。
+>
+> <a id="windows-适配版"></a>
 
 <br />
 

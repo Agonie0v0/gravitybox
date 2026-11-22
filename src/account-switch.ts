@@ -1,17 +1,36 @@
 import { type ApplicationChannel, type ApplicationTarget, applicationTarget } from './application-target.js';
-import { spawn, execFile } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile, mkdir, lstat, unlink, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID, createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
+import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
 import { atomicJson, atomicText, sanitizeError } from './files.js';
 import { withProcessLease } from './process-lock.js';
-import { AccountsManager, SystemKeychainAdapter, buildGoOauthPayload, syncAccountToKeychain, type KeychainAdapter, type Account } from './accounts.js';
+import {
+  AccountsManager,
+  SystemKeychainAdapter,
+  buildGoOauthPayload,
+  decodeKeychainOauthPayload,
+  syncAccountToKeychain,
+  type KeychainAdapter,
+  type Account,
+} from './accounts.js';
 import { ProtobufWriter as Writer } from './protobuf.js';
 import { replaceTopicRow } from './account-state.js';
 export { replaceTopicRow } from './account-state.js';
 import { bt } from './i18n.js';
+import {
+  appProcesses,
+  defaultAntigravityInstallDirs,
+  defaultGravityBoxStateDir,
+  isOwnedByCurrentUser,
+  isPathUnder,
+  isWindows,
+  pathsEqual,
+} from './platform/index.js';
 
 const run = promisify(execFile);
 const TOKEN = 'antigravityUnifiedStateSync.oauthToken';
@@ -19,7 +38,6 @@ const USER = 'antigravityUnifiedStateSync.userStatus';
 const INIT = 'jetskiStateSync.agentManagerInitState';
 const PROJECT = 'antigravityUnifiedStateSync.enterprisePreferences';
 const KEYS = [TOKEN, USER, INIT, PROJECT, 'antigravityOnboarding'];
-const quote = (s: string) => `'${s.replaceAll("'", "''")}'`;
 type Rows = Record<string, string>;
 type SavedFile = { path: string; before: string; after: string; afterDigest?: string };
 type Journal = {
@@ -54,55 +72,123 @@ function rowsDigest(rows: Rows): string {
   return sha256(JSON.stringify(Object.entries(rows || {}).sort()));
 }
 
-// sqlite3 stays in BEGIN IMMEDIATE while the other resources are committed. SQL goes through
-// stdin, so neither tokens nor database values appear in command arguments or diagnostics.
+const requireForSqlite = createRequire(import.meta.url);
+let cachedDatabaseSyncCtor: (new (location: string) => DatabaseSyncType) | null = null;
+function loadDatabaseSync(): new (location: string) => DatabaseSyncType {
+  if (!cachedDatabaseSyncCtor) {
+    const mod = requireForSqlite('node:sqlite') as { DatabaseSync: new (location: string) => DatabaseSyncType };
+    cachedDatabaseSyncCtor = mod.DatabaseSync;
+  }
+  return cachedDatabaseSyncCtor;
+}
+
+// Holds an in-process node:sqlite BEGIN IMMEDIATE write transaction while other resources
+// (Keychain & JSON account records) are committed. Neither tokens nor DB values ever touch argv.
 export class DatabaseTransaction {
-  private child;
-  private output = '';
-  private pending?: { marker: string; resolve: (s: string) => void; reject: (e: Error) => void };
-  private failed = false;
-  private exited: Promise<void>;
-  constructor(path: string) {
-    this.child = spawn('/usr/bin/sqlite3', ['-batch', '-bail', path], { stdio: ['pipe', 'pipe', 'pipe'] });
-    this.exited = new Promise(resolve => this.child.once('close', () => resolve()));
-    this.child.stdin.on('error', () => this.fail());
-    this.child.stderr.on('data', () => this.fail());
-    this.child.on('error', () => this.fail());
-    this.child.on('exit', () => this.fail());
-    this.child.stdout.on('data', chunk => {
-      this.output += chunk.toString();
-      if (this.output.length > 4_000_000) return this.fail();
-      const marker = this.pending?.marker;
-      if (marker && this.output.includes(marker)) {
-        const reply = this.output.slice(0, this.output.indexOf(marker)).trim();
-        this.output = this.output.slice(this.output.indexOf(marker) + marker.length).trimStart();
-        const pending = this.pending!; this.pending = undefined; pending.resolve(reply);
-      }
-    });
+  private db: DatabaseSyncType | null = null;
+  private inTransaction = false;
+  private closed = false;
+  private initError: Error | null = null;
+
+  constructor(private readonly dbPath: string) {
+    try {
+      const DatabaseSync = loadDatabaseSync();
+      this.db = new DatabaseSync(this.dbPath);
+      this.db.exec('PRAGMA busy_timeout = 3000;');
+    } catch (error) {
+      this.initError = this.wrapError(error);
+      this.closed = true;
+    }
   }
-  private fail() { this.failed = true; this.pending?.reject(new Error(bt('switch.err.db_tx_failed'))); this.pending = undefined; }
-  async sql(sql: string): Promise<string> {
-    if (this.failed) throw new Error(bt('switch.err.db_closed'));
-    const marker = `GB_${randomUUID()}`;
-    const response = new Promise<string>((resolve, reject) => { this.pending = { marker, resolve, reject }; });
-    this.child.stdin.write(`${sql}\n.print ${marker}\n`);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try { return await Promise.race([response, new Promise<never>((_, reject) => { timer = setTimeout(() => { this.child.kill(); reject(new Error(bt('switch.err.db_busy'))); }, 6000); })]); }
-    finally { clearTimeout(timer); }
+
+  private wrapError(error: unknown): Error {
+    const msg = error instanceof Error ? error.message : String(error ?? '');
+    if (/SQLITE_BUSY|database is locked|locked/i.test(msg)) {
+      return new Error(bt('switch.err.db_busy'));
+    }
+    return new Error(bt('switch.err.db_tx_failed'));
   }
-  async begin() { await this.sql('.timeout 3000\n.mode json\nBEGIN IMMEDIATE;'); }
+
+  private requireDb(): DatabaseSyncType {
+    if (this.initError) throw this.initError;
+    if (this.closed || !this.db) throw new Error(bt('switch.err.db_closed'));
+    return this.db;
+  }
+
+  private closeSync(): void {
+    if (this.closed) return;
+    this.closed = true;
+    const conn = this.db;
+    this.db = null;
+    if (!conn) return;
+    if (this.inTransaction) {
+      try { conn.exec('ROLLBACK;'); } catch {}
+      this.inTransaction = false;
+    }
+    try { conn.close(); } catch {}
+  }
+
+  async begin(): Promise<void> {
+    const db = this.requireDb();
+    try {
+      db.exec('BEGIN IMMEDIATE;');
+      this.inTransaction = true;
+    } catch (error) {
+      throw this.wrapError(error);
+    }
+  }
+
   async rows(): Promise<Rows> {
-    const raw = await this.sql(`SELECT key,value FROM ItemTable WHERE key IN (${KEYS.map(quote).join(',')});`);
-    return Object.fromEntries((JSON.parse(raw || '[]') as { key: string; value: string }[]).map(r => [r.key, r.value]));
+    const db = this.requireDb();
+    try {
+      const placeholders = KEYS.map(() => '?').join(',');
+      const rawRows = db
+        .prepare(`SELECT key, value FROM ItemTable WHERE key IN (${placeholders})`)
+        .all(...KEYS) as Array<{ key?: unknown; value?: unknown }>;
+      const result: Rows = {};
+      for (const row of rawRows) {
+        if (typeof row.key === 'string' && typeof row.value === 'string') {
+          result[row.key] = row.value;
+        }
+      }
+      return result;
+    } catch (error) {
+      throw this.wrapError(error);
+    }
   }
-  async replace(rows: Rows) {
-    await this.sql(`DELETE FROM ItemTable WHERE key IN (${KEYS.map(quote).join(',')});\n${Object.entries(rows).map(([k, v]) => `INSERT INTO ItemTable(key,value) VALUES(${quote(k)},${quote(v)});`).join('\n')}`);
+
+  async replace(rows: Rows): Promise<void> {
+    const db = this.requireDb();
+    try {
+      const placeholders = KEYS.map(() => '?').join(',');
+      db.prepare(`DELETE FROM ItemTable WHERE key IN (${placeholders})`).run(...KEYS);
+      const insert = db.prepare('INSERT INTO ItemTable(key, value) VALUES(?, ?)');
+      for (const [k, v] of Object.entries(rows)) {
+        insert.run(k, v);
+      }
+    } catch (error) {
+      throw this.wrapError(error);
+    }
   }
-  async finish(commit: boolean) { try { await this.sql(commit ? 'COMMIT;' : 'ROLLBACK;'); } finally { this.child.stdin.end(); } }
-  async close() {
-    this.child.stdin.end();
-    const timer = setTimeout(() => this.child.kill(), 1500);
-    try { await this.exited; } finally { clearTimeout(timer); }
+
+  async finish(commit: boolean): Promise<void> {
+    if (this.initError) throw this.initError;
+    if (this.closed || !this.db) throw new Error(bt('switch.err.db_closed'));
+    try {
+      if (this.inTransaction) {
+        this.db.exec(commit ? 'COMMIT;' : 'ROLLBACK;');
+        this.inTransaction = false;
+      }
+    } catch (error) {
+      this.inTransaction = false;
+      throw this.wrapError(error);
+    } finally {
+      this.closeSync();
+    }
+  }
+
+  async close(): Promise<void> {
+    this.closeSync();
   }
 }
 
@@ -149,7 +235,7 @@ function sanitizeJournalRows(rows: Rows): Rows {
  * 一律视为可能包含 OAuth 凭据并彻底脱敏。
  */
 function isNonSensitiveIndexFile(filePath: string): boolean {
-  return filePath.endsWith('/accounts.json') || filePath === 'accounts.json';
+  return basename(filePath) === 'accounts.json';
 }
 
 function sanitizeJournalFiles(files: SavedFile[]): SavedFile[] {
@@ -183,7 +269,7 @@ export class AccountSwitchService {
   private getCliCredentialPaths(): string[] {
     const baseGeminiDir = this.options.geminiDir
       ?? (this.options.homeDir ? join(this.options.homeDir, '.gemini') : undefined)
-      ?? (this.options.stateDir === join(homedir(), 'Library', 'Application Support', 'GravityBox') ? join(homedir(), '.gemini') : undefined);
+      ?? (pathsEqual(this.options.stateDir, defaultGravityBoxStateDir()) ? join(homedir(), '.gemini') : undefined);
     if (!baseGeminiDir) return [];
     return [
       join(baseGeminiDir, 'antigravity-cli', 'antigravity-oauth-token'),
@@ -205,7 +291,7 @@ export class AccountSwitchService {
           throw err;
         });
         if (!info) continue;
-        if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid?.()) {
+        if (!info.isFile() || info.isSymbolicLink() || !isOwnedByCurrentUser(info)) {
           warnings.push(`${cliPath}: skipped non-regular or non-user file`);
           continue;
         }
@@ -219,10 +305,10 @@ export class AccountSwitchService {
   }
 
   private async resolveRollbackCliPayload(journal: Journal): Promise<string | null> {
-    if (typeof journal.keychainBefore === 'string' && journal.keychainBefore.startsWith('go-keyring-base64:')) {
+    const decodedBefore = decodeKeychainOauthPayload(journal.keychainBefore);
+    if (decodedBefore) {
       try {
-        const raw = Buffer.from(journal.keychainBefore.slice('go-keyring-base64:'.length), 'base64').toString('utf8');
-        const parsed = JSON.parse(raw);
+        const parsed = JSON.parse(decodedBefore);
         if (parsed && typeof parsed === 'object' && parsed.token && typeof parsed.token.refresh_token === 'string' && parsed.token.refresh_token) {
           return JSON.stringify(parsed);
         }
@@ -269,10 +355,15 @@ export class AccountSwitchService {
     try { await this.regular(this.rollbackPath); record = JSON.parse(await readFile(this.rollbackPath, 'utf8')); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'none'; throw error; }
     const dbPath = join(this.options.profile, 'User', 'globalStorage', 'state.vscdb');
-    const allowed = new Set([join(this.options.stateDir, 'accounts.json')]);
-    if (record.version !== 1 || !['prepared', 'committed'].includes(record.phase) || record.databasePath !== dbPath ||
-        !Array.isArray(record.files) || record.files.some(f => !allowed.has(f.path) &&
-          !(f.path.startsWith(join(this.options.stateDir, 'accounts') + '/') && /^[a-zA-Z0-9_-]+\.json$/.test(f.path.slice(join(this.options.stateDir, 'accounts').length + 1))))) {
+    const indexPath = join(this.options.stateDir, 'accounts.json');
+    const accountsDir = join(this.options.stateDir, 'accounts');
+    const isAllowedRecordFile = (filePath: string) =>
+      pathsEqual(filePath, indexPath) ||
+      (isPathUnder(filePath, accountsDir) &&
+        pathsEqual(dirname(filePath), accountsDir) &&
+        /^[a-zA-Z0-9_-]+\.json$/.test(basename(filePath)));
+    if (record.version !== 1 || !['prepared', 'committed'].includes(record.phase) || !pathsEqual(record.databasePath, dbPath) ||
+        !Array.isArray(record.files) || record.files.some(f => !isAllowedRecordFile(f.path))) {
       throw new Error(bt('switch.err.rollback_identity'));
     }
     const currentJournal = JSON.parse(await readFile(this.journalPath, 'utf8')) as Journal;
@@ -316,15 +407,33 @@ export class AccountSwitchService {
     } finally { await tx?.close(); }
   }
   private async guardStopped() {
+    if (this.options.isRunning) {
+      if (await this.options.isRunning()) throw new Error(bt('switch.err.stop_app_first'));
+      return;
+    }
+    if (isWindows()) {
+      const candidateRoots = Array.from(
+        new Set([
+          this.target.appPath,
+          ...defaultAntigravityInstallDirs().flatMap((dir) => [
+            join(dir, 'Antigravity'),
+            join(dir, 'Antigravity - Insiders'),
+            join(dir, 'Antigravity Insiders'),
+          ]),
+        ]),
+      );
+      const procs = await appProcesses(candidateRoots);
+      if (procs.length > 0) throw new Error(bt('switch.err.stop_app_first'));
+      return;
+    }
     const candidatePrefixes = Array.from(
       // Insiders shares official credentials: block switching while it runs, without managing it.
       new Set([this.target.appPath, '/Applications/Antigravity.app', '/Applications/Antigravity - Insiders.app']),
     ).map(p => p + '/Contents/');
-    const running = this.options.isRunning ? await this.options.isRunning() :
-      (await run('/bin/ps', ['-ax', '-ww', '-o', 'args='], { timeout: 3000 })).stdout.split('\n').some(line => {
-        const trimmed = line.trim();
-        return candidatePrefixes.some(prefix => trimmed.startsWith(prefix));
-      });
+    const running = (await run('/bin/ps', ['-ax', '-ww', '-o', 'args='], { timeout: 3000 })).stdout.split('\n').some(line => {
+      const trimmed = line.trim();
+      return candidatePrefixes.some(prefix => trimmed.startsWith(prefix));
+    });
     if (running) throw new Error(bt('switch.err.stop_app_first'));
   }
   private async archivePreviousJournal(previous: Journal) {
@@ -358,7 +467,7 @@ export class AccountSwitchService {
 
   private async regular(path: string) {
     const info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid?.()) throw new Error(bt('switch.err.invalid_login_file'));
+    if (!info.isFile() || info.isSymbolicLink() || !isOwnedByCurrentUser(info)) throw new Error(bt('switch.err.invalid_login_file'));
   }
   private async optionalRegular(path: string): Promise<boolean> {
     try {
@@ -436,7 +545,12 @@ export class AccountSwitchService {
         const keychainBefore = await this.keychain.readPassword('gemini', 'antigravity');
         // Build the exact intended value with an in-memory adapter; no system write yet.
         let keychainAfter = '';
-        await syncAccountToKeychain(acc, { readPassword: async () => null, deletePassword: async () => {}, writePassword: async (_s, _a, value) => { keychainAfter = value; } });
+        await syncAccountToKeychain(acc, {
+          payloadEncoding: this.keychain.payloadEncoding,
+          readPassword: async () => null,
+          deletePassword: async () => {},
+          writePassword: async (_s, _a, value) => { keychainAfter = value; },
+        });
         const afterDigest = rowsDigest(after);
         const keychainAfterDigest = sha256(keychainAfter);
         const filesWithDigest: SavedFile[] = files.map(f => ({ ...f, afterDigest: sha256(f.after) }));

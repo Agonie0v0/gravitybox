@@ -14,6 +14,7 @@ import {
 import { PRICING_METADATA } from './pricing.js';
 import { compareFeedFreshness } from './usage-pricing.js';
 import { bt, setActiveLocale } from './i18n.js';
+import { isOwnedByCurrentUser } from './platform/index.js';
 export function validLedgerEvent(event: unknown): event is LedgerEvent {
     if (!event || typeof event !== 'object')
         return false;
@@ -36,7 +37,7 @@ function compactUnitPrice(price: any) {
 
 function regular(path: string) {
     const stat = lstatSync(path);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid?.())
+    if (!stat.isFile() || stat.isSymbolicLink() || !isOwnedByCurrentUser(stat))
         throw Error(bt('ledger.err.file_identity_mismatch'));
 }
 interface LegacyBaselineCache {
@@ -255,7 +256,7 @@ function readValidatedLegacyEvents(legacyPath: string): LedgerEvent[] {
         return [];
     }
     const stat = lstatSync(legacyPath);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid?.())
+    if (!stat.isFile() || stat.isSymbolicLink() || !isOwnedByCurrentUser(stat))
         throw Error(bt('ledger.err.file_identity_mismatch'));
     if (stat.size > 64 * 1024 * 1024)
         throw Error(bt('ledger.err.legacy_json_budget'));

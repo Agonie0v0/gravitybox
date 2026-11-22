@@ -1921,7 +1921,11 @@ test('Orchestrator 吸收同名独立模型阶段及单物理模型跨角色合�
 
 test('Swarm 1 Working + 2 Standing by (swarm_wait / WAITING) + Needs you 仅计 1 个运行中子智能体，且 0 Working / 2 Concurrent / WAITING(9) 耗时均准确', async (t) => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-hud-swarm-wait-'));
-  t.after(() => fs.rmSync(baseDir, { recursive: true, force: true }));
+  const openDbs = [];
+  t.after(() => {
+    for (const d of openDbs.splice(0)) { try { d.close(); } catch {} }
+    fs.rmSync(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  });
   const convDir = path.join(baseDir, 'conversations');
   fs.mkdirSync(convDir, { recursive: true });
 
@@ -1932,9 +1936,7 @@ test('Swarm 1 Working + 2 Standing by (swarm_wait / WAITING) + Needs you 仅计 
 
   const createConvDb = (id, parentId = null) => {
     const db = new DatabaseSync(path.join(convDir, `${id}.db`));
-    t.after(() => {
-      try { db.close(); } catch {}
-    });
+    openDbs.push(db);
     db.exec(`
       PRAGMA journal_mode = WAL;
       CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER NOT NULL, status INTEGER NOT NULL, metadata BLOB, render_info BLOB, step_payload BLOB);
@@ -1950,9 +1952,7 @@ test('Swarm 1 Working + 2 Standing by (swarm_wait / WAITING) + Needs you 仅计 
   };
 
   const summariesDb = new DatabaseSync(path.join(baseDir, 'conversation_summaries.db'));
-  t.after(() => {
-    try { summariesDb.close(); } catch {}
-  });
+  openDbs.push(summariesDb);
   summariesDb.exec(`
     PRAGMA journal_mode = WAL;
     CREATE TABLE conversation_parents (child_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL);
@@ -2387,10 +2387,12 @@ test('P0-1 回归：2.34.0 可配置 Orchestrator (plan_model=1532, execution_mo
 
   // 2. 端到端 SQLite executor_metadata + gen_metadata f3.1/f3.60.1 解析验证（含空对话与活跃对话）
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-hud-execmeta-'));
-  t.after(() => fs.rmSync(baseDir, { recursive: true, force: true }));
   const convId = '85315fe1-0000-4000-8000-000000000001';
   const db = new DatabaseSync(path.join(baseDir, `${convId}.db`));
-  t.after(() => { try { db.close(); } catch {} });
+  t.after(() => {
+    try { db.close(); } catch {}
+    fs.rmSync(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  });
   db.exec(`
     CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER NOT NULL, status INTEGER NOT NULL, metadata BLOB);
     CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB, size INTEGER NOT NULL DEFAULT 0);
@@ -2670,10 +2672,12 @@ test('P0-1 审计复验回归：2.34.0 可配置 Orchestrator 执行步宿主将
 
 test('P1-1 回归：>4MB 超大 gen_metadata 投影成功不静默丢弃，且 >64KB 历史行不阻塞 genPrefixCutoffIdx 增量推进', async (t) => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-hud-large-gen-'));
-  t.after(() => fs.rmSync(baseDir, { recursive: true, force: true }));
   const dbPath = path.join(baseDir, 'large.db');
   const db = new DatabaseSync(dbPath);
-  t.after(() => { try { db.close(); } catch {} });
+  t.after(() => {
+    try { db.close(); } catch {}
+    fs.rmSync(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  });
   db.exec(`
     CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER NOT NULL, status INTEGER NOT NULL, metadata BLOB);
     CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB, size INTEGER NOT NULL DEFAULT 0);
@@ -2744,18 +2748,16 @@ test('2.34.0 主对话 trajectory_metadata_blob field 6 引用自身 UUID 时不
   const baseDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'gb-self-root-ref-'));
   const convDir = path.join(baseDir, 'antigravity', 'conversations');
   await fs.promises.mkdir(convDir, { recursive: true });
-  t.after(async () => {
-    await fs.promises.rm(baseDir, { recursive: true, force: true });
-  });
 
   const mainId = '91111111-1111-4111-8111-111111111111';
   const childId = '92222222-2222-4222-8222-222222222222';
   const dbPath = path.join(convDir, `${mainId}.db`);
   const mainDb = new DatabaseSync(dbPath);
   const childDb = new DatabaseSync(path.join(convDir, `${childId}.db`));
-  t.after(() => {
+  t.after(async () => {
     try { mainDb.close(); } catch {}
     try { childDb.close(); } catch {}
+    await fs.promises.rm(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
 
   const createSchema = (db) => {
@@ -2811,9 +2813,6 @@ test('step_type 132 同时满足 metadata > 64KB 且 render_info > 64KB 时仍�
   const baseDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'gb-hud-renderinfo-proj-'));
   const convDir = path.join(baseDir, 'antigravity', 'conversations');
   await fs.promises.mkdir(convDir, { recursive: true });
-  t.after(async () => {
-    await fs.promises.rm(baseDir, { recursive: true, force: true });
-  });
 
   const mainId = 'a1111111-1111-4111-8111-111111111111';
   const childId = 'b2222222-2222-4222-8222-222222222222';
@@ -2829,9 +2828,10 @@ test('step_type 132 同时满足 metadata > 64KB 且 render_info > 64KB 时仍�
 
   const mainDb = new DatabaseSync(path.join(convDir, `${mainId}.db`));
   const childDb = new DatabaseSync(path.join(convDir, `${childId}.db`));
-  t.after(() => {
+  t.after(async () => {
     try { mainDb.close(); } catch {}
     try { childDb.close(); } catch {}
+    await fs.promises.rm(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
   createSchema(mainDb);
   createSchema(childDb);

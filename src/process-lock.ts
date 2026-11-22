@@ -6,6 +6,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { bt } from './i18n.js';
+import { atomicRenameWithRetry, isOwnedByCurrentUser, isWindows } from './platform/index.js';
 
 const context = new AsyncLocalStorage<Map<string, string>>();
 const active = new Map<string, string>();
@@ -28,7 +29,7 @@ export async function acquireProcessLease(path: string, timeoutMs = 15000, busyM
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       const info = await lstat(path).catch(() => null);
       if (!info) continue;
-      if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid?.()) throw new Error(bt('lock.identity_mismatch'));
+      if (!info.isFile() || info.isSymbolicLink() || !isOwnedByCurrentUser(info)) throw new Error(bt('lock.identity_mismatch'));
       const text = await readFile(path, 'utf8').catch(() => '');
       let pid = 0;
       try { pid = JSON.parse(text).pid; } catch {
@@ -36,12 +37,26 @@ export async function acquireProcessLease(path: string, timeoutMs = 15000, busyM
         if (Number.isSafeInteger(legacyPid) && legacyPid > 0) pid = legacyPid;
       }
       if ((!Number.isSafeInteger(pid)||pid<=0) && Date.now()-info.mtimeMs>15000) {
-        // Legacy half-created locks cannot have an owner after their descriptor is closed.
-        let closed=false;
-        try {await promisify(execFile)('/usr/sbin/lsof',['-t','--',path],{timeout:1500});}
-        catch(error) {closed=(error as any).code===1 && !(error as any).stdout && !(error as any).stderr;}
-        const check=await lstat(path).catch(()=>null);
-        if(closed&&check?.ino===info.ino&&check.dev===info.dev&&await readFile(path,'utf8').catch(()=>null)===text) {await rename(path,path+'.orphan-'+Date.now()+'-'+nonce);continue;}
+        if (isWindows()) {
+          // On Windows, avoid /usr/sbin/lsof: reclaim stale half-created locks atomically;
+          // if another process still holds an open handle, rename fails and we wait/retry safely.
+          const check = await lstat(path).catch(() => null);
+          if (check?.ino === info.ino && check.dev === info.dev && await readFile(path, 'utf8').catch(() => null) === text) {
+            try {
+              await atomicRenameWithRetry(path, path + '.orphan-' + Date.now() + '-' + nonce, { maxRetries: 1 });
+              continue;
+            } catch {
+              // Still locked or already moved by another contender
+            }
+          }
+        } else {
+          // Legacy half-created locks cannot have an owner after their descriptor is closed.
+          let closed=false;
+          try {await promisify(execFile)('/usr/sbin/lsof',['-t','--',path],{timeout:1500});}
+          catch(error) {closed=(error as any).code===1 && !(error as any).stdout && !(error as any).stderr;}
+          const check=await lstat(path).catch(()=>null);
+          if(closed&&check?.ino===info.ino&&check.dev===info.dev&&await readFile(path,'utf8').catch(()=>null)===text) {await rename(path,path+'.orphan-'+Date.now()+'-'+nonce);continue;}
+        }
       }
       if (Number.isSafeInteger(pid) && pid > 0) {
         let dead = false;
