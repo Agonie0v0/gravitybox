@@ -1112,11 +1112,15 @@ final class MenuPanelController: NSViewController {
             let periodKey = Self.periods[selectedPeriod]
             let cacheKey = currentUsageCacheKey
             let lastFetch = app.usageLastFetchTimeByPeriod[cacheKey] ?? .distantPast
-            let isStale = Date().timeIntervalSince(lastFetch) >= 15.0
+            let hasError = !(app.usageFetchErrorsByPeriod[cacheKey]?.isEmpty ?? true)
+            let nextRetry = app.usageNextRetryAtByPeriod[cacheKey] ?? .distantPast
+            let isStale = Date().timeIntervalSince(lastFetch) >= 15.0 || (hasError && Date() >= nextRetry)
             let needsUsageRefresh = app.cachedUsageReportsByPeriod[cacheKey] == nil
                 || app.bootstrappedUsagePeriods.contains(cacheKey)
                 || isStale
-            if needsUsageRefresh && app.usageInFlightByPeriod[cacheKey] != true && app.usageFetchErrorsByPeriod[cacheKey] == nil {
+                || hasError
+            let canRetryNow = !hasError || Date() >= nextRetry
+            if needsUsageRefresh && app.usageInFlightByPeriod[cacheKey] != true && canRetryNow {
                 app.fetchUsageSummary(period: periodKey, environmentId: selectedEnvironmentId, force: false)
             }
         }
@@ -1210,7 +1214,12 @@ final class MenuPanelController: NSViewController {
                 usageFooterLabel.stringValue = L10n.t("menu_panel.usage.service_offline", fallback: "本机服务离线")
                 usageFooterLabel.textColor = accessibleWarningColor()
             } else {
-                usageScopeLabel.isHidden = true
+                for tile in [tokensTile, requestsTile, costTile, cacheTile] { tile.setValueText("—") }
+                usageScopeLabel.stringValue = L10n.t("menu_panel.usage.loading", fallback: "正在读取统计…")
+                usageScopeLabel.textColor = Design.secondary
+                usageScopeLabel.isHidden = false
+                usageFooterLabel.stringValue = L10n.t("menu_panel.usage.loading_footer", fallback: "正在同步最新用量数据…")
+                usageFooterLabel.textColor = Design.secondary
             }
             return
         }

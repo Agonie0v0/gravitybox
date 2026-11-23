@@ -164,7 +164,7 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
         for child in enhanceGroup.arrangedSubviews { fillWidth(child, in: enhanceGroup) }
 
         let dataSyncGroup = vertical([
-            settingRow(icon: "timer", tint: Design.blue, title: L10n.t("settings.refresh.title", fallback: "配额刷新间隔"), subtitle: L10n.t("settings.refresh.subtitle", fallback: "定时刷新当前活跃与在线 SSH 账号的配额，其余备用账号切换后同步"), control: refresh),
+            settingRow(icon: "timer", tint: Design.blue, title: L10n.t("settings.refresh.title", fallback: "配额刷新间隔"), subtitle: L10n.t("settings.refresh.subtitle", fallback: "定时刷新当前活跃与在线 SSH 账号的配额；备用账号按授权状态在后台轮询或在切换时更新"), control: refresh),
             divider(),
             settingRow(icon: "tag", tint: Design.blue, title: L10n.t("settings.pricing_sync.title", fallback: "自动更新价格基准"), subtitle: L10n.t("settings.pricing_sync.subtitle", fallback: "自动同步公开模型费率，每 24 小时检查一次"), control: pricingControlGroup)
         ], spacing: 12)

@@ -136,10 +136,10 @@ import Cocoa
         var activeId = "a", switches = 0, preflightState = "safe", lastLanguageCommand: String? = nil, lastHudCommandEnabled: Bool? = nil
         assistant.activeAccountId = activeId; assistant.cachedAccounts = accounts
         let models:[[String:Any]] = [
-            ["model":"gemini-3.8-flash-n","totalTokens":90800000,"promptTokens":4000000,"candidatesTokens":300000,"requestCount":695,"estimatedUsd":10.77,"priced":true,"pricingStatus":"historical"],
-            ["model":"gemini-3.8-flash-exp-a","totalTokens":12400000,"promptTokens":1100000,"candidatesTokens":90000,"requestCount":84,"estimatedUsd":6.40,"priced":true,"pricingStatus":"historical"],
-            ["model":"claude-opus-5-5-medium","totalTokens":4500000,"promptTokens":900000,"candidatesTokens":120000,"requestCount":18,"estimatedUsd":5.25,"priced":true,"pricingStatus":"historical"],
-            ["model":"claude-sonnet-4-6","totalTokens":2800000,"promptTokens":600000,"candidatesTokens":10000,"requestCount":43,"estimatedUsd":1.36,"priced":true]
+            ["model":"gemini-3.8-flash-n","totalTokens":78_500_000,"promptTokens":3_100_000,"cachedTokens":75_240_000,"candidatesTokens":160_000,"requestCount":611,"estimatedUsd":10.77,"priced":true,"pricingStatus":"historical"],
+            ["model":"gemini-3.8-flash-exp-a","totalTokens":12_400_000,"promptTokens":700_000,"cachedTokens":11_630_000,"candidatesTokens":70_000,"requestCount":84,"estimatedUsd":6.40,"priced":true,"pricingStatus":"historical"],
+            ["model":"claude-opus-5-5-medium","totalTokens":4_500_000,"promptTokens":500_000,"cachedTokens":3_930_000,"candidatesTokens":70_000,"requestCount":18,"estimatedUsd":5.25,"priced":true,"pricingStatus":"historical"],
+            ["model":"claude-sonnet-4-6","totalTokens":2_800_000,"promptTokens":400_000,"cachedTokens":2_390_000,"candidatesTokens":10_000,"requestCount":43,"estimatedUsd":1.36,"priced":true]
         ]
         let todayHourly:[[String:Any]] = [
             ["hour":"2026-10-23 09:00","total_tokens":6200000],
@@ -151,13 +151,29 @@ import Cocoa
             ["hour":"2026-10-23 20:00","total_tokens":9800000],
             ["hour":"2026-10-23 21:00","total_tokens":7700000]
         ]
-        let totals:[String:Any] = ["totalTokens":98200000,"promptTokens":4700000,"cachedTokens":93100000,"candidatesTokens":310000,"requestCount":756,"estimatedUsd":23.78,"pricedModels":4,"unpricedModels":0,"databasesScanned":343,"databasesDiscovered":343,"availability":"complete","scanScopeDescription":"全部 343 个会话数据库","lastScannedAt":Date().timeIntervalSince1970]
+        let conservedTokens = models.reduce(0) { $0 + ($1["totalTokens"] as? Int ?? 0) }
+        let conservedPrompt = models.reduce(0) { $0 + ($1["promptTokens"] as? Int ?? 0) }
+        let conservedCached = models.reduce(0) { $0 + ($1["cachedTokens"] as? Int ?? 0) }
+        let conservedCandidates = models.reduce(0) { $0 + ($1["candidatesTokens"] as? Int ?? 0) }
+        let conservedRequests = models.reduce(0) { $0 + ($1["requestCount"] as? Int ?? 0) }
+        let conservedUsd = ((models.reduce(0.0) { $0 + ($1["estimatedUsd"] as? Double ?? 0) }) * 100.0).rounded() / 100.0
+        let conservedHourlyTokens = todayHourly.reduce(0) { $0 + ($1["total_tokens"] as? Int ?? 0) }
+        for m in models {
+            let p = m["promptTokens"] as? Int ?? 0
+            let c = m["cachedTokens"] as? Int ?? 0
+            let o = m["candidatesTokens"] as? Int ?? 0
+            let tot = m["totalTokens"] as? Int ?? 0
+            check(p + c + o == tot, "P1-24: model \(m["model"] ?? "") token breakdown must equal totalTokens")
+        }
+        check(conservedPrompt + conservedCached + conservedCandidates == conservedTokens, "P1-24: conserved totals breakdown must equal conserved totalTokens")
+        check(conservedHourlyTokens == conservedTokens, "P1-24: todayHourly sum (\(conservedHourlyTokens)) must equal conserved totalTokens (\(conservedTokens))")
+        let totals:[String:Any] = ["totalTokens":conservedTokens,"promptTokens":conservedPrompt,"cachedTokens":conservedCached,"candidatesTokens":conservedCandidates,"requestCount":conservedRequests,"estimatedUsd":conservedUsd,"pricedModels":models.count,"unpricedModels":0,"databasesScanned":343,"databasesDiscovered":343,"availability":"complete","scanScopeDescription":"全部 343 个会话数据库","lastScannedAt":Date().timeIntervalSince1970]
         assistant.bridge.fixtureReply = { payload in
             switch payload["command"] as? String {
             case "status": return ["ok":true,"status":fixtureStatus,"tasks":[],"taskRevision":0]
             case "account_list": return ["ok":true,"activeId":activeId,"accounts":accounts,"pendingSwitch":false]
             case "auto_switch_get": return ["ok":true,"config":["enabled":false,"strategy":"priority","monitored_model":"all"]]
-            case "dashboard_summary": return ["ok":true,"accounts":accounts.first(where:{$0["id"] as? String == activeId})!.merging(["activeName":"Alex","activeEmail":"alex@example.invalid","activeTier":"PRO","liveAccountEmail":"alex@example.invalid","isLiveVerified":true]) { _, new in new },"usage":["todayTokens":98200000,"totalTokens":3000000000,"estimatedUsd":23.78,"allTimeEstimatedUsd":410.25,"requestCount":756,"totalRequestCount":27175,"todayPricedModels":4,"todayUnpricedModels":0,"pricedModels":4,"unpricedModels":0,"databasesScanned":343,"databasesDiscovered":343,"availability":"complete"]]
+            case "dashboard_summary": return ["ok":true,"accounts":accounts.first(where:{$0["id"] as? String == activeId})!.merging(["activeName":"Alex","activeEmail":"alex@example.invalid","activeTier":"PRO","liveAccountEmail":"alex@example.invalid","isLiveVerified":true]) { _, new in new },"usage":["todayTokens":conservedTokens,"totalTokens":3000000000,"estimatedUsd":conservedUsd,"allTimeEstimatedUsd":410.25,"requestCount":conservedRequests,"totalRequestCount":27175,"todayPricedModels":models.count,"todayUnpricedModels":0,"pricedModels":models.count,"unpricedModels":0,"databasesScanned":343,"databasesDiscovered":343,"availability":"complete"]]
             case "usage_summary":
                 let period = payload["period"] as? String ?? "today"
                 return ["ok":true,"period":period,"snapshotId":"fixture-snapshot","summary":totals,"byModel":models,"todayHourly":todayHourly,"dailyTrends":[]]
@@ -2861,13 +2877,15 @@ import Cocoa
             dynAccountsHost.bridge.fixtureReply = prevDynFixture
             var ultraWithNeon = ultraAcc
             ultraWithNeon["models"] = [
+                ["name": "gemini-4-argon", "model_id": "gemini-4-argon", "display_name": "Gemini 4 Argon", "disabled": false],
+                ["name": "gemini-4-carbon", "model_id": "gemini-4-carbon", "display_name": "Gemini 4 Carbon", "disabled": false],
                 ["name": "gemini-4-neon", "model_id": "gemini-4-neon", "display_name": "Gemini 4 Neon", "disabled": false]
             ]
-            check(QuotaPresentation.monitoredScopeSubtitle(for: "gemini", activeAccount: ultraWithNeon) == "Ultra 套餐已将 Argon、Carbon 与 Neon 并入此共享池，一并监测", "Ultra gemini subtitle dynamically lists newly pooled Neon model")
+            check(QuotaPresentation.monitoredScopeSubtitle(for: "gemini", activeAccount: ultraWithNeon) == "Ultra 套餐已将 Argon、Carbon 与 Neon 并入此共享池，一并监测", "Ultra gemini subtitle dynamically lists pooled Argon, Carbon, and Neon models when present")
             check(ultraScopedPolicy.strategyPopup.frame.width == ultraScopedPolicy.modelPopup.frame.width, "Ultra policy popups must share uniform width")
             check(ultraScopedPolicy.modelPopup.frame.width <= 130 && ultraScopedPolicy.modelPopup.frame.width >= Design.fittedPopUpWidth(ultraScopedPolicy.modelPopup) - 0.5, "Ultra policy popups must shrink tightly to longest option without 220pt bloat (got \(ultraScopedPolicy.modelPopup.frame.width))")
             check((ultraScopedPolicy.window.contentView?.frame.height ?? 999) < 395 && ultraScopedPolicy.fieldsCard.frame.height <= (groupStack(ultraScopedPolicy.fieldsCard)?.fittingSize.height ?? 0) + 34, "Ultra policy sheet must hug content without bottom blank space (contentH=\(ultraScopedPolicy.window.contentView?.frame.height ?? -1), cardH=\(ultraScopedPolicy.fieldsCard.frame.height))")
-            check(ultraScopedPolicy.monitoredSubLabel.stringValue == "Ultra 套餐已将 Argon 与 Carbon 并入此共享池，一并监测", "Ultra policy popup explains Argon/Carbon inclusion")
+            check(ultraScopedPolicy.monitoredSubLabel.stringValue == "仅监测当前 Ultra 账号的 Gemini 共享配额池", "Ultra policy popup without member evidence omits unverified Argon/Carbon")
             if let ultraCardBox = dynAccountsPage.cardsStack.arrangedSubviews.first {
                 let ultraExpandedTexts = allTextValues(ultraCardBox)
                 check(!ultraExpandedTexts.contains(where: { $0.contains("Argon") || $0.contains("Carbon") || $0.contains("周期未知") }), "Ultra expanded account card omits Argon, Carbon, and 周期未知")
@@ -6764,6 +6782,137 @@ import Cocoa
             } else {
                 check(false, "P2-12: oldestEnabledAccountQuotaTimestamp must return normalized timestamp")
             }
+
+            // MARK: - Batch D Regression Guards (#16, #21, #22, #23)
+            // P1-16: Ultra 账号无模型证据时不得臆造 Argon/Carbon
+            L10n.shared.setLanguage("zh-Hans", notify: false)
+            let ultraNoEvidence: [String: Any] = ["id": "u1", "email": "ultra@example.invalid", "subscription_tier": "ULTRA", "models": []]
+            let subAll = QuotaPresentation.monitoredScopeSubtitle(for: "all", activeAccount: ultraNoEvidence)
+            let subGem = QuotaPresentation.monitoredScopeSubtitle(for: "gemini", activeAccount: ultraNoEvidence)
+            check(!subAll.contains("Argon") && !subAll.contains("Carbon"), "P1-16: Ultra without model evidence must not claim Argon/Carbon (got \(subAll))")
+            check(!subGem.contains("Argon") && !subGem.contains("Carbon"), "P1-16: Ultra gemini without model evidence must not claim Argon/Carbon (got \(subGem))")
+
+            // P1-21 & P1-22: 菜单栏 cache-miss 清旧值 + 失败后冷却到期自动恢复 + Usage.swift 跨 scope 失败清旧值
+            let batchDState = state.appendingPathComponent("batch-d-state", isDirectory: true)
+            try? FileManager.default.removeItem(at: batchDState)
+            let dHost = Assistant(state: batchDState)
+            dHost.configuration = try ConfigurationStore(state: batchDState)
+            dHost.bridge = BackendBridge(resources: state, state: batchDState)
+            dHost.reachable = true
+            var failUsageCall = false
+            var dUsageCalls = 0
+            var dAccountListCalls = 0
+            dHost.bridge.fixtureReply = { payload in
+                let cmd = payload["command"] as? String
+                if cmd == "account_list" {
+                    dAccountListCalls += 1
+                    return ["ok": true, "activeId": "", "accounts": [], "pendingSwitch": false]
+                }
+                if cmd == "usage_summary" {
+                    dUsageCalls += 1
+                    if failUsageCall {
+                        return ["ok": false, "error": "temporary rpc failure"]
+                    }
+                    let period = payload["period"] as? String ?? "today"
+                    let envId = payload["environmentId"] as? String ?? "all"
+                    let accId = payload["accountId"] as? String ?? "all"
+                    return [
+                        "ok": true,
+                        "period": period,
+                        "selectedEnvironmentId": envId,
+                        "selectedAccountId": accId,
+                        "snapshotId": "snap-\(period)-\(envId)-\(accId)",
+                        "summary": [
+                            "totalTokens": envId == "local" ? 1000 : 2000,
+                            "promptTokens": 400,
+                            "cachedTokens": envId == "local" ? 500 : 1500,
+                            "candidatesTokens": 100,
+                            "requestCount": envId == "local" ? 5 : 10,
+                            "estimatedUsd": 0.5,
+                            "pricedModels": 1,
+                            "unpricedModels": 0,
+                            "availability": "complete",
+                        ],
+                        "byModel": [["model": "gemini-3.8-flash-n", "totalTokens": envId == "local" ? 1000 : 2000, "requestCount": 5, "estimatedUsd": 0.5, "priced": true]],
+                        "todayHourly": [],
+                        "dailyTrends": [],
+                    ]
+                }
+                return ["ok": true]
+            }
+
+            let dMenu = dHost.ensureMenuPanelController()
+            let dMenuWin = makeHeadlessHostWindow(width: MenuPanelController.panelWidth, height: MenuPanelController.defaultPanelHeight)
+            dMenuWin.contentViewController = dMenu
+            dHost.menuTracking = true
+            dMenu.selectTab(0, persist: false)
+            dMenu.panelWillOpen()
+            pump(0.05)
+            check(dMenu.tokensTile.valueLabel.stringValue == "2K", "P1-21 setup: today cache should populate 2K")
+
+            // 模拟切周期出现 cache miss，验证旧值被立刻清空为 "—" 而非保留上周期值
+            failUsageCall = true
+            dHost.usageInFlightByPeriod["7d"] = true // 阻止立刻落地成功，保留在线 cache-miss 态检查
+            dMenu.selectPeriod(1, persist: false)
+            pump(0.02)
+            check(dMenu.tokensTile.valueLabel.stringValue == "—", "P1-21: online cache-miss must clear previous tokensTile to — (got \(dMenu.tokensTile.valueLabel.stringValue))")
+            dHost.usageInFlightByPeriod["7d"] = false
+
+            // 触发失败后检查 15s 冷却期内不重复拉取，冷却过期且恢复正常后自动恢复
+            let callsBeforeFail = dUsageCalls
+            dMenu.syncFromAssistant(updateSize: false)
+            pump(0.05)
+            check(dUsageCalls == callsBeforeFail + 1, "P1-22: should issue one failing usage_summary request")
+            check(dHost.usageNextRetryAtByPeriod["7d"] != nil, "P1-22: failure must set 15s usageNextRetryAtByPeriod")
+            dMenu.syncFromAssistant(updateSize: false)
+            pump(0.02)
+            check(dUsageCalls == callsBeforeFail + 1, "P1-22: must respect 15s retry cooldown before retrying")
+
+            failUsageCall = false
+            dHost.usageNextRetryAtByPeriod["7d"] = Date(timeIntervalSinceNow: -1)
+            dMenu.syncFromAssistant(updateSize: false)
+            pump(0.05)
+            check(dUsageCalls >= callsBeforeFail + 2, "P1-22: expired cooldown with open menu must auto-retry usage_summary")
+            check(dHost.usageFetchErrorsByPeriod["7d"] == nil && dMenu.tokensTile.valueLabel.stringValue == "2K", "P1-22: auto-retry success must clear error and restore 2K metrics")
+
+            // Usage.swift 跨 scope 失败清旧值（P1-21）
+            let dUsagePage = UsagePage(app: dHost)
+            let dUsageWin = makeHeadlessHostWindow(width: 900, height: 680)
+            dUsageWin.contentView = dUsagePage.view
+            dUsagePage.update(force: true)
+            pump(0.05)
+            check(dUsagePage.totalTokensMetric.stringValue == "2K", "P1-21 setup: UsagePage initial scope (all) loads 2K")
+
+            failUsageCall = true
+            dUsagePage.selectedEnvironmentId = "ssh-remote-b"
+            dUsagePage.fetch(force: true, interruptInFlight: true)
+            pump(0.05)
+            check(dUsagePage.totalTokensMetric.stringValue == "—", "P1-21: cross-scope failure in UsagePage must clear previous environment metrics to — (got \(dUsagePage.totalTokensMetric.stringValue))")
+            check(dUsagePage.latestReport.isEmpty && dUsagePage.latestReportIdentity == nil, "P1-21: cross-scope failure must reset latestReport and latestReportIdentity")
+
+            // P1-23: 空号池首次加载置 hasLoadedAccountsOnce=true 不在 3s refresh 循环内重复狂刷
+            dHost.fetchAccountList(notifyPage: false)
+            pump(0.05)
+            check(dHost.hasLoadedAccountsOnce == true && dHost.cachedAccounts.isEmpty, "P1-23: empty account_list must still mark hasLoadedAccountsOnce=true")
+            let callsAfterFirstEmpty = dAccountListCalls
+            let fakeStatusPayload: [String: Any] = ["accountsRevision": "", "liveAccountEmail": "", "remoteSyncRevision": 0]
+            dHost.statusValue = LiveStatus(fakeStatusPayload)
+            if (!dHost.hasLoadedAccountsOnce && !dHost.accountListInFlight) {
+                dHost.fetchAccountList(notifyPage: true)
+            }
+            check(dAccountListCalls == callsAfterFirstEmpty, "P1-23: empty pool after first load must not re-fetch on unchanged status")
+
+            // P1-23: 慢响应期间即使触发 pendingRefetch，首个有效返回仍先更新 UI 与 waiters，绝不活锁丢弃
+            var slowAccountWaiterCount = 0
+            dHost.fetchAccountList(notifyPage: false) { res in
+                if case .success = res { slowAccountWaiterCount += 1 }
+            }
+            check(dHost.accountListInFlight == true, "P1-23: slow account_list should enter in-flight")
+            dHost.fetchAccountList(notifyPage: false) // 排队 pendingRefetch
+            waitUntil(timeout: 2.0, step: 0.01, description: "slow account_list and queued refetch to finish") {
+                !dHost.accountListInFlight && !dHost.accountListPendingRefetch
+            }
+            check(slowAccountWaiterCount == 1, "P1-23: original waiter must receive response before queued refetch instead of being dropped")
         }
 
         let result:[String:Any] = ["stableOnlySelectionPassed":true,"nativeLayouts":captures.count,"captures":captures,"enCaptures":enCaptures,"enExtraCaptures":enExtraCaptures,"menuCaptures":6,"safeSwitchSharedFlowPassed":true,"emailWidthPassed":true,"partialPricingPassed":true,"headlessNoVisibleWindowLeaksPassed":true,"nativeAssertions":assertionCount,"scope":"isolated synthetic AppKit fixture; not installed-app acceptance"]

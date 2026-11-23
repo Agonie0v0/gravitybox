@@ -83,6 +83,8 @@ extension Assistant {
             item.removeValue(forKey: "periods")
             cachedUsageReportsByPeriod[p] = item
             usageLastFetchTimeByPeriod[p] = fetchedAt
+            usageLastSuccessAtByPeriod[p] = fetchedAt
+            usageNextRetryAtByPeriod.removeValue(forKey: p)
             usageRemoteSyncRevisionByPeriod[p] = statusValue.remoteSyncRevision
             usageFetchErrorsByPeriod[p] = nil
             bootstrappedUsagePeriods.remove(p)
@@ -161,8 +163,11 @@ extension Assistant {
             switch response {
             case .failure(let error):
                 self.usageFetchErrorsByPeriod[cacheKey] = error.localizedDescription
+                self.usageNextRetryAtByPeriod[cacheKey] = fetchedAt.addingTimeInterval(15.0)
             case .success(let value):
                 self.usageFetchErrorsByPeriod[cacheKey] = nil
+                self.usageLastSuccessAtByPeriod[cacheKey] = fetchedAt
+                self.usageNextRetryAtByPeriod.removeValue(forKey: cacheKey)
                 self.usageRemoteSyncRevisionByPeriod[cacheKey] = self.statusValue.remoteSyncRevision
                 if isDefaultAllFilter, let periodsMap = value["periods"] as? [String: Any] {
                     self.ingestUsagePeriods(from: periodsMap, fetchedAt: fetchedAt)
@@ -337,6 +342,8 @@ extension Assistant {
     func invalidateUsageReportCache() {
         cachedUsageReportsByPeriod.removeAll()
         usageLastFetchTimeByPeriod.removeAll()
+        usageLastSuccessAtByPeriod.removeAll()
+        usageNextRetryAtByPeriod.removeAll()
         usageRemoteSyncRevisionByPeriod.removeAll()
         usageFetchErrorsByPeriod.removeAll()
         bootstrappedUsagePeriods.removeAll()
@@ -556,22 +563,21 @@ extension Assistant {
         let generation = accountListGeneration
         let requestRevision = statusValue.accountsRevision
         let requestLiveEmail = statusValue.liveAccountEmail
+        accountListInFlightRevision = requestRevision
+        accountListInFlightLiveEmail = requestLiveEmail
         lastAccountListFetchAt = Date()
         bridge.send(["command": "account_list"]) { [weak self] res in
             guard let self else { return }
-            if self.accountListPendingRefetch {
-                self.accountListPendingRefetch = false
-                self.accountListInFlight = false
-                let pendingNotify = self.accountListPendingNotifyPage
-                self.fetchAccountList(notifyPage: pendingNotify)
-                return
-            }
+            let shouldPendingRefetch = self.accountListPendingRefetch
+            let pendingNotify = self.accountListPendingNotifyPage
+            self.accountListPendingRefetch = false
             self.accountListInFlight = false
             let waiters = self.accountListWaiters
             let shouldNotifyPage = self.accountListPendingNotifyPage
             self.accountListWaiters.removeAll()
             self.accountListPendingNotifyPage = false
             if case .success(let val) = res, generation >= self.accountListGeneration, let list = val["accounts"] as? [[String: Any]] {
+                self.hasLoadedAccountsOnce = true
                 self.bootstrappedAccounts = false
                 if val["environments"] != nil || val["environmentsRevision"] != nil || val["focusedEnvironmentId"] != nil {
                     self.syncEnvironmentsFromPayload(val, notifyUI: false)
@@ -622,6 +628,9 @@ extension Assistant {
                 self.checkAndTriggerOverdueQuotaRefreshIfNeeded()
             }
             for waiter in waiters { waiter(res) }
+            if shouldPendingRefetch {
+                self.fetchAccountList(notifyPage: pendingNotify)
+            }
         }
     }
 

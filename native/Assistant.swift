@@ -118,6 +118,8 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     var menuTracking = false
     var cachedUsageReportsByPeriod: [String: [String: Any]] = [:]
     var usageLastFetchTimeByPeriod: [String: Date] = [:]
+    var usageLastSuccessAtByPeriod: [String: Date] = [:]
+    var usageNextRetryAtByPeriod: [String: Date] = [:]
     var usageRemoteSyncRevisionByPeriod: [String: Int] = [:]
     var usageInFlightByPeriod: [String: Bool] = [:]
     var usageGenerationByPeriod: [String: Int] = [:]
@@ -205,6 +207,9 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     var accountListPendingRefetch = false
     var accountListPendingNotifyPage = false
     var accountListGeneration = 0
+    var hasLoadedAccountsOnce = false
+    var accountListInFlightRevision = ""
+    var accountListInFlightLiveEmail = ""
     var accountListWaiters: [(Result<[String: Any], Error>) -> Void] = []
     private let stateWatchQueue = DispatchQueue(label: "local.gravitybox.state-watch", qos: .utility)
     private var stateWatchWorkItem: DispatchWorkItem?
@@ -1838,9 +1843,16 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
                     self.lastTaskRevision = incomingRev
                 }
                 if includeAccounts {
-                    let accountsChanged = self.bootstrappedAccounts || (!self.statusValue.accountsRevision.isEmpty && self.statusValue.accountsRevision != self.lastFetchedAccountsRevision) || self.statusValue.liveAccountEmail != self.lastFetchedLiveEmail
-                    let periodicAccountRefreshDue = (self.menuTracking || (self.contentVisible && self.currentPage == 1)) && Date().timeIntervalSince(self.lastAccountListFetchAt) >= 15.0
-                    if self.cachedAccounts.isEmpty || accountsChanged || periodicAccountRefreshDue {
+                    let revisionDiff = !self.statusValue.accountsRevision.isEmpty
+                        && self.statusValue.accountsRevision != self.lastFetchedAccountsRevision
+                        && (!self.accountListInFlight || self.statusValue.accountsRevision != self.accountListInFlightRevision)
+                    let emailDiff = self.statusValue.liveAccountEmail != self.lastFetchedLiveEmail
+                        && (!self.accountListInFlight || self.statusValue.liveAccountEmail != self.accountListInFlightLiveEmail)
+                    let accountsChanged = self.bootstrappedAccounts || revisionDiff || emailDiff
+                    let periodicAccountRefreshDue = !self.accountListInFlight
+                        && (self.menuTracking || (self.contentVisible && self.currentPage == 1))
+                        && Date().timeIntervalSince(self.lastAccountListFetchAt) >= 15.0
+                    if (!self.hasLoadedAccountsOnce && !self.accountListInFlight) || accountsChanged || periodicAccountRefreshDue {
                         self.fetchAccountList(notifyPage: true)
                     }
                 }

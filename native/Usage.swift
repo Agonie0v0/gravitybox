@@ -468,6 +468,7 @@ final class UsagePage: NSObject {
     let footerBox = DesignCardBox()
 
     var latestReport: [String: Any] = [:]
+    var latestReportIdentity: UsageQueryIdentity?
     var logController: UsageLogController?
     var loading = false
     private var requestGeneration: Int = 0
@@ -1091,9 +1092,10 @@ final class UsagePage: NSObject {
             case .failure(let error):
                 // 失败同样进入 15s 退避，避免每个 3s tick 反复请求。
                 self.metricsKey = requestKey
-                self.syncExportButtonState(for: period, environmentId: requestedEnv, accountId: requestedAcc)
+                let sameScope = self.latestReportIdentity?.environmentId == requestedEnv
+                    && self.latestReportIdentity?.accountId == requestedAcc
                 let rawOldPeriod = (self.latestReport["period"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                if !self.latestReport.isEmpty, !rawOldPeriod.isEmpty {
+                if sameScope, !self.latestReport.isEmpty, !rawOldPeriod.isEmpty {
                     let localizedOldPeriod: String
                     switch rawOldPeriod {
                     case "today": localizedOldPeriod = L10n.t("usage.period.today")
@@ -1104,8 +1106,10 @@ final class UsagePage: NSObject {
                     }
                     self.statusSummary.stringValue = L10n.t("usage.error.read_keep_cached", ["period": localizedOldPeriod, "error": error.localizedDescription])
                 } else {
+                    self.clearDisplayedUsageState(resetIdentity: true)
                     self.statusSummary.stringValue = L10n.t("menu_panel.usage.read_failed", ["error": error.localizedDescription], fallback: "读取失败：\(error.localizedDescription)")
                 }
+                self.syncExportButtonState(for: period, environmentId: requestedEnv, accountId: requestedAcc)
                 self.statusSummary.textColor = accessibleWarningColor()
                 self.footerBox.isHidden = false
             case .success(let value):
@@ -1196,6 +1200,29 @@ final class UsagePage: NSObject {
         }
     }
 
+    func clearDisplayedUsageState(resetIdentity: Bool) {
+        if resetIdentity {
+            latestReport = [:]
+            latestReportIdentity = nil
+            renderedSnapshotKey = ""
+            historicalEnvNoticeBox.isHidden = true
+        }
+        for label in [totalTokensMetric, usdMetric, cacheRateMetric, requestsMetric] { label.stringValue = "—" }
+        costStatusBadge.isHidden = true
+        tokensDetail.stringValue = L10n.t("usage.unavailable.tokens")
+        usdDetail.stringValue = L10n.t("usage.unavailable.cost")
+        usdDetail.textColor = .secondaryLabelColor
+        usdDetail.isHidden = false
+        requestsDetail.stringValue = L10n.t("usage.unavailable.requests")
+        cacheRateDetail.stringValue = L10n.t("usage.unavailable.cache")
+        cacheTrack.update(percent: .nan)
+        modelRows = []; trendChart.points = []; donutChart.slices = []
+        donutChart.isHidden = true
+        donutLegendStack.arrangedSubviews.forEach { donutLegendStack.removeArrangedSubview($0); $0.removeFromSuperview() }
+        modelsCountLabel.stringValue = ""
+        modelsBreakdownStack.arrangedSubviews.forEach { modelsBreakdownStack.removeArrangedSubview($0); $0.removeFromSuperview() }
+    }
+
     func applyUsagePayload(_ value: [String: Any], period: String, segIdx: Int, requestKey: String, environmentId: String? = nil, accountId: String? = nil) {
         let expectedEnv = environmentId ?? selectedEnvironmentId
         let expectedAcc = accountId ?? selectedAccountId
@@ -1209,6 +1236,7 @@ final class UsagePage: NSObject {
         }
         self.metricsKey = requestKey
         self.latestReport = value
+        self.latestReportIdentity = UsageQueryIdentity(period: period, environmentId: expectedEnv, accountId: expectedAcc)
         let summary = value["summary"] as? [String: Any] ?? [:]
         // Request state is independent of chart identity: a successful retry must
         // clear the old error even when the data snapshot itself did not change.
@@ -1239,19 +1267,7 @@ final class UsagePage: NSObject {
         self.renderedSnapshotKey = snapshotKey
         self.syncExportButtonState(for: period, environmentId: expectedEnv, accountId: expectedAcc)
         if isUnavailable {
-            for label in [self.totalTokensMetric, self.usdMetric, self.cacheRateMetric, self.requestsMetric] { label.stringValue = "—" }
-            self.costStatusBadge.isHidden = true
-            self.tokensDetail.stringValue = L10n.t("usage.unavailable.tokens")
-            self.usdDetail.stringValue = L10n.t("usage.unavailable.cost")
-            self.usdDetail.textColor = .secondaryLabelColor
-            self.usdDetail.isHidden = false
-            self.requestsDetail.stringValue = L10n.t("usage.unavailable.requests")
-            self.cacheRateDetail.stringValue = L10n.t("usage.unavailable.cache")
-            self.cacheTrack.update(percent: .nan)
-            self.modelRows = []; self.trendChart.points = []; self.donutChart.slices = []
-            self.donutChart.isHidden = true
-            self.modelsCountLabel.stringValue = ""
-            self.modelsBreakdownStack.arrangedSubviews.forEach { self.modelsBreakdownStack.removeArrangedSubview($0); $0.removeFromSuperview() }
+            self.clearDisplayedUsageState(resetIdentity: false)
             self.statusSummary.stringValue = L10n.t("usage.unavailable.banner"); self.statusSummary.textColor = accessibleWarningColor(); self.footerBox.isHidden = false
             return
         }
