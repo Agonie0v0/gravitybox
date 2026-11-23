@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
-import { extname, join, relative } from 'node:path';
+import { extname, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -60,10 +60,11 @@ const BINARY_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.icns', '.ico',
   '.dmg', '.zip', '.tar', '.gz', '.pdf', '.woff', '.woff2',
   '.ttf', '.otf', '.node', '.sqlite', '.db', '.bin',
+  '.exe', '.dll', '.pdb', '.rlib', '.rmeta', '.lib',
 ]);
 
 const SKIPPED_DIRS = new Set([
-  '.git', '.agents', 'node_modules', 'dist', 'build', '.cache',
+  '.git', '.agents', 'node_modules', 'dist', 'build', 'target', '.cache',
   'vendor', '质检报告', '成品', 'reports', 'artifacts',
 ]);
 
@@ -472,7 +473,13 @@ async function main() {
   process.stdout.write(`✅ [privacy-gate] 隐私检查通过（已扫描 ${result.scannedCount} 个${staged ? '暂存' : '仓库'}文件，未发现真实邮箱或敏感标识）\n`);
 }
 
-if (typeof process.argv[1] === 'string' && import.meta.url === pathToFileURL(process.argv[1]).href) {
+const isDirectPrivacyEntry =
+  typeof process.argv[1] === 'string' &&
+  (process.platform === 'win32'
+    ? resolve(process.argv[1]).toLowerCase() === resolve(fileURLToPath(import.meta.url)).toLowerCase()
+    : import.meta.url === pathToFileURL(process.argv[1]).href);
+
+if (isDirectPrivacyEntry) {
   main().catch(error => {
     process.stderr.write(`[privacy-gate] 检查异常: ${error?.message || String(error)}\n`);
     process.exitCode = 1;

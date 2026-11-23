@@ -31,30 +31,12 @@ import {
   readValidLiveIdeModelsSnapshot,
   sanitizeLiveIdeModelsSnapshot,
 } from '../dist/main.js';
+import { sendBackendRpc, stopBackendChild } from './test-ipc.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function rpc(directory, payload, timeoutMs = 8000) {
-  return new Promise((resolve, reject) => {
-    const socket = createConnection(join(directory, 'control.sock'));
-    let value = '';
-    const timer = setTimeout(() => {
-      socket.destroy();
-      reject(new Error('IPC 超时'));
-    }, timeoutMs);
-    const finish = (err) => {
-      clearTimeout(timer);
-      socket.destroy();
-      if (err) reject(err);
-      else resolve(JSON.parse(value.split('\n')[0]));
-    };
-    socket.on('connect', () => socket.write(JSON.stringify(payload) + '\n'));
-    socket.on('data', (chunk) => {
-      value += chunk;
-      if (value.includes('\n')) finish();
-    });
-    socket.on('error', finish);
-  });
+  return sendBackendRpc(directory, payload, { timeoutMs });
 }
 
 async function startBackend(directory, appPath) {
@@ -595,7 +577,7 @@ test('live-ide-models.json 脱敏持久化、appVersion 失效判定与 main.js 
       else backend.child.once('exit', resolve);
     });
   } finally {
-    if (backend.child.exitCode === null) backend.child.kill('SIGTERM');
+    await stopBackendChild(backend.child);
     await new Promise((resolve) => feedServer.close(resolve));
   }
 });
@@ -1180,7 +1162,7 @@ test('main.js 后端启动预热 remote_pricing.json、默认关闭静默外联�
       else backend.child.once('exit', resolve);
     });
   } finally {
-    if (backend.child.exitCode === null) backend.child.kill('SIGTERM');
+    await stopBackendChild(backend.child);
     await new Promise((resolve) => feedServer.close(resolve));
   }
 });

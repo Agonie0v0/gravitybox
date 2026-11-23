@@ -24,6 +24,6 @@ export function canonicalPayload(value: any, topLevel = true): any {
   if (Array.isArray(value)) return value.map(item => canonicalPayload(item, false));
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.keys(value)
-    .filter(key => !topLevel || !['requestId', 'idempotencyKey'].includes(key))
+    .filter(key => !topLevel || !['requestId', 'idempotencyKey', 'authToken'].includes(key))
     .sort().map(key => [key, canonicalPayload(value[key], false)]));
 }

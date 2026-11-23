@@ -9,17 +9,30 @@ export function includeDictionaryPath(path) {
   return parts[0] !== 'dict' || !parts.slice(1).some(part => part.startsWith('.'));
 }
 
-/** Excludes Finder metadata and README screenshot previews from the code release digest. */
+/** Excludes Finder/Explorer metadata and README screenshot previews from the macOS/core code release digest. */
 export function includeSourceDigestPath(relativePath) {
   const normalized = relativePath.replaceAll('\\', '/');
   const parts = normalized.split('/');
-  if (parts.includes('.DS_Store')) return false;
+  if (parts[0] === 'windows') return false;
+  if (parts.includes('.DS_Store') || parts.includes('Thumbs.db')) return false;
   if (normalized === 'assets/screenshots' || normalized.startsWith('assets/screenshots/')) return false;
   return includeDictionaryPath(normalized);
 }
 
+/** Filters Windows-specific source files for the decoupled Windows release digest, excluding regenerable caches. */
+export function includeWindowsSourceDigestPath(relativePath) {
+  const normalized = relativePath.replaceAll('\\', '/');
+  const parts = normalized.split('/');
+  if (parts[0] !== 'windows') return false;
+  if (parts.includes('.DS_Store') || parts.includes('Thumbs.db')) return false;
+  if (parts.includes('target') || parts.includes('node_modules') || parts.includes('.vite')) return false;
+  if (normalized === 'windows/app/dist' || normalized.startsWith('windows/app/dist/')) return false;
+  if (normalized === 'windows/app/src-tauri/gen' || normalized.startsWith('windows/app/src-tauri/gen/')) return false;
+  return true;
+}
+
 /**
- * 源码摘要：发布门禁的唯一真源。
+ * 源码摘要：macOS 与跨平台核心发布门禁的唯一真源（严格排除 `windows/`，与 Windows 发行指纹解耦）。
  * 注意：tools/ 与 test/ 也计入，修改发布脚本本身同样会让旧 .cache/verified-release.json 失效，
  * 必须重新执行 `npm run verify` 才能再次打包（失败关闭，而不是静默放行）。
  */
@@ -51,6 +64,33 @@ export async function sourceDigest(root) {
   }
   const uniqueFiles = [...new Set(files)].sort();
   const hash = createHash('sha256'); for (const file of uniqueFiles) hash.update(file).update('\0').update(await readFile(join(root,file))).update('\0'); return hash.digest('hex');
+}
+
+/**
+ * Windows 发行源码摘要（与 macOS `sourceDigest` 解耦）：
+ * 绑定核心 `sourceDigest(root)` 及 `windows/` 原生源码树（存在时），确保修改 `windows/` 会使 Windows 验证记录失效，
+ * 同时绝不影响 macOS 的 `sourceDigest(root)` 与发布一致性。
+ */
+export async function windowsSourceDigest(root) {
+  const coreDigest = await sourceDigest(root);
+  const hash = createHash('sha256');
+  hash.update('core\0').update(coreDigest).update('\0');
+  if (await exists(join(root, 'windows'))) {
+    const winFiles = [];
+    async function walkWindows(relative) {
+      for (const entry of await readdir(join(root, relative), { withFileTypes: true })) {
+        const path = join(relative, entry.name);
+        if (!includeWindowsSourceDigestPath(path)) continue;
+        if (entry.isDirectory()) await walkWindows(path);
+        else if (entry.isFile()) winFiles.push(path.replaceAll('\\', '/'));
+      }
+    }
+    await walkWindows('windows');
+    for (const file of [...new Set(winFiles)].sort()) {
+      hash.update(file).update('\0').update(await readFile(join(root, ...file.split('/')))).update('\0');
+    }
+  }
+  return hash.digest('hex');
 }
 
 /**

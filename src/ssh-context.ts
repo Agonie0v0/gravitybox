@@ -6,6 +6,7 @@ import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
 import type { CDP } from './cdp.js';
 import { compareLayers } from './dictionary.js';
+import { defaultAntigravityProfileDir, isWindows } from './platform/index.js';
 
 const execFileRaw = promisify(execFile);
 
@@ -142,7 +143,7 @@ function splitCommandPrefixTokens(args: string): string[] {
     if (q === '"' || q === "'") {
       i++;
       while (i < args.length && args[i] !== q) {
-        if (args[i] === '\\' && i + 1 < args.length && q === '"') i++;
+        if (args[i] === '\\' && i + 1 < args.length && q === '"' && (args[i + 1] === '"' || args[i + 1] === '\\')) i++;
         tok += args[i++];
       }
       if (i < args.length && args[i] === q) i++;
@@ -157,7 +158,7 @@ function splitCommandPrefixTokens(args: string): string[] {
 
 function isSshExecutableToken(token: string): boolean {
   if (!token) return false;
-  const base = basename(token).toLowerCase();
+  const base = basename(token.replaceAll('\\', '/')).toLowerCase();
   return base === 'ssh' || base === 'ssh.exe';
 }
 
@@ -210,6 +211,20 @@ export async function hasActiveAntigravitySshTunnel(
   if (!Number.isSafeInteger(antigravityPid) || antigravityPid <= 0) {
     return { found: false, tunnels: [] };
   }
+  if (isWindows() && !deps?.execFile) {
+    try {
+      const cmd = `Get-CimInstance Win32_Process -Filter "ParentProcessId = ${antigravityPid}" | ForEach-Object { if ($_.CommandLine) { "$($_.ProcessId) $($_.ParentProcessId) $($_.CommandLine)" } }`;
+      const { stdout } = await execFileRaw(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command', cmd],
+        { timeout: 2500, windowsHide: true }
+      );
+      const tunnels = parseSshTunnelProcesses(String(stdout ?? ''), antigravityPid);
+      return { found: tunnels.length > 0, tunnels };
+    } catch {
+      return { found: false, tunnels: [] };
+    }
+  }
   const exec = deps?.execFile ?? defaultExecFile;
   try {
     const { stdout } = await exec('/bin/ps', ['-ax', '-ww', '-o', 'pid=,ppid=,args='], { timeout: 2500 });
@@ -232,7 +247,10 @@ export async function matchMainLogRemotePort(
   options?: { logPath?: string; sinceMs?: number }
 ): Promise<boolean> {
   if (!originPort || !hostLabel) return false;
-  const logPath = options?.logPath ?? join(homedir(), 'Library', 'Logs', 'Antigravity', 'main.log');
+  const defaultLogPath = isWindows()
+    ? join(defaultAntigravityProfileDir(), 'logs', 'main.log')
+    : join(homedir(), 'Library', 'Logs', 'Antigravity', 'main.log');
+  const logPath = options?.logPath ?? defaultLogPath;
   const needle = `[SSH] Connected to ${hostLabel} at https://127.0.0.1:${originPort}/`;
   try {
     const st = await stat(logPath);

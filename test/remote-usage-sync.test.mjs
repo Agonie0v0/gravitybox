@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Controller } from '../dist/controller.js';
@@ -481,7 +481,9 @@ test('本机账号 A 与远端账号 B 独立观测时间线隔离：精准判�
     // 验证磁盘隔离与 0o600 权限
     assert.equal(await readFile(localObsPath, 'utf8'), localObsPayload, '本机观测文件不得被远端 store 污染');
     const remoteObsStat = await stat(join(dir, 'usage-remote-observations.json'));
-    assert.equal(remoteObsStat.mode & 0o777, 0o600);
+    if (process.platform !== 'win32') {
+      assert.equal(remoteObsStat.mode & 0o777, 0o600);
+    }
 
     // 重新从磁盘加载（模拟重启恢复）再验证全部分段判定
     const reloaded = new RemoteAccountObservationStore({ stateDir: dir });
@@ -875,9 +877,14 @@ test('Controller.getConnectedRemoteRpcTargets 只读导出目标并驱动 Coordi
     { id: 'remote-usage-1', type: 'page', url: 'https://127.0.0.1:44139/', browserContextId: 'ctx-remote-usage' },
   ]);
 
+  const fakeRoot = await mkdtemp(join(tmpdir(), 'gb-remote-ctrl-app-'));
+  const fakeAppPath = join(fakeRoot, 'Antigravity.app');
+  await mkdir(join(fakeAppPath, 'Contents', 'Resources'), { recursive: true });
+  await writeFile(join(fakeAppPath, 'Contents', 'Resources', 'app.asar'), 'mock-asar');
+
   const controller = new Controller({
-    appPath: '/Applications/Antigravity.app',
-    profile: '/tmp/nonexistent-profile',
+    appPath: fakeAppPath,
+    profile: join(fakeRoot, 'profile'),
     dictionary: dict,
     hudEnabled: false,
     discoverEndpoint: async () => ({
@@ -952,6 +959,7 @@ test('Controller.getConnectedRemoteRpcTargets 只读导出目标并驱动 Coordi
   } finally {
     await controller.stop();
     await cdpServer.stop();
+    await rm(fakeRoot, { recursive: true, force: true });
   }
 });
 

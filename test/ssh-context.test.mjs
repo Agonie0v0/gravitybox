@@ -12,6 +12,7 @@ import { BundleCache } from '../dist/bundle-cache.js';
 import { SUPPORTED_BUNDLES, isSupportedBundleHash } from '../dist/bundle.js';
 import { Controller } from '../dist/controller.js';
 import { dictionaryFromEntries } from '../dist/dictionary.js';
+import { resolveOpensslBin } from './test-ipc.mjs';
 import {
   supportsSshRemoteBridge,
   sanitizeHostLabel,
@@ -154,6 +155,7 @@ function createMultiWindowMockCdpServer(options) {
         }
       }
     });
+    socket.on('error', () => {});
     socket.on('close', () => sockets.delete(socket));
   });
 
@@ -324,24 +326,25 @@ test('verifyRemotePageWindow 完整覆盖版本、上下文隔离、pending、�
 
 test('BundleCache 按 scopeKey 隔离且容量扩容至 16，多远端不抖动', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'gb-bundle-scope-'));
+  const appDir = join(dir, 'Test.app');
   try {
-    await mkdir(join(dir, 'Contents/Resources'), { recursive: true });
-    await writeFile(join(dir, 'Contents/Resources/app.asar'), 'asar-bytes');
+    await mkdir(join(appDir, 'Contents/Resources'), { recursive: true });
+    await writeFile(join(appDir, 'Contents/Resources/app.asar'), 'asar-bytes');
     let reads = 0;
     const cache = new BundleCache();
     const fetcher = async () => ({ hash: `h-${++reads}`, source: undefined, bytes: 10 });
 
-    await cache.read(dir, 100, '2.33.0', 'https://127.0.0.1:40001', fetcher, 'local');
-    await cache.read(dir, 100, '2.33.0', 'https://127.0.0.1:40001', fetcher, 'remote-a');
-    await cache.read(dir, 100, '2.33.0', 'https://127.0.0.1:40002', fetcher, 'remote-b');
-    await cache.read(dir, 100, '2.33.0', 'https://127.0.0.1:40003', fetcher, 'remote-c');
+    await cache.read(appDir, 100, '2.33.0', 'https://127.0.0.1:40001', fetcher, 'local');
+    await cache.read(appDir, 100, '2.33.0', 'https://127.0.0.1:40001', fetcher, 'remote-a');
+    await cache.read(appDir, 100, '2.33.0', 'https://127.0.0.1:40002', fetcher, 'remote-b');
+    await cache.read(appDir, 100, '2.33.0', 'https://127.0.0.1:40003', fetcher, 'remote-c');
     assert.equal(reads, 4);
 
     // 二次命中全部 4 个源，不应发生淘汰抖动
-    const hitLocal = await cache.read(dir, 100, '2.33.0', 'https://127.0.0.1:40001', fetcher, 'local');
-    const hitA = await cache.read(dir, 100, '2.33.0', 'https://127.0.0.1:40001', fetcher, 'remote-a');
-    const hitB = await cache.read(dir, 100, '2.33.0', 'https://127.0.0.1:40002', fetcher, 'remote-b');
-    const hitC = await cache.read(dir, 100, '2.33.0', 'https://127.0.0.1:40003', fetcher, 'remote-c');
+    const hitLocal = await cache.read(appDir, 100, '2.33.0', 'https://127.0.0.1:40001', fetcher, 'local');
+    const hitA = await cache.read(appDir, 100, '2.33.0', 'https://127.0.0.1:40001', fetcher, 'remote-a');
+    const hitB = await cache.read(appDir, 100, '2.33.0', 'https://127.0.0.1:40002', fetcher, 'remote-b');
+    const hitC = await cache.read(appDir, 100, '2.33.0', 'https://127.0.0.1:40003', fetcher, 'remote-c');
     assert.equal(reads, 4);
     assert.equal(hitLocal.cacheHit && hitA.cacheHit && hitB.cacheHit && hitC.cacheHit, true);
     assert.notEqual(hitLocal.hash, hitA.hash);
@@ -361,7 +364,7 @@ test('Controller 冷启动：SSH 排 index 0 不阻塞本地窗口、延迟桥�
 
   const keyPath = join(dir, 'k.pem');
   const certPath = join(dir, 'c.pem');
-  await execFileAsync('/usr/bin/openssl', [
+  await execFileAsync(resolveOpensslBin(), [
     'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
     '-keyout', keyPath, '-out', certPath, '-days', '1', '-subj', '/CN=127.0.0.1',
   ]);

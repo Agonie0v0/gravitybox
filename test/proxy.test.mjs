@@ -26,6 +26,7 @@ import {
 } from '../dist/proxy.js';
 import { sanitizeError } from '../dist/files.js';
 import { getActiveLocale, setActiveLocale } from '../dist/i18n.js';
+import { resolveOpensslBin, sendBackendRpc, stopBackendChild } from './test-ipc.mjs';
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -58,23 +59,7 @@ function closeServer(server) {
 }
 
 function rpc(directory, payload) {
-  return new Promise((resolve, reject) => {
-    const socket = net.createConnection(join(directory, 'control.sock'));
-    let buffer = '';
-    socket.setTimeout(8000, () => {
-      socket.destroy();
-      reject(new Error('IPC timeout'));
-    });
-    socket.on('connect', () => socket.write(JSON.stringify(payload) + '\n'));
-    socket.on('error', reject);
-    socket.on('data', chunk => {
-      buffer += chunk.toString('utf8');
-      if (buffer.includes('\n')) {
-        socket.end();
-        resolve(JSON.parse(buffer.split('\n')[0]));
-      }
-    });
-  });
+  return sendBackendRpc(directory, payload, { timeoutMs: 8000 });
 }
 
 test('parseScutilProxyOutput parses HTTP+HTTPS, HTTP-only, SOCKS-only, PAC, disabled, ExceptionsList, and ignores nested Scoped blocks', () => {
@@ -469,7 +454,7 @@ test('HTTP CONNECT tunneling routes HTTPS requests through local proxy server wi
   const certPath = join(certDir, 'server.crt');
 
   // Generate ephemeral self-signed certificate for SAN DNS:connect-target.example.invalid
-  await execFileAsync('/usr/bin/openssl', [
+  await execFileAsync(resolveOpensslBin(), [
     'req',
     '-x509',
     '-newkey',
@@ -514,6 +499,7 @@ test('HTTP CONNECT tunneling routes HTTPS requests through local proxy server wi
 
   connectProxyServer.on('connect', (req, clientSocket, head) => {
     openSockets.add(clientSocket);
+    clientSocket.on('error', () => {});
     clientSocket.once('close', () => openSockets.delete(clientSocket));
     connectTargets.push({
       target: req.url,
@@ -598,7 +584,7 @@ test('HTTP CONNECT tunneling routes HTTPS requests through local proxy server wi
 });
 
 test('main.ts IPC loads proxy config from config.json and handles proxy_get / proxy_set', async () => {
-  const directory = await mkdtemp('/tmp/gb-proxy-ipc-');
+  const directory = await mkdtemp(join(tmpdir(), 'gb-proxy-ipc-'));
   await mkdir(join(directory, '词典'), { recursive: true });
   await writeFile(
     join(directory, 'config.json'),
@@ -712,9 +698,9 @@ test('main.ts IPC loads proxy config from config.json and handles proxy_get / pr
     await rpc(directory, { command: 'stop' });
     await closed;
   } finally {
-    if (child.exitCode === null) child.kill();
+    await stopBackendChild(child);
     await closed;
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -724,7 +710,7 @@ test('createProxyFetch enforces maxResponseBytes across HTTP forwarding and HTTP
   const certPath = join(certDir, 'server.crt');
   t.after(() => rm(certDir, { recursive: true, force: true }));
 
-  await execFileAsync('/usr/bin/openssl', [
+  await execFileAsync(resolveOpensslBin(), [
     'req',
     '-x509',
     '-newkey',
@@ -843,7 +829,7 @@ test('createProxyFetch enforces timeoutMs on HTTP forwarding, CONNECT tunnel, an
   const certPath = join(certDir, 'server.crt');
   t.after(() => rm(certDir, { recursive: true, force: true }));
 
-  await execFileAsync('/usr/bin/openssl', [
+  await execFileAsync(resolveOpensslBin(), [
     'req',
     '-x509',
     '-newkey',
@@ -887,6 +873,7 @@ test('createProxyFetch enforces timeoutMs on HTTP forwarding, CONNECT tunnel, an
   });
   proxyServer.on('connect', (req, clientSocket, head) => {
     openSockets.add(clientSocket);
+    clientSocket.on('error', () => {});
     clientSocket.once('close', () => openSockets.delete(clientSocket));
     if (req.url === 'stall-connect.example.invalid:443') {
       // Intentionally stall before replying 200 Connection Established

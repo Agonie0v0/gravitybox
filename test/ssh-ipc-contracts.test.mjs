@@ -22,6 +22,8 @@ import {
   refreshStandbyAccountViaRemoteSsh,
 } from '../dist/main.js';
 import { AccountsManager } from '../dist/accounts.js';
+import { resolveClientIpcTarget } from '../dist/platform/ipc.js';
+import { stopBackendChild } from './test-ipc.mjs';
 
 function startMockCdpServer({ dictVersion = 'test-dict', onEvaluate } = {}) {
   let targets = [];
@@ -88,6 +90,7 @@ function startMockCdpServer({ dictVersion = 'test-dict', onEvaluate } = {}) {
 
   server.on('upgrade', (req, socket) => {
     sockets.add(socket);
+    socket.on('error', () => {});
     socket.on('close', () => sockets.delete(socket));
     const key = req.headers['sec-websocket-key'];
     const accept = createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
@@ -185,19 +188,34 @@ function startMockCdpServer({ dictVersion = 'test-dict', onEvaluate } = {}) {
   };
 }
 
-function exchange(directory, request, { timeout = 8000 } = {}) {
+async function exchange(directory, request, { timeout = 8000 } = {}) {
+  const target = await resolveClientIpcTarget(directory);
+  if (!target) throw new Error('IPC target unavailable');
+  const payload = target.authToken ? { ...request, authToken: target.authToken } : request;
   return new Promise((resolve, reject) => {
-    const socket = createConnection(join(directory, 'control.sock'));
+    const socket = createConnection(target.endpoint);
     let value = '';
     const timer = setTimeout(() => { socket.destroy(); reject(new Error('IPC 超时')); }, timeout);
     const finish = error => { clearTimeout(timer); socket.destroy(); error ? reject(error) : resolve(value); };
-    socket.on('connect', () => socket.write(JSON.stringify(request) + '\n'));
+    socket.on('connect', () => socket.write(JSON.stringify(payload) + '\n'));
     socket.on('data', chunk => { value += chunk; if (value.includes('\n')) finish(); });
     socket.on('error', finish);
   });
 }
 
+async function createFakeAppBundle() {
+  const rootDir = await mkdtemp(join(tmpdir(), 'gb-ssh-fake-app-'));
+  const appPath = join(rootDir, 'Antigravity.app');
+  await mkdir(join(appPath, 'Contents', 'Resources'), { recursive: true });
+  await writeFile(join(appPath, 'Contents', 'Resources', 'app.asar'), 'mock-asar');
+  return {
+    appPath,
+    cleanup: () => rm(rootDir, { recursive: true, force: true }),
+  };
+}
+
 test('Controller remoteSessions：30s 缓存、并发去重、10m 断连保留、焦点追踪与 auth_expired 保留旧快照', async () => {
+  const fakeApp = await createFakeAppBundle();
   const dict = dictionaryFromEntries({});
   let probeCalls = 0;
   let remoteMode = 'ok';
@@ -246,7 +264,7 @@ test('Controller remoteSessions：30s 缓存、并发去重、10m 断连保留�
 
   let lastStatus = null;
   const controller = new Controller({
-    appPath: '/Applications/Antigravity.app',
+    appPath: fakeApp.appPath,
     profile: '/tmp/nonexistent-profile',
     dictionary: dict,
     hudEnabled: false,
@@ -327,6 +345,7 @@ test('Controller remoteSessions：30s 缓存、并发去重、10m 断连保留�
   } finally {
     await controller.stop();
     await cdpServer.stop();
+    await fakeApp.cleanup();
   }
 });
 
@@ -418,8 +437,8 @@ test('dist/main.js IPC 契约：status / dashboard_summary / remote_quota_refres
     assert.equal(typeof usageRes.remoteSyncRevision, 'number');
   } finally {
     try { await exchange(dir, { command: 'stop' }); } catch {}
-    child.kill('SIGTERM');
-    await rm(dir, { recursive: true, force: true });
+    await stopBackendChild(child);
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -749,6 +768,7 @@ test('EnvironmentRegistry 与同账号跨机配额新鲜度融合：统一四态
 });
 
 test('重连换端口保留 environmentId 并触发 reconnected，buildDashboardAggregate 跨机融合配额', async () => {
+  const fakeApp = await createFakeAppBundle();
   const dict = dictionaryFromEntries({});
   let portUrl = 'https://127.0.0.1:44150/';
   let targetId = 'ssh-reconn-1';
@@ -758,7 +778,7 @@ test('重连换端口保留 environmentId 并触发 reconnected，buildDashboard
   cdpServer.setTargets(currentTargets);
 
   const controller = new Controller({
-    appPath: '/Applications/Antigravity.app',
+    appPath: fakeApp.appPath,
     profile: '/tmp/nonexistent-profile',
     dictionary: dict,
     hudEnabled: false,
@@ -877,6 +897,7 @@ test('重连换端口保留 environmentId 并触发 reconnected，buildDashboard
   } finally {
     await controller.stop();
     await cdpServer.stop();
+    await fakeApp.cleanup();
   }
 });
 
