@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Controller } from '../dist/controller.js';
@@ -812,7 +812,13 @@ test('资源预算门禁：单轮最多 20 条变更轨迹、并发上限 3、12
   assert.equal(coordinator.isSyncing(), false);
 });
 
-test('Controller.getConnectedRemoteRpcTargets 只读导出目标并驱动 Coordinator 完成远端同步', async () => {
+test('Controller.getConnectedRemoteRpcTargets 只读导出目标并驱动 Coordinator 完成远端同步', async (t) => {
+  const fakeAppRoot = await mkdtemp(join(tmpdir(), 'gb-remote-usage-app-'));
+  const fakeAppPath = join(fakeAppRoot, 'Antigravity.app');
+  await mkdir(join(fakeAppPath, 'Contents/Resources'), { recursive: true });
+  await writeFile(join(fakeAppPath, 'Contents/Resources/app.asar'), 'mock-asar');
+  t.after(() => rm(fakeAppRoot, { recursive: true, force: true }));
+
   const dict = dictionaryFromEntries({});
   const cdpServer = await startRemoteMockCdpServer({
     dictVersion: dict.version,
@@ -876,7 +882,7 @@ test('Controller.getConnectedRemoteRpcTargets 只读导出目标并驱动 Coordi
   ]);
 
   const controller = new Controller({
-    appPath: '/Applications/Antigravity.app',
+    appPath: fakeAppPath,
     profile: '/tmp/nonexistent-profile',
     dictionary: dict,
     hudEnabled: false,

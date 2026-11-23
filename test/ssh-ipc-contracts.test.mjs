@@ -197,7 +197,17 @@ function exchange(directory, request, { timeout = 8000 } = {}) {
   });
 }
 
-test('Controller remoteSessions：30s 缓存、并发去重、10m 断连保留、焦点追踪与 auth_expired 保留旧快照', async () => {
+async function createMockAppPath(t) {
+  const root = await mkdtemp(join(tmpdir(), 'gb-ssh-ipc-app-'));
+  const appPath = join(root, 'Antigravity.app');
+  await mkdir(join(appPath, 'Contents/Resources'), { recursive: true });
+  await writeFile(join(appPath, 'Contents/Resources/app.asar'), 'mock-asar');
+  t.after(() => rm(root, { recursive: true, force: true }));
+  return appPath;
+}
+
+test('Controller remoteSessions：30s 缓存、并发去重、10m 断连保留、焦点追踪与 auth_expired 保留旧快照', async (t) => {
+  const appPath = await createMockAppPath(t);
   const dict = dictionaryFromEntries({});
   let probeCalls = 0;
   let remoteMode = 'ok';
@@ -246,7 +256,7 @@ test('Controller remoteSessions：30s 缓存、并发去重、10m 断连保留�
 
   let lastStatus = null;
   const controller = new Controller({
-    appPath: '/Applications/Antigravity.app',
+    appPath,
     profile: '/tmp/nonexistent-profile',
     dictionary: dict,
     hudEnabled: false,
@@ -423,7 +433,8 @@ test('dist/main.js IPC 契约：status / dashboard_summary / remote_quota_refres
   }
 });
 
-test('英文+关HUD（observeOnly）不断开页面发现与SSH观测，且同主机多窗口按environmentId去重优选健康窗口', async () => {
+test('英文+关HUD（observeOnly）不断开页面发现与SSH观测，且同主机多窗口按environmentId去重优选健康窗口', async (t) => {
+  const appPath = await createMockAppPath(t);
   const dict = dictionaryFromEntries({ Settings: '设置' });
   const evalExprs = [];
   const cdpServer = await startMockCdpServer({
@@ -467,7 +478,7 @@ test('英文+关HUD（observeOnly）不断开页面发现与SSH观测，且同�
 
   let publishCount = 0;
   const controller = new Controller({
-    appPath: '/Applications/Antigravity.app',
+    appPath,
     profile: '/tmp/nonexistent-profile',
     dictionary: dict,
     initiallyPaused: true,
@@ -748,7 +759,8 @@ test('EnvironmentRegistry 与同账号跨机配额新鲜度融合：统一四态
   }), 'offline_snapshot');
 });
 
-test('重连换端口保留 environmentId 并触发 reconnected，buildDashboardAggregate 跨机融合配额', async () => {
+test('重连换端口保留 environmentId 并触发 reconnected，buildDashboardAggregate 跨机融合配额', async (t) => {
+  const appPath = await createMockAppPath(t);
   const dict = dictionaryFromEntries({});
   let portUrl = 'https://127.0.0.1:44150/';
   let targetId = 'ssh-reconn-1';
@@ -758,7 +770,7 @@ test('重连换端口保留 environmentId 并触发 reconnected，buildDashboard
   cdpServer.setTargets(currentTargets);
 
   const controller = new Controller({
-    appPath: '/Applications/Antigravity.app',
+    appPath,
     profile: '/tmp/nonexistent-profile',
     dictionary: dict,
     hudEnabled: false,
