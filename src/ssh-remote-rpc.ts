@@ -2,7 +2,18 @@ import type { CDP } from './cdp.js';
 import type { LiveLanguageServerStatus } from './accounts.js';
 import { buildLiveProbeResultFromRpc } from './account-probe.js';
 import type { ApiPricingEntry } from './pricing.js';
-import { buildConversationHudMetrics, type ComputeHudMetricsInput } from './hud/metrics-engine.js';
+import {
+  buildConversationHudMetrics,
+  type ComputeHudMetricsInput,
+} from './hud/metrics-engine.js';
+import {
+  CORTEX_STEP_STATUS,
+  RUNNING_SUBAGENT_STEP_STATUSES,
+  TERMINAL_ABORTED_STEP_STATUSES,
+  TERMINAL_INACTIVE_STEP_STATUSES,
+  mapCortexStepStatusToNumeric,
+} from './hud/cortex-status.js';
+export { mapCortexStepStatusToNumeric };
 import type {
   ConversationHudMetrics,
   HudActivityPhase,
@@ -245,7 +256,7 @@ export function mapCortexStepTypeToNumeric(rawType: unknown): number {
   if (cleaned === 'USER_INPUT') return 14;
   if (cleaned === 'PLANNER_RESPONSE') return 15;
   if (cleaned === 'CHECKPOINT') return 23;
-  if (cleaned === 'DONE' || cleaned === 'NOTIFY_USER' || cleaned === 'EPHEMERAL_MESSAGE') return 2;
+  if (cleaned === 'DONE' || cleaned === 'FINISH' || cleaned === 'NOTIFY_USER' || cleaned === 'EPHEMERAL_MESSAGE') return 2;
   if (
     cleaned === 'INVOKE_SUBAGENT' ||
     cleaned === 'SUBAGENT' ||
@@ -260,6 +271,7 @@ export function mapCortexStepTypeToNumeric(rawType: unknown): number {
     cleaned === 'HANDOFF' ||
     cleaned === 'TRANSPARENT_HANDOFF' ||
     cleaned === 'SYSTEM_MESSAGE' ||
+    cleaned === 'ERROR_MESSAGE' ||
     cleaned === 'CONVERSATION_HISTORY' ||
     cleaned === 'KNOWLEDGE_ARTIFACTS' ||
     cleaned === 'INITIALIZATION'
@@ -267,43 +279,6 @@ export function mapCortexStepTypeToNumeric(rawType: unknown): number {
     return 81;
   }
   return 16;
-}
-
-/**
- * 将 CortexStepStatus 枚举字符串或数字转换为内部数值 status。
- */
-export function mapCortexStepStatusToNumeric(rawStatus: unknown): number {
-  if (typeof rawStatus === 'number') {
-    return Number.isSafeInteger(rawStatus) && rawStatus >= 0 ? rawStatus : 3;
-  }
-  if (typeof rawStatus !== 'string') return 3;
-  const cleaned = rawStatus.trim().toUpperCase().replace(/^CORTEX_STEP_STATUS_/, '');
-  switch (cleaned) {
-    case 'PENDING':
-      return 1;
-    case 'RUNNING':
-      return 2;
-    case 'DONE':
-    case 'COMPLETED':
-      return 3;
-    case 'ERROR':
-    case 'FAILED':
-      return 4;
-    case 'CANCELED':
-    case 'CANCELLED':
-      return 6;
-    case 'REJECTED':
-      return 7;
-    case 'WAITING':
-    case 'WAITING_FOR_USER':
-    case 'WAITING_FOR_APPROVAL':
-      return 8;
-    case 'GENERATING':
-    case 'STREAMING':
-      return 9;
-    default:
-      return 3;
-  }
 }
 
 /**
@@ -712,6 +687,7 @@ export interface MapRemoteRpcToHudInputParams {
   sessionRevision?: number;
   metricsSequence?: number;
   availability?: HudDataAvailability;
+  allowDbActiveStepInference?: boolean;
   observedAt?: number | null;
   lastSuccessAt?: number | null;
   isStreaming?: boolean;
@@ -735,8 +711,7 @@ export interface MapRemoteRpcToHudInputParams {
 }
 
 const REMOTE_RUNNING_SUMMARY_RE = /^(?:CASCADE_RUN_STATUS_)?(?:RUNNING|IN_PROGRESS|ACTIVE)$/i;
-const REMOTE_NON_RUNNING_SUMMARY_RE = /^(?:CASCADE_RUN_STATUS_)?(?:IDLE|UNSPECIFIED|DONE|COMPLETED|CLEARED|ERROR|CANCELL?ED|KILLED|WAITING|PAUSED|BLOCKED|STANDING[_ -]?BY)$/i;
-const REMOTE_RUNNING_STEP_STATUSES = new Set([1, 2, 8]);
+const REMOTE_NON_RUNNING_SUMMARY_RE = /^(?:CASCADE_RUN_STATUS_)?(?:IDLE|UNSPECIFIED|DONE|COMPLETED|CLEARED|ERROR|CANCELL?ED|KILLED|INTERRUPTED|WAITING|PAUSED|BLOCKED|STANDING[_ -]?BY)$/i;
 const REMOTE_TRANSPARENT_STEP_TYPES = new Set([81, 98, 99, 101, 102, 104]);
 
 function isRemoteChildTrajectoryRunning(
@@ -755,26 +730,30 @@ function isRemoteChildTrajectoryRunning(
   for (let i = childSteps.length - 1; i >= 0; i--) {
     const st = childSteps[i]!;
     if (st.stepType === 14) break;
-    if (st.stepType === 2 && (st.status === 3 || st.status === 5)) {
+    if (st.stepType === 2 && (st.status === CORTEX_STEP_STATUS.DONE || st.status === CORTEX_STEP_STATUS.CLEARED)) {
       terminated = true;
       break;
     }
     const isWaitTool = Boolean(st.toolCallName && /^(?:default_api:)?swarm_wait$/i.test(st.toolCallName.trim()));
     if (!inspectedTail && !REMOTE_TRANSPARENT_STEP_TYPES.has(st.stepType)) {
       inspectedTail = true;
-      if (st.status === 4 || st.status === 6 || st.status === 7 || st.status === 9 || isWaitTool) {
+      if (
+        TERMINAL_ABORTED_STEP_STATUSES.has(st.status) ||
+        st.status === CORTEX_STEP_STATUS.WAITING ||
+        isWaitTool
+      ) {
         terminated = true;
         break;
       }
     }
     if (isWaitTool) {
-      if (REMOTE_RUNNING_STEP_STATUSES.has(st.status) || st.status === 9) {
+      if (RUNNING_SUBAGENT_STEP_STATUSES.has(st.status) || st.status === CORTEX_STEP_STATUS.WAITING) {
         terminated = true;
         break;
       }
       continue;
     }
-    if (REMOTE_RUNNING_STEP_STATUSES.has(st.status)) {
+    if (RUNNING_SUBAGENT_STEP_STATUSES.has(st.status)) {
       explicitActive = true;
       break;
     }
@@ -788,20 +767,114 @@ function isRemoteChildTrajectoryRunning(
 }
 
 /**
+ * 判定远端只读子轨迹是否已处于明确终态（仅当非运行中且存在终态汇总状态或终态尾步时允许复用到期缓存）。
+ */
+export function isRemoteChildTrajectoryTerminal(
+  summary: RemoteTrajectorySummary | null | undefined,
+  rawSteps: ReadonlyArray<RemoteStepRecord>
+): boolean {
+  if (!summary) return false;
+  const converted = rawSteps.map(convertRemoteStep);
+  if (isRemoteChildTrajectoryRunning(summary, converted)) return false;
+  if (summary.status !== undefined && summary.status !== null) {
+    const raw = String(summary.status).trim();
+    if (REMOTE_NON_RUNNING_SUMMARY_RE.test(raw) || raw === '1') {
+      return true;
+    }
+  }
+  for (let i = converted.length - 1; i >= 0; i--) {
+    const st = converted[i]!;
+    if (REMOTE_TRANSPARENT_STEP_TYPES.has(st.stepType)) continue;
+    if (st.stepType === 2 && (st.status === CORTEX_STEP_STATUS.DONE || st.status === CORTEX_STEP_STATUS.CLEARED)) {
+      return true;
+    }
+    return TERMINAL_ABORTED_STEP_STATUSES.has(st.status) || TERMINAL_INACTIVE_STEP_STATUSES.has(st.status);
+  }
+  return false;
+}
+
+/**
  * 将远端 Connect JSON RPC（Summary + Steps + GeneratorMetadata + ExecutorMetadata）映射为 buildConversationHudMetrics 标准输入。
  */
 export function mapRemoteRpcToHudInput(params: MapRemoteRpcToHudInputParams): ComputeHudMetricsInput {
-  const mainSteps = (params.steps ?? []).map(convertRemoteStep);
+  const rawMainSteps = (params.steps ?? []).map(convertRemoteStep);
   const summaryLastModified = parseConnectTimestampSeconds(params.summary?.lastModifiedTime);
   const mainLinked = linkGenerationsToSteps(
-    mainSteps,
+    rawMainSteps,
     params.generatorMetadata ?? [],
     summaryLastModified,
     false
   );
 
+  const mainIdLower = params.conversationId.trim().toLowerCase();
+  const mainTrajLower = params.summary?.trajectoryId?.trim().toLowerCase() ?? '';
+  const forkParentLower = params.summary?.forkParentCascadeId?.trim().toLowerCase();
+  const forkStepCutoff = params.summary?.forkStepIndex;
+  const hasForkSlice = Boolean(
+    typeof forkStepCutoff === 'number' &&
+      Number.isSafeInteger(forkStepCutoff) &&
+      forkStepCutoff >= 0 &&
+      forkStepCutoff < 10_000_000 &&
+      (!forkParentLower || (forkParentLower !== mainIdLower && (!mainTrajLower || forkParentLower !== mainTrajLower)))
+  );
+  const mainSteps = hasForkSlice
+    ? rawMainSteps.filter(s => s.idx > forkStepCutoff!)
+    : rawMainSteps;
+
+  let ownExtraUsageGenerations = mainLinked.extraUsageGenerations;
+  let inheritedContextStep: ParsedConversationStep | undefined;
+  let inheritedGenMetadata: ParsedGenMetadata | undefined;
+  let effectiveGenMetadata = [...mainSteps].reverse().find(s => s.stepType === 15 && s.hasUsage)?.generation;
+
+  if (hasForkSlice) {
+    let hasPreForkSteps = false;
+    let maxPreForkTs: number | null = null;
+    for (const s of rawMainSteps) {
+      if (s.idx > forkStepCutoff!) continue;
+      hasPreForkSteps = true;
+      for (const ts of [
+        s.startTimeSeconds,
+        s.createdAtSeconds,
+        s.endTimeSeconds,
+        s.completedAtSeconds,
+        s.finishedGeneratingSeconds,
+        s.generation?.startedAtSeconds,
+      ]) {
+        if (typeof ts === 'number' && Number.isFinite(ts) && ts > 0) {
+          maxPreForkTs = maxPreForkTs === null ? ts : Math.max(maxPreForkTs, ts);
+        }
+      }
+    }
+    ownExtraUsageGenerations = mainLinked.extraUsageGenerations.filter(item => {
+      const indices = item.generation.stepIndices;
+      if (indices && indices.length > 0) {
+        return indices.every(idx => idx > forkStepCutoff!);
+      }
+      if (!hasPreForkSteps) {
+        return typeof item.timestampSeconds === 'number' && item.timestampSeconds > 0;
+      }
+      if (maxPreForkTs === null) return false;
+      return typeof item.timestampSeconds === 'number' && item.timestampSeconds > maxPreForkTs;
+    });
+    if (!effectiveGenMetadata) {
+      const ownGen = [...(params.generatorMetadata ?? [])]
+        .map(convertRemoteGenMetadata)
+        .filter(g => g.stepIndices && g.stepIndices.length > 0 && g.stepIndices.every(idx => idx > forkStepCutoff!))
+        .at(-1);
+      effectiveGenMetadata = ownGen;
+    }
+    if (!mainSteps.some(s => s.stepType === 15 && s.hasUsage)) {
+      inheritedContextStep = [...rawMainSteps]
+        .reverse()
+        .find(s => s.idx <= forkStepCutoff! && s.stepType === 15 && s.hasUsage);
+      inheritedGenMetadata = inheritedContextStep?.generation ?? mainLinked.genMetadata;
+    }
+  } else if (!effectiveGenMetadata) {
+    effectiveGenMetadata = mainLinked.genMetadata;
+  }
+
   const allSteps: ParsedConversationStep[] = [...mainSteps];
-  const extraUsageGenerations = [...mainLinked.extraUsageGenerations];
+  const extraUsageGenerations = [...ownExtraUsageGenerations];
   let subagentSteps = 0;
   let activeChildSubagents = 0;
 
@@ -823,11 +896,12 @@ export function mapRemoteRpcToHudInput(params: MapRemoteRpcToHudInputParams): Co
   const effectiveRunningSubagents = Math.max(params.runningSubagentCount ?? 0, activeChildSubagents);
   const effectiveSubagentRunning = Boolean(params.isSubagentRunning || effectiveRunningSubagents > 0);
 
+  const fallbackMetaForModel = effectiveGenMetadata ?? inheritedGenMetadata;
   const resolvedModelId =
     params.modelId ||
-    mainLinked.genMetadata?.responseModel ||
-    mainLinked.genMetadata?.modelDisplayName ||
-    mainLinked.genMetadata?.plannerModelName ||
+    fallbackMetaForModel?.responseModel ||
+    fallbackMetaForModel?.modelDisplayName ||
+    fallbackMetaForModel?.plannerModelName ||
     params.summary?.requestedModel;
 
   const isBtwTrajectory = Boolean(
@@ -838,17 +912,22 @@ export function mapRemoteRpcToHudInput(params: MapRemoteRpcToHudInputParams): Co
         String(params.summary.trajectoryType).trim() === '22' ||
         String(params.summary.trajectoryType).toUpperCase().includes('SIDE_QUESTION'))
   );
-  const isSubagentTrajectory = !isBtwTrajectory && isStrictSubagentSummary(params.conversationId, params.summary);
+  const isSubagentTrajectory = !isBtwTrajectory && !hasForkSlice && isStrictSubagentSummary(params.conversationId, params.summary);
+  const ownStepCount = hasForkSlice ? mainSteps.length : (mainSteps.length || params.summary?.stepCount || 0);
   const totalStepsOverride = isSubagentTrajectory
-    ? mainSteps.length || params.summary?.stepCount || 0
-    : (mainSteps.length || params.summary?.stepCount || 0) + subagentSteps;
+    ? ownStepCount
+    : ownStepCount + subagentSteps;
+
+  const availability = params.availability ?? 'ready';
+  const allowDbActiveStepInference =
+    params.allowDbActiveStepInference ?? availability !== 'remote_stale';
 
   return {
     conversationId: params.conversationId,
     paneSlotId: params.paneSlotId,
     sessionRevision: params.sessionRevision,
     metricsSequence: params.metricsSequence,
-    availability: params.availability ?? 'ready',
+    availability,
     observedAt: params.observedAt ?? Date.now(),
     lastSuccessAt: params.lastSuccessAt ?? Date.now(),
     failedChildCount: params.failedChildCount ?? 0,
@@ -858,14 +937,16 @@ export function mapRemoteRpcToHudInput(params: MapRemoteRpcToHudInputParams): Co
     runningSubagentCount: effectiveRunningSubagents,
     subagentCount: params.childTrajectories?.length ?? 0,
     subagentSteps,
-    totalStepsOverride: totalStepsOverride > 0 ? totalStepsOverride : undefined,
-    allowDbActiveStepInference: true,
+    totalStepsOverride: totalStepsOverride > 0 || hasForkSlice ? totalStepsOverride : undefined,
+    allowDbActiveStepInference,
     isSubagentTrajectory,
     ...(isBtwTrajectory ? { isBtwTrajectory: true } : {}),
+    ...(inheritedContextStep ? { inheritedContextStep } : {}),
+    ...(inheritedGenMetadata ? { inheritedGenMetadata } : {}),
     modelId: resolvedModelId,
     modelCapacity: params.modelCapacity,
     pricingTable: params.pricingTable,
-    genMetadata: mainLinked.genMetadata,
+    genMetadata: effectiveGenMetadata,
     executorMetadata: params.executorMetadata ?? undefined,
     extraUsageGenerations: extraUsageGenerations.length > 0 ? extraUsageGenerations : undefined,
     contextSteps: mainSteps,

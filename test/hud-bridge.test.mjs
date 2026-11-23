@@ -175,3 +175,139 @@ test('P1-2 回归：SSH 远程模式仅采信 allSummaries 中归属当前会话
   assert.equal(pushed[0].tokens.outputTokens, 100, '总输出应为 main(50) + child(25) + grandChild(25) = 100');
   bridge.dispose();
 });
+
+test('P1-20: SSH 超过 32 个子轨迹跨轮完整采集、终态复用且单侧失败标为 partial', async () => {
+  const mainId = 'aaaa1111-1111-4111-8111-111111111111';
+  const childIds = Array.from({ length: 33 }, (_, i) => `bbbb${String(i).padStart(4, '0')}-2222-4222-8222-222222222222`);
+  const pushed = [];
+  const fetchedChildren = new Map();
+  let failSingleSideChild0 = false;
+
+  const rpcClient = {
+    getAllCascadeTrajectories: async () => ({
+      ok: true,
+      latencyMs: 1,
+      data: [
+        { cascadeId: mainId, trajectoryType: 0, status: 'CASCADE_RUN_STATUS_IDLE', stepCount: 1 },
+        ...childIds.map(cid => ({
+          cascadeId: cid,
+          trajectoryType: 1,
+          parentConversationId: mainId,
+          status: 'CASCADE_RUN_STATUS_IDLE',
+          stepCount: 1,
+          lastModifiedTime: '2026-11-22T08:00:00Z',
+        })),
+      ],
+    }),
+    getTrajectorySteps: async (cid) => {
+      fetchedChildren.set(cid, (fetchedChildren.get(cid) ?? 0) + 1);
+      return {
+        ok: true,
+        latencyMs: 1,
+        data: [
+          {
+            idx: 0,
+            type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE',
+            status: 'CORTEX_STEP_STATUS_DONE',
+            metadata: {
+              createdAt: '2026-11-22T08:00:00Z',
+              completedAt: '2026-11-22T08:00:01Z',
+              modelUsage: cid === mainId ? { inputTokens: '10', outputTokens: '5' } : { inputTokens: '10', outputTokens: '1' },
+            },
+          },
+        ],
+      };
+    },
+    getGeneratorMetadata: async (cid) => {
+      if (failSingleSideChild0 && cid === childIds[0]) {
+        return { ok: false, reason: 'http_error', authExpired: false, status: 503 };
+      }
+      return { ok: true, latencyMs: 1, data: [] };
+    },
+    getExecutorMetadata: async () => ({ ok: true, latencyMs: 1, data: null }),
+  };
+
+  const bridge = new CdpHudBridge({ pollIntervalMs: 0 });
+  await bridge.attachToTarget(
+    'ssh-33',
+    {
+      send: async () => ({}),
+      evaluate: async (expr) => {
+        const match = expr.match(/\)\((.*)\)$/);
+        if (match) pushed.push(JSON.parse(match[1]));
+        return true;
+      },
+    },
+    () => 1,
+    'GRAVITYBOX-localization-v1',
+    { sourceKind: 'remote', remoteKey: 'ssh-33', hostLabel: 'ssh-33', origin: 'https://ssh-33.local', rpcClient }
+  );
+
+  bridge.handleRawBindingPayload('ssh-33', JSON.stringify({
+    type: 'SESSION_ATTACHED',
+    cascadeId: 'pane-33',
+    paneSlotId: 'slot-33',
+    conversationId: mainId,
+    sessionRevision: 1,
+    isStreaming: false,
+    timestamp: Date.now(),
+  }));
+  await new Promise(r => setTimeout(r, 40));
+
+  // 第 1 轮最多抓取 32 个子轨迹，未收齐前必须标为 partial
+  assert.equal(pushed.at(-1).availability, 'partial');
+  assert.equal(pushed.at(-1).session.subagentCount, 32);
+
+  // 第 2 轮收齐第 33 个并复用前 32 个终态缓存，转为 ready 且 33 个全部计入
+  await bridge.pollActiveSessions(true);
+  assert.equal(pushed.at(-1).availability, 'ready');
+  assert.equal(pushed.at(-1).session.subagentCount, 33);
+  assert.equal(pushed.at(-1).tokens.outputTokens, 5 + 33);
+  assert.equal(fetchedChildren.get(childIds[0]), 1, '已缓存终态子轨迹在第 2 轮不应重复请求 RPC');
+
+  // 单侧失败验证：主链重新拉取新未缓存子轨迹时单侧失败计入 failedChildCount 并标 partial
+  failSingleSideChild0 = true;
+  // 清空旧会话缓存，强制重拉并触发 child0 单侧 gen 失败
+  bridge.dispose();
+
+  const pushedSingle = [];
+  const bridge2 = new CdpHudBridge({ pollIntervalMs: 0 });
+  const rpcSingleFail = {
+    ...rpcClient,
+    getAllCascadeTrajectories: async () => ({
+      ok: true,
+      latencyMs: 1,
+      data: [
+        { cascadeId: mainId, trajectoryType: 0, status: 'CASCADE_RUN_STATUS_IDLE', stepCount: 1 },
+        { cascadeId: childIds[0], trajectoryType: 1, parentConversationId: mainId, status: 'CASCADE_RUN_STATUS_IDLE', stepCount: 1 },
+      ],
+    }),
+  };
+  await bridge2.attachToTarget(
+    'ssh-single-fail',
+    {
+      send: async () => ({}),
+      evaluate: async (expr) => {
+        const match = expr.match(/\)\((.*)\)$/);
+        if (match) pushedSingle.push(JSON.parse(match[1]));
+        return true;
+      },
+    },
+    () => 1,
+    'GRAVITYBOX-localization-v1',
+    { sourceKind: 'remote', remoteKey: 'ssh-sf', hostLabel: 'ssh-sf', origin: 'https://ssh-sf.local', rpcClient: rpcSingleFail }
+  );
+  bridge2.handleRawBindingPayload('ssh-single-fail', JSON.stringify({
+    type: 'SESSION_ATTACHED',
+    cascadeId: 'pane-sf',
+    paneSlotId: 'slot-sf',
+    conversationId: mainId,
+    sessionRevision: 1,
+    isStreaming: false,
+    timestamp: Date.now(),
+  }));
+  await new Promise(r => setTimeout(r, 30));
+  assert.equal(pushedSingle.at(-1).availability, 'partial', '单侧 RPC 失败必须标记 partial');
+  assert.ok((pushedSingle.at(-1).failedChildCount ?? 0) >= 1, '单侧 RPC 失败必须计入 failedChildCount');
+  bridge2.dispose();
+});

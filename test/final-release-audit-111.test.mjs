@@ -115,7 +115,7 @@ test('OPT-01: 子智能体分栏在步间 status=3 空档期借助 conversation_
   );
 
   // 子智能体前序步骤均为 status=3（正处于下一步落库前的步间过渡窗），且无 step_type=2 终结符
-  const { db: childDb } = createConvDb(t, convDir, childId, mainId);
+  const { db: childDb, dbPath: childDbPath } = createConvDb(t, convDir, childId, mainId);
   childDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (0, 14, 3, ?)').run(
     Buffer.from(seconds(1, nowSec - 18))
   );
@@ -143,6 +143,37 @@ test('OPT-01: 子智能体分栏在步间 status=3 空档期借助 conversation_
   assert.equal(subpaneMetrics.session.isSubagentTrajectory, true);
   assert.equal(subpaneMetrics.isStreaming, true);
   assert.equal(subpaneMetrics.session.currentTurnDurationSeconds >= 15, true);
+
+  // 3) P1-17: 超过 60 分钟仍在运行的子智能体不被 recency 阈值截断；INTERRUPTED(12) 或 DONE(stepType=2) 立即停表
+  const oldDate = new Date(Date.now() - 75 * 60 * 1000);
+  childDb.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+  fs.utimesSync(childDbPath, oldDate, oldDate);
+  if (fs.existsSync(`${childDbPath}-wal`)) fs.utimesSync(`${childDbPath}-wal`, oldDate, oldDate);
+  const staleMtimeEngine = new ConversationMetricsEngine({ conversationsDir: convDir });
+  const longRunningSub = await staleMtimeEngine.getConversationMetrics({
+    conversationId: childId,
+    isStreaming: false,
+    isSubagentRunning: false,
+  });
+  assert.equal(longRunningSub.isStreaming, true, '超过 60 分钟且 summaries 为 RUNNING 的子智能体仍保持运行态');
+
+  const parentWithOldRunningChild = await staleMtimeEngine.getConversationMetrics({
+    conversationId: mainId,
+    isStreaming: false,
+    isSubagentRunning: false,
+  });
+  assert.equal(parentWithOldRunningChild.runningSubagentCount, 1, '父会话也应保留超过 60 分钟但仍 RUNNING 的子智能体计数');
+
+  // 注入 INTERRUPTED(12) 末步 -> 立即停表
+  childDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (2, 15, 12, ?)').run(
+    Buffer.from([...seconds(1, nowSec - 10), ...seconds(7, nowSec - 5)])
+  );
+  const interruptedSub = await staleMtimeEngine.getConversationMetrics({
+    conversationId: childId,
+    isStreaming: false,
+    isSubagentRunning: false,
+  });
+  assert.equal(interruptedSub.isStreaming, false, '子智能体出现 INTERRUPTED=12 末步后必须立即停止流式计时');
 });
 
 test('OPT-02 & OPT-05: 多步轮次末步无结束时间中止保留 turnAbortedMissingEnd 高水位，且透明步骤不阻断 awaitingFirstTurnStep', () => {

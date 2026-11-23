@@ -2090,10 +2090,12 @@ export class HudInstance {
     const activeSubagentsBar = formatBarCompactCount(activeSubagents);
     const isWorkingNow = Boolean(this.hasActiveWork || this.isStreaming || this.isSubagentRunning);
     const awaitingNewTurnFlush = isWorkingNow && this.isAwaitingPostIdleNewTurnFlush(metrics);
+    const isFrozenRemoteStale = isRemoteStale && (!this.isStreaming || !metrics.isStreaming);
     const clockActive =
       isWorkingNow &&
       !unavailable &&
-      ((metrics.availability !== 'cached' && metrics.availability !== 'remote_stale') || Boolean(this.turnClockAnchor));
+      !isFrozenRemoteStale &&
+      (metrics.availability !== 'cached' || Boolean(this.turnClockAnchor));
     this.syncTurnClock(metrics, clockActive);
     const clockNowMs = Date.now();
     const rawBackendTurnSec = isRawNumber(s.currentTurnDurationSeconds)

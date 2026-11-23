@@ -258,13 +258,23 @@ test('Connect RPC 纯映射函数：Duration/Timestamp、stepType/status、严�
   assert.equal(mapCortexStepTypeToNumeric('CORTEX_STEP_TYPE_PLANNER_RESPONSE'), 15);
   assert.equal(mapCortexStepTypeToNumeric('CORTEX_STEP_TYPE_CHECKPOINT'), 23);
   assert.equal(mapCortexStepTypeToNumeric('CORTEX_STEP_TYPE_DONE'), 2);
+  assert.equal(mapCortexStepTypeToNumeric('CORTEX_STEP_TYPE_FINISH'), 2);
   assert.equal(mapCortexStepTypeToNumeric('CORTEX_STEP_TYPE_INVOKE_SUBAGENT'), 127);
   assert.equal(mapCortexStepTypeToNumeric('CORTEX_STEP_TYPE_GENERIC'), 81);
   assert.equal(mapCortexStepTypeToNumeric('CORTEX_STEP_TYPE_RUN_COMMAND'), 16);
 
   assert.equal(mapCortexStepStatusToNumeric('CORTEX_STEP_STATUS_RUNNING'), 2);
-  assert.equal(mapCortexStepStatusToNumeric('CORTEX_STEP_STATUS_GENERATING'), 9);
+  assert.equal(mapCortexStepStatusToNumeric('CORTEX_STEP_STATUS_GENERATING'), 8);
+  assert.equal(mapCortexStepStatusToNumeric('CORTEX_STEP_STATUS_WAITING'), 9);
+  assert.equal(mapCortexStepStatusToNumeric('CORTEX_STEP_STATUS_DONE'), 3);
+  assert.equal(mapCortexStepStatusToNumeric('CORTEX_STEP_STATUS_INVALID'), 4);
+  assert.equal(mapCortexStepStatusToNumeric('CORTEX_STEP_STATUS_CLEARED'), 5);
   assert.equal(mapCortexStepStatusToNumeric('CORTEX_STEP_STATUS_CANCELED'), 6);
+  assert.equal(mapCortexStepStatusToNumeric('CORTEX_STEP_STATUS_REJECTED'), 6);
+  assert.equal(mapCortexStepStatusToNumeric('CORTEX_STEP_STATUS_ERROR'), 7);
+  assert.equal(mapCortexStepStatusToNumeric('CORTEX_STEP_STATUS_QUEUED'), 11);
+  assert.equal(mapCortexStepStatusToNumeric('CORTEX_STEP_STATUS_INTERRUPTED'), 12);
+  assert.equal(mapCortexStepStatusToNumeric('CORTEX_STEP_STATUS_FUTURE_UNKNOWN'), 0);
 
   // rootConversationId === cascadeId 是主对话，不是子智能体
   assert.equal(
@@ -863,4 +873,158 @@ test('P1-14: getGeneratorMetadata 提取 chatStartMetadata 原生时间戳', asy
   assert.equal(res.data.length, 2);
   assert.equal(res.data[0].createdAt, '2026-11-20T08:15:00Z');
   assert.deepEqual(res.data[1].createdAt, { seconds: 1795200000, nanos: 0 });
+});
+
+test('P0-05: CortexStepStatus 数值与字符串双链路同态（GENERATING=8, WAITING=9, INTERRUPTED=12）', () => {
+  const nowSec = Math.floor(Date.now() / 1000) - 5;
+  const isoStart = new Date(nowSec * 1000).toISOString();
+
+  for (const [label, strStatus, numStatus] of [
+    ['GENERATING', 'CORTEX_STEP_STATUS_GENERATING', 8],
+    ['WAITING', 'CORTEX_STEP_STATUS_WAITING', 9],
+    ['INTERRUPTED', 'CORTEX_STEP_STATUS_INTERRUPTED', 12],
+    ['DONE', 'CORTEX_STEP_STATUS_DONE', 3],
+  ]) {
+    const remoteFromString = computeRemoteConversationHudMetrics({
+      conversationId: `conv-p005-${label}`,
+      isStreaming: false,
+      steps: [
+        { idx: 0, type: 'CORTEX_STEP_TYPE_USER_INPUT', status: 'CORTEX_STEP_STATUS_DONE', metadata: { createdAt: isoStart } },
+        { idx: 1, type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE', status: strStatus, metadata: { createdAt: isoStart } },
+      ],
+    });
+    const remoteFromNumber = computeRemoteConversationHudMetrics({
+      conversationId: `conv-p005-${label}`,
+      isStreaming: false,
+      steps: [
+        { idx: 0, type: 14, status: 3, metadata: { createdAt: isoStart } },
+        { idx: 1, type: 15, status: numStatus, metadata: { createdAt: isoStart } },
+      ],
+    });
+    assert.equal(remoteFromString.isStreaming, remoteFromNumber.isStreaming, `${label} isStreaming 应一致`);
+    assert.equal(remoteFromString.session.activeModelStepCount, remoteFromNumber.session.activeModelStepCount, `${label} activeModelStepCount 应一致`);
+    assert.equal(remoteFromString.session.turnAborted, remoteFromNumber.session.turnAborted, `${label} turnAborted 应一致`);
+  }
+
+  // 验证明确语义：GENERATING(8) 为生成并计时；WAITING(9) 为等待不活跃；INTERRUPTED(12) 停止计时且置 turnAborted
+  const genMetrics = computeRemoteConversationHudMetrics({
+    conversationId: 'conv-gen',
+    isStreaming: false,
+    steps: [
+      { idx: 0, type: 'CORTEX_STEP_TYPE_USER_INPUT', status: 'CORTEX_STEP_STATUS_DONE', metadata: { createdAt: isoStart } },
+      { idx: 1, type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE', status: 'CORTEX_STEP_STATUS_GENERATING', metadata: { createdAt: isoStart } },
+    ],
+  });
+  assert.equal(genMetrics.isStreaming, true);
+  assert.equal(genMetrics.session.activeModelStepCount, 1);
+
+  const waitMetrics = computeRemoteConversationHudMetrics({
+    conversationId: 'conv-wait',
+    isStreaming: false,
+    steps: [
+      { idx: 0, type: 'CORTEX_STEP_TYPE_USER_INPUT', status: 'CORTEX_STEP_STATUS_DONE', metadata: { createdAt: isoStart } },
+      { idx: 1, type: 'CORTEX_STEP_TYPE_RUN_COMMAND', status: 'CORTEX_STEP_STATUS_WAITING', metadata: { startedAt: isoStart } },
+    ],
+  });
+  assert.equal(waitMetrics.isStreaming, false, '等待用户审批 WAITING=9 不应误判为流式执行');
+  assert.equal(waitMetrics.session.activeToolStepCount, 0);
+
+  const intMetrics = computeRemoteConversationHudMetrics({
+    conversationId: 'conv-int',
+    isStreaming: false,
+    steps: [
+      { idx: 0, type: 'CORTEX_STEP_TYPE_USER_INPUT', status: 'CORTEX_STEP_STATUS_DONE', metadata: { createdAt: isoStart } },
+      { idx: 1, type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE', status: 'CORTEX_STEP_STATUS_INTERRUPTED', metadata: { createdAt: isoStart } },
+    ],
+  });
+  assert.equal(intMetrics.isStreaming, false);
+  assert.equal(intMetrics.session.turnAborted, true, 'INTERRUPTED=12 必须视为中止终态并停止计时');
+  assert.equal(intMetrics.session.activeModelStepCount, 0);
+});
+
+test('P1-18: SSH BTW 旁路问答按 forkStepIndex 隔离父会话历史步骤与 Token', () => {
+  const btwMetrics = computeRemoteConversationHudMetrics({
+    conversationId: 'conv-btw-ssh',
+    summary: {
+      cascadeId: 'conv-btw-ssh',
+      trajectoryType: 22,
+      forkParentCascadeId: 'conv-parent-ssh',
+      forkStepIndex: 1,
+      stepCount: 4,
+    },
+    steps: [
+      { idx: 0, type: 'CORTEX_STEP_TYPE_USER_INPUT', status: 'CORTEX_STEP_STATUS_DONE', metadata: { createdAt: '2026-11-20T05:40:00Z' } },
+      { idx: 1, type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE', status: 'CORTEX_STEP_STATUS_DONE', metadata: { createdAt: '2026-11-20T05:40:01Z', completedAt: '2026-11-20T05:40:02Z', executionId: 'e-parent', modelUsage: { inputTokens: '900', outputTokens: '100' } } },
+      { idx: 2, type: 'CORTEX_STEP_TYPE_USER_INPUT', status: 'CORTEX_STEP_STATUS_DONE', metadata: { createdAt: '2026-11-20T05:41:00Z' } },
+      { idx: 3, type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE', status: 'CORTEX_STEP_STATUS_DONE', metadata: { createdAt: '2026-11-20T05:41:01Z', completedAt: '2026-11-20T05:41:02Z', executionId: 'e-btw', modelUsage: { inputTokens: '15', outputTokens: '5' } } },
+    ],
+    generatorMetadata: [
+      { stepIndices: [1], executionId: 'e-parent', responseModel: 'gemini-3.8-flash-n', usage: { inputTokens: '900', outputTokens: '100' } },
+      { stepIndices: [3], executionId: 'e-btw', responseModel: 'gemini-3.8-flash-n', usage: { inputTokens: '15', outputTokens: '5' } },
+    ],
+  });
+  assert.equal(btwMetrics.session.isBtwTrajectory, true);
+  assert.equal(btwMetrics.session.steps, 2, '仅统计 BTW 自身的 2 个步骤');
+  assert.equal(btwMetrics.tokens.totalTokens, 20, '仅统计 BTW 自身的 20 Tokens，不重复计入父会话 1000 Tokens');
+});
+
+test('P1-19: remote_stale 冻结在 lastSuccessAt，断连期间前端走表停止，重连后按新状态收敛', () => {
+  const startSec = 1_763_600_000;
+  const lastSuccessMs = (startSec + 12) * 1000;
+  const staleSnap = computeRemoteConversationHudMetrics({
+    conversationId: 'conv-stale-freeze',
+    availability: 'remote_stale',
+    observedAt: lastSuccessMs,
+    lastSuccessAt: lastSuccessMs,
+    isStreaming: false,
+    allowDbActiveStepInference: false,
+    steps: [
+      { idx: 0, type: 'CORTEX_STEP_TYPE_USER_INPUT', status: 'CORTEX_STEP_STATUS_DONE', metadata: { createdAt: new Date(startSec * 1000).toISOString() } },
+      { idx: 1, type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE', status: 'CORTEX_STEP_STATUS_GENERATING', metadata: { createdAt: new Date(startSec * 1000).toISOString() } },
+    ],
+  });
+  assert.equal(staleSnap.session.currentTurnDurationSeconds, 0, 'remote_stale 冻结活跃外推，不随 Date.now() 增长');
+  assert.equal(staleSnap.session.activeModelStepCount, 0);
+
+  const els = new Map();
+  const makeEl = (sel) => {
+    if (els.has(sel)) return els.get(sel);
+    const attrs = new Map();
+    const classSet = new Set();
+    const el = {
+      textContent: '',
+      classList: { add: (...xs) => xs.forEach(x => classSet.add(x)), remove: (...xs) => xs.forEach(x => classSet.delete(x)), contains: (x) => classSet.has(x) },
+      style: {},
+      setAttribute: (k, v) => attrs.set(k, String(v)),
+      getAttribute: (k) => (attrs.has(k) ? attrs.get(k) : null),
+      removeAttribute: (k) => attrs.delete(k),
+      hasAttribute: (k) => attrs.has(k),
+      querySelector: (c) => makeEl(`${sel} ${c}`),
+    };
+    els.set(sel, el);
+    return el;
+  };
+  const inst = new HudInstance('ssh-freeze', { paneSlotId: 'ssh-freeze', locale: 'zh-Hans', languageMode: 'zh' });
+  inst.host = { isConnected: true, style: {}, hasAttribute: () => false, getAttribute: () => 'light', remove() {} };
+  inst.hostMountedInDom = true;
+  inst.shadow = { querySelector: (sel) => makeEl(sel), querySelectorAll: () => [] };
+  inst.currentConvId = 'conv-stale-freeze';
+  inst.sessionRevision = 1;
+  inst.domIsStreaming = true;
+  inst.updateMetrics(buildConversationHudMetrics({
+    conversationId: 'conv-stale-freeze',
+    paneSlotId: 'ssh-freeze',
+    sessionRevision: 1,
+    metricsSequence: 1,
+    availability: 'ready',
+    isStreaming: true,
+    steps: [{ idx: 0, stepType: 14, status: 3, createdAtSeconds: Date.now() / 1000 - 3 }],
+  }));
+  assert.ok(inst.turnClockAnchor, '正常流式期间应启动走表锚点');
+
+  // 断连切入 remote_stale：后端不再流式，走表必须立刻停止冻结
+  inst.domIsStreaming = false;
+  inst.updateMetrics({ ...staleSnap, paneSlotId: 'ssh-freeze', sessionRevision: 1, metricsSequence: 2 });
+  assert.equal(inst.turnClockAnchor, null, 'remote_stale 时必须停止走表');
+  inst.dispose();
 });

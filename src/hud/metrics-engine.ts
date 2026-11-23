@@ -35,10 +35,15 @@ import { resolveDatabaseModelFullName } from '../usage-types.js';
 import { runHudDbScanInWorker, runSummariesLookupInWorker } from '../sqlite-read.js';
 import type { HudWorkerRawStepRow } from '../sqlite-worker.js';
 import { decodeVarint64, skipProtobufField } from '../protobuf.js';
+import {
+  CORTEX_STEP_STATUS,
+  ACTIVE_STEP_STATUSES,
+  RUNNING_SUBAGENT_STEP_STATUSES,
+  TERMINAL_ABORTED_STEP_STATUSES,
+  TERMINAL_INACTIVE_STEP_STATUSES,
+} from './cortex-status.js';
 
 const UUID_REGEX_GLOBAL = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
-const ACTIVE_STEP_STATUSES = new Set([1, 2, 8, 9]);
-const RUNNING_SUBAGENT_STEP_STATUSES = new Set([1, 2, 8]);
 const TRANSPARENT_HANDOFF_STEP_TYPES = new Set([81, 98, 99, 101, 102, 104]);
 
 function findLastSubstantiveStep<T extends { stepType?: number; step_type?: number }>(
@@ -1007,8 +1012,6 @@ export interface ComputeHudMetricsInput {
 
 const NON_TOOL_STEP_TYPES = new Set([0, 1, 2, 14, 15, 23, 81, 98, 99, 101, 102, 104]);
 
-const TERMINAL_INACTIVE_STEP_STATUSES = new Set([3, 4, 6, 7]);
-
 function validSeconds(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
@@ -1037,9 +1040,9 @@ function isStepActiveNow(
 ): boolean {
   if (isStepCompleted(step)) return false;
   if (isWaitingSubagentToolName(step.toolCallName)) return false;
-  const rawStatus = step.status ?? 3;
-  if (TERMINAL_INACTIVE_STEP_STATUSES.has(rawStatus) || rawStatus === 5) return false;
-  if (rawStatus === 9) {
+  const rawStatus = step.status ?? CORTEX_STEP_STATUS.DONE;
+  if (TERMINAL_INACTIVE_STEP_STATUSES.has(rawStatus) || rawStatus === CORTEX_STEP_STATUS.UNSPECIFIED) return false;
+  if (rawStatus === CORTEX_STEP_STATUS.WAITING) {
     return Boolean(options?.allowWaitingStatus && isStreaming);
   }
   if (ACTIVE_STEP_STATUSES.has(rawStatus)) {
@@ -2609,7 +2612,7 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
   const latestTurnLastSubStatus = latestTurnLastSub?.status ?? 3;
   const isLatestTurnAborted =
     Boolean(latestTurnLastSub) &&
-    (latestTurnLastSubStatus === 4 || latestTurnLastSubStatus === 6 || latestTurnLastSubStatus === 7);
+    TERMINAL_ABORTED_STEP_STATUSES.has(latestTurnLastSubStatus);
   const isLatestTurnClosed =
     Boolean(latestTurnLastSub) &&
     latestTurnLastSubType === 2 &&
@@ -2699,8 +2702,8 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
   let latestActiveForegroundKind: 'model' | 'tool' | null = null;
   const lastCtx = findLastSubstantiveStep(contextSteps);
   const lastCtxType = lastCtx ? (lastCtx.step_type ?? lastCtx.stepType ?? 0) : 0;
-  const lastCtxStatus = lastCtx?.status ?? 3;
-  const lastTurnAborted = Boolean(!input.isStreaming && lastCtx && lastCtxType !== 14 && (lastCtxStatus === 4 || lastCtxStatus === 6 || lastCtxStatus === 7));
+  const lastCtxStatus = lastCtx?.status ?? CORTEX_STEP_STATUS.DONE;
+  const lastTurnAborted = Boolean(!input.isStreaming && lastCtx && lastCtxType !== 14 && TERMINAL_ABORTED_STEP_STATUSES.has(lastCtxStatus));
   if (input.allowDbActiveStepInference !== false && !lastTurnAborted) {
     let turnFinished = false;
     for (let index = contextSteps.length - 1; index >= 0; index--) {
@@ -2765,7 +2768,14 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
   const inputTokens = uncachedInputTokens + cachedReadTokens + cacheWriteTokens;
   const cacheHitRate = inputTokens > 0 ? cachedReadTokens / inputTokens : 0;
   const availability: HudDataAvailability = input.availability ?? 'ready';
+  const isFrozenSnapshot = availability === 'cached' || availability === 'remote_stale';
   const nowMs = Date.now();
+  const observedAt = input.observedAt !== undefined ? input.observedAt : (availability === 'unavailable' ? null : nowMs);
+  const lastSuccessAt = input.lastSuccessAt !== undefined ? input.lastSuccessAt : observedAt;
+  const referenceNowMs =
+    isFrozenSnapshot && typeof lastSuccessAt === 'number' && Number.isFinite(lastSuccessAt)
+      ? lastSuccessAt
+      : nowMs;
   const pricingTable = input.pricingTable ?? DEFAULT_API_PRICES;
   let estimatedCostUsd = 0;
   let cacheSavedUsd = 0;
@@ -2775,7 +2785,7 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
     (typeof stageFallbackModel === 'string' && stageFallbackModel.trim()) ||
     (typeof input.modelId === 'string' && input.modelId.trim()) ||
     '';
-  const defaultPriceTsSeconds = Math.floor(nowMs / 1000);
+  const defaultPriceTsSeconds = Math.floor(referenceNowMs / 1000);
   const resolveExplicitStepModel = (step: ComputeHudMetricsInput['steps'][number]): string => {
     const resolvedStepGenModel =
       step.generation && (step.generation.responseModel || step.generation.modelDisplayName || step.generation.modelEnum)
@@ -2860,8 +2870,6 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
   }
   estimatedCostUsd = Math.round(estimatedCostUsd * 1e8) / 1e8;
   cacheSavedUsd = Math.round(cacheSavedUsd * 1e8) / 1e8;
-  const observedAt = input.observedAt !== undefined ? input.observedAt : (availability === 'unavailable' ? null : nowMs);
-  const lastSuccessAt = input.lastSuccessAt !== undefined ? input.lastSuccessAt : observedAt;
   const resolvedModelId = !hasExplicitModelEvidence ? 'unknown' : activeStage.modelId;
   const resolvedModelDisplayName =
     !hasExplicitModelEvidence
@@ -2891,12 +2899,12 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
   let turnCompletedEnd: number | null = null;
   let hasActiveStepInTurn = false;
   let hasSubagentStepInTurn = false;
-  const nowSeconds = nowMs / 1000;
-  const allowActiveInference = availability !== 'cached' && input.allowDbActiveStepInference !== false;
+  const nowSeconds = referenceNowMs / 1000;
+  const allowActiveInference = !isFrozenSnapshot && input.allowDbActiveStepInference !== false;
   const lastTurnStep = findLastSubstantiveStep(turnSteps);
   const lastTurnStepAborted =
     lastTurnStep !== undefined &&
-    (lastTurnStep.status === 4 || lastTurnStep.status === 6 || lastTurnStep.status === 7);
+    TERMINAL_ABORTED_STEP_STATUSES.has(lastTurnStep.status ?? CORTEX_STEP_STATUS.DONE);
   const lastTurnStepAbortedMissingEnd =
     lastTurnStepAborted &&
     !validSeconds(
@@ -2936,7 +2944,7 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
     }
     const complete = isStepCompleted(step);
     const activeNow =
-      availability !== 'cached' &&
+      !isFrozenSnapshot &&
       isStepActiveNow(step, isStreaming, allowForegroundActiveInTurn, {
         allowWaitingStatus: Boolean(input.isStreaming),
       });
@@ -2945,7 +2953,7 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
       trackWallEnd(end ?? step.finishedGeneratingSeconds ?? step.completedAtSeconds ?? start);
     } else if (activeNow) {
       hasActiveStepInTurn = true;
-    } else if (rawStatus === 4 || rawStatus === 6 || rawStatus === 7) {
+    } else if (TERMINAL_ABORTED_STEP_STATUSES.has(rawStatus)) {
       const terminalEndedTs = end ?? step.completedAtSeconds ?? step.finishedGeneratingSeconds;
       if (validSeconds(terminalEndedTs) && (!validSeconds(start) || terminalEndedTs >= start)) {
         trackWallEnd(terminalEndedTs);
@@ -3008,12 +3016,12 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
       if (validSeconds(start)) return start >= turnWallStart - 1;
       if (validSeconds(end)) return end >= turnWallStart - 1;
       const activeChildNow =
-        availability !== 'cached' && isStepActiveNow(step, isStreaming, allowActiveInference);
+        !isFrozenSnapshot && isStepActiveNow(step, isStreaming, allowActiveInference);
       return Boolean(hasSubagentStepInTurn && activeChildNow);
     }
     if (prevTurnBoundarySeconds !== null) {
       const activeChildNow =
-        availability !== 'cached' && isStepActiveNow(step, isStreaming, allowActiveInference);
+        !isFrozenSnapshot && isStepActiveNow(step, isStreaming, allowActiveInference);
       if (!hasSubagentStepInTurn && !activeChildNow) {
         return false;
       }
@@ -3032,7 +3040,7 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
     const rawEnd = childStep.t_end ?? childStep.endTimeSeconds;
     const hasInterval = validSeconds(rawStart) && validSeconds(rawEnd) && rawEnd > rawStart;
     trackWallStart(start);
-    if (availability !== 'cached' && stepType !== 14 && isStepActiveNow(childStep, isStreaming, allowActiveInference)) {
+    if (!isFrozenSnapshot && stepType !== 14 && isStepActiveNow(childStep, isStreaming, allowActiveInference)) {
       hasActiveStepInTurn = true;
       if (validSeconds(rawStart)) {
         const activeInterval: readonly [number, number] = [rawStart, Math.max(rawStart, nowSeconds)];
@@ -3047,7 +3055,7 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
       const childCompleted =
         stepType === 15
           ? isStepCompleted(childStep)
-          : (rawStatus === 3 || rawStatus === 5 || !ACTIVE_STEP_STATUSES.has(rawStatus)) && rawStatus !== 4 && rawStatus !== 6 && rawStatus !== 7;
+          : !TERMINAL_ABORTED_STEP_STATUSES.has(rawStatus) && (rawStatus === 3 || rawStatus === 5 || !ACTIVE_STEP_STATUSES.has(rawStatus));
       if (childCompleted) {
         trackWallEnd(end ?? start);
         if (stepType === 15) {
@@ -3075,7 +3083,7 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
             turnToolIntervals.push(toolInterval);
           }
         }
-      } else if (rawStatus === 4 || rawStatus === 6 || rawStatus === 7) {
+      } else if (TERMINAL_ABORTED_STEP_STATUSES.has(rawStatus)) {
         const terminalEndedTs =
           rawEnd ?? childStep.completedAtSeconds ?? childStep.finishedGeneratingSeconds;
         if (validSeconds(terminalEndedTs) && (!validSeconds(start) || terminalEndedTs >= start)) {
@@ -3090,7 +3098,7 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
   const activeToolIntervals: Array<readonly [number, number]> = [];
   let activeModelStepCount = 0;
   let activeToolStepCount = 0;
-  if (availability !== 'cached') {
+  if (!isFrozenSnapshot) {
     for (const step of turnSteps) {
       const stepType = step.step_type ?? step.stepType ?? 0;
       if (stepType === 14) continue;
@@ -3161,9 +3169,9 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
       nowSeconds - turnCompletedEnd > TURN_STEP_HANDOFF_GRACE_SEC;
     // 前台流式中但末步已被中止/取消、轮次已明确收尾 (stepType=2)，或上轮末步已完结且超出步间交接宽限期 (600s) 时，
     // 视为上轮已终止，不再因前端瞬时 isStreaming 信号或新轮未落盘而把跨轮空闲时间外推累加到上轮用时；
-    // 主库处于错误回退缓存态 (availability === 'cached') 时快照已冻结，不再把旧轮起始时间外推到当前时刻。
+    // 主库处于错误回退缓存态 (cached) 或远端离线缓存态 (remote_stale) 时快照已冻结，不再把旧轮起始时间外推到当前时刻。
     const wallClockRunning =
-      availability !== 'cached' &&
+      !isFrozenSnapshot &&
       (isSubagentRunning ||
         hasActiveStepInTurn ||
         (isStreaming &&
@@ -3203,9 +3211,7 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
     (lastContextStepStatus === 3 ||
       lastContextStepStatus === 5 ||
       (!ACTIVE_STEP_STATUSES.has(lastContextStepStatus) &&
-        lastContextStepStatus !== 4 &&
-        lastContextStepStatus !== 6 &&
-        lastContextStepStatus !== 7 &&
+        !TERMINAL_ABORTED_STEP_STATUSES.has(lastContextStepStatus) &&
         validSeconds(lastContextStep!.t_end ?? lastContextStep!.endTimeSeconds)));
   const awaitingFirstTurnStep = Boolean(
     input.isStreaming &&
@@ -4343,7 +4349,7 @@ export class ConversationMetricsEngine {
     let summariesIndexAvailable = false;
     const shouldQueryChildrenInSummaries =
       !dbPathOverride && (isSubagentRunning || hasActiveSubagentStep || hasSubagentEvidenceInMain || candidateChildIds.size > 0);
-    const shouldQuerySelfInSummaries = isSubagentTrajectory && mainIsRecent && !isStreaming;
+    const shouldQuerySelfInSummaries = isSubagentTrajectory && !isStreaming;
     if (shouldQueryChildrenInSummaries || shouldQuerySelfInSummaries) {
       const selfIdentityIds = mainTrajLower ? [mainIdLower, mainTrajLower] : [mainIdLower];
       const summaryLookup = await this.lookupIndexedChildrenFromSummariesDb(
@@ -4685,7 +4691,7 @@ export class ConversationMetricsEngine {
         childTurnTerminated: boolean;
       }> = [];
       for (const record of verifiedChildRecords) {
-        if (!record.recent) continue;
+        if (!record.recent && !runningSummaryChildren.has(record.childId)) continue;
         const { childId, childState } = record;
         let explicitActive = false;
         let childTurnTerminated = terminalSummaryChildren.has(childId);
@@ -4700,7 +4706,7 @@ export class ConversationMetricsEngine {
           }
           if (!tailInspectionDone && !TRANSPARENT_HANDOFF_STEP_TYPES.has(step.stepType)) {
             tailInspectionDone = true;
-            if (step.status === 4 || step.status === 6 || step.status === 7) {
+            if (TERMINAL_ABORTED_STEP_STATUSES.has(step.status)) {
               childTurnTerminated = true;
               break;
             }
@@ -4907,12 +4913,11 @@ export class ConversationMetricsEngine {
       isStreaming: Boolean(
         isStreaming ||
           (selfSummaryRunning &&
-            mainIsRecent &&
             !(() => {
               const tail = findLastSubstantiveStep(normalizedContextSteps);
               if (!tail) return false;
               if (tail.stepType === 2 && (tail.status === 3 || tail.status === 5)) return true;
-              return tail.status === 4 || tail.status === 6 || tail.status === 7;
+              return TERMINAL_ABORTED_STEP_STATUSES.has(tail.status);
             })())
       ),
       activityPhase,

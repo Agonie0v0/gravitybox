@@ -10,6 +10,7 @@ import type {
 import { ConversationMetricsEngine, buildConversationHudMetrics } from './metrics-engine.js';
 import {
   computeRemoteConversationHudMetrics,
+  isRemoteChildTrajectoryTerminal,
   isStrictSubagentSummary,
   type RemoteGenMetadataRecord,
   type RemoteRpcClientLike,
@@ -40,6 +41,8 @@ interface RemoteChildTrajectoryCache {
   summary?: RemoteTrajectorySummary | null;
   steps: RemoteStepRecord[];
   generatorMetadata: RemoteGenMetadataRecord[];
+  signature?: string;
+  isTerminal?: boolean;
 }
 
 interface RemoteRpcSessionCacheEntry {
@@ -52,6 +55,8 @@ interface RemoteRpcSessionCacheEntry {
   generatorMetadata: RemoteGenMetadataRecord[];
   executorMetadata?: ParsedExecutorMetadata | null;
   childTrajectories: RemoteChildTrajectoryCache[];
+  childCursor?: number;
+  hasUncollectedChildren?: boolean;
   failedChildCount: number;
   lastMetrics: ConversationHudMetrics;
   lastSuccessAt: number;
@@ -510,13 +515,18 @@ export class CdpHudBridge implements ICdpHudBridge {
           paneSlotId: session.paneSlotId,
           sessionRevision: session.sessionRevision,
           metricsSequence: nextSeq,
-          availability: cached.isStale ? 'remote_stale' : (cached.failedChildCount > 0 ? 'partial' : 'ready'),
+          availability: cached.isStale
+            ? 'remote_stale'
+            : cached.failedChildCount > 0 || cached.hasUncollectedChildren
+            ? 'partial'
+            : 'ready',
           observedAt: cached.lastSuccessAt,
           lastSuccessAt: cached.lastSuccessAt,
-          isStreaming: session.foregroundStreaming,
-          activityPhase: session.activityPhase,
-          isSubagentRunning: session.isSubagentRunning,
-          runningSubagentCount: session.runningSubagentCount,
+          allowDbActiveStepInference: !cached.isStale,
+          isStreaming: cached.isStale ? false : session.foregroundStreaming,
+          activityPhase: cached.isStale ? 'idle' : session.activityPhase,
+          isSubagentRunning: cached.isStale ? false : session.isSubagentRunning,
+          runningSubagentCount: cached.isStale ? 0 : session.runningSubagentCount,
           modelId: session.modelId,
           modelCapacity: session.modelCapacity,
           pricingTable,
@@ -557,10 +567,11 @@ export class CdpHudBridge implements ICdpHudBridge {
           availability: 'remote_stale',
           observedAt: cached.lastSuccessAt,
           lastSuccessAt: cached.lastSuccessAt,
-          isStreaming: session.foregroundStreaming,
-          activityPhase: session.activityPhase,
-          isSubagentRunning: session.isSubagentRunning,
-          runningSubagentCount: session.runningSubagentCount,
+          allowDbActiveStepInference: false,
+          isStreaming: false,
+          activityPhase: 'idle',
+          isSubagentRunning: false,
+          runningSubagentCount: 0,
           modelId: session.modelId,
           modelCapacity: session.modelCapacity,
           pricingTable,
@@ -639,8 +650,53 @@ export class CdpHudBridge implements ICdpHudBridge {
     }
     childIdSet.delete(session.conversationId);
 
-    const childIdsToFetch = [...childIdSet].slice(0, 32);
-    const childTrajectories: RemoteChildTrajectoryCache[] = [];
+    const allChildIds = [...childIdSet];
+    const cachedByChildId = new Map(
+      (cached?.childTrajectories ?? []).map(entry => [entry.cascadeId, entry])
+    );
+    const buildChildSignature = (cSum: RemoteTrajectorySummary | null | undefined): string => {
+      if (!cSum) return '';
+      const count = Number(cSum.stepCount) || 0;
+      const lastMod = cSum.lastModifiedTime !== undefined ? JSON.stringify(cSum.lastModifiedTime) : '';
+      const statusStr = cSum.status !== undefined ? String(cSum.status) : '';
+      return `${count}|${lastMod}|${statusStr}`;
+    };
+
+    const childTrajectoriesById = new Map<string, RemoteChildTrajectoryCache>();
+    const needFetchIds: string[] = [];
+    for (const cid of allChildIds) {
+      const cSum = summaryById.get(cid) ?? null;
+      const prevChild = cachedByChildId.get(cid);
+      const sig = buildChildSignature(cSum);
+      if (prevChild?.isTerminal && sig && sig !== '0||' && prevChild.signature === sig) {
+        childTrajectoriesById.set(cid, {
+          ...prevChild,
+          summary: cSum ?? prevChild.summary,
+        });
+      } else {
+        needFetchIds.push(cid);
+      }
+    }
+
+    const REMOTE_CHILD_FETCH_BUDGET = 32;
+    let childIdsToFetch = needFetchIds;
+    let nextChildCursor = 0;
+    let uncollectedChildCount = 0;
+    if (needFetchIds.length > REMOTE_CHILD_FETCH_BUDGET) {
+      const startIdx = (cached?.childCursor ?? 0) % needFetchIds.length;
+      const rotated = [...needFetchIds.slice(startIdx), ...needFetchIds.slice(0, startIdx)];
+      childIdsToFetch = rotated.slice(0, REMOTE_CHILD_FETCH_BUDGET);
+      nextChildCursor = (startIdx + childIdsToFetch.length) % needFetchIds.length;
+      for (const deferredCid of rotated.slice(REMOTE_CHILD_FETCH_BUDGET)) {
+        const prevChild = cachedByChildId.get(deferredCid);
+        if (prevChild) {
+          childTrajectoriesById.set(deferredCid, prevChild);
+        } else {
+          uncollectedChildCount++;
+        }
+      }
+    }
+
     let failedChildCount = (!stepsRes.ok || !genRes.ok) ? 1 : 0;
 
     if (childIdsToFetch.length > 0) {
@@ -649,7 +705,7 @@ export class CdpHudBridge implements ICdpHudBridge {
         const batch = childIdsToFetch.slice(i, i + REMOTE_CHILD_BATCH_SIZE);
         const childResults = await Promise.all(
           batch.map(async cid => {
-            const cSum = allSummaries.find(s => s.cascadeId === cid) ?? null;
+            const cSum = summaryById.get(cid) ?? null;
             const [cSteps, cGen] = await Promise.all([
               rpc.getTrajectorySteps(cid, 0, cSum?.stepCount ?? 0),
               rpc.getGeneratorMetadata(cid, 0),
@@ -662,19 +718,37 @@ export class CdpHudBridge implements ICdpHudBridge {
             await fallbackToStaleOrUnbridged(true);
             return;
           }
-          if (!item.cSteps.ok && !item.cGen.ok) {
+          const prevChild = cachedByChildId.get(item.cid);
+          if (!item.cSteps.ok || !item.cGen.ok) {
             failedChildCount++;
+          }
+          if (!item.cSteps.ok && !item.cGen.ok) {
+            if (prevChild) {
+              childTrajectoriesById.set(item.cid, prevChild);
+            }
             continue;
           }
-          childTrajectories.push({
+          const bothOk = item.cSteps.ok && item.cGen.ok;
+          const stepsData = item.cSteps.ok ? item.cSteps.data : (prevChild?.steps ?? []);
+          const genData = item.cGen.ok ? item.cGen.data : (prevChild?.generatorMetadata ?? []);
+          const sig = buildChildSignature(item.cSum);
+          const isTerminal = bothOk && Boolean(sig) && sig !== '0||' && isRemoteChildTrajectoryTerminal(item.cSum, stepsData);
+          childTrajectoriesById.set(item.cid, {
             cascadeId: item.cid,
-            summary: item.cSum,
-            steps: item.cSteps.ok ? item.cSteps.data : [],
-            generatorMetadata: item.cGen.ok ? item.cGen.data : [],
+            summary: item.cSum ?? prevChild?.summary ?? null,
+            steps: stepsData,
+            generatorMetadata: genData,
+            ...(sig ? { signature: sig } : {}),
+            isTerminal,
           });
         }
       }
     }
+
+    const childTrajectories = allChildIds
+      .map(cid => childTrajectoriesById.get(cid))
+      .filter((entry): entry is RemoteChildTrajectoryCache => Boolean(entry));
+    const hasUncollectedChildren = uncollectedChildCount > 0;
 
     const nowMs = Date.now();
     const steps = stepsRes.ok ? stepsRes.data : [];
@@ -685,7 +759,7 @@ export class CdpHudBridge implements ICdpHudBridge {
       paneSlotId: session.paneSlotId,
       sessionRevision: session.sessionRevision,
       metricsSequence: nextSeq,
-      availability: failedChildCount > 0 ? 'partial' : 'ready',
+      availability: failedChildCount > 0 || hasUncollectedChildren ? 'partial' : 'ready',
       observedAt: nowMs,
       lastSuccessAt: nowMs,
       isStreaming: session.foregroundStreaming,
@@ -715,6 +789,8 @@ export class CdpHudBridge implements ICdpHudBridge {
         generatorMetadata,
         executorMetadata,
         childTrajectories,
+        childCursor: nextChildCursor,
+        hasUncollectedChildren,
         failedChildCount,
         lastMetrics: metrics,
         lastSuccessAt: nowMs,
