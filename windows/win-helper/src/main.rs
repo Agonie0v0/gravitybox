@@ -167,6 +167,8 @@ fn dispatch(mut args: Vec<String>) -> Result<(), HelperError> {
         "app-graceful-close" => {
             let mut prefixes: Vec<String> = Vec::new();
             let mut timeout_ms: u64 = 8000;
+            let mut terminate_background = false;
+            let mut grace_ms: u64 = 2500;
             while let Some(arg) = iter.next() {
                 if let Some(v) = parse_flag_value("--prefix", &arg, &mut iter)? {
                     prefixes.push(v);
@@ -174,6 +176,14 @@ fn dispatch(mut args: Vec<String>) -> Result<(), HelperError> {
                     timeout_ms = v.parse().map_err(|_| {
                         HelperError::invalid_args("invalid --timeout-ms (expected integer >= 0)")
                     })?;
+                } else if let Some(v) = parse_flag_value("--grace-ms", &arg, &mut iter)? {
+                    grace_ms = v.parse().map_err(|_| {
+                        HelperError::invalid_args("invalid --grace-ms (expected integer >= 0)")
+                    })?;
+                } else if arg == "--terminate-background" || arg == "--terminate-background=true" {
+                    terminate_background = true;
+                } else if arg == "--terminate-background=false" {
+                    terminate_background = false;
                 } else {
                     return Err(HelperError::invalid_args(
                         "unknown argument for app-graceful-close",
@@ -183,7 +193,12 @@ fn dispatch(mut args: Vec<String>) -> Result<(), HelperError> {
             if prefixes.is_empty() {
                 return Err(HelperError::invalid_args("missing --prefix"));
             }
-            let resp = process::app_graceful_close(&prefixes, timeout_ms)?;
+            let opts = process::GracefulCloseOptions {
+                timeout_ms,
+                terminate_background,
+                grace_ms,
+            };
+            let resp = process::app_graceful_close(&prefixes, opts)?;
             emit_json(&resp);
             Ok(())
         }

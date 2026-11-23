@@ -566,7 +566,7 @@ export function AppProvider({
         if (!confirmed) return;
 
         if (liveRunning) {
-          const closed = await quitAntigravityAndWait(15_000);
+          const closed = await quitAntigravityAndWait(18_000);
           if (!closed) {
             showToast(t('assistant_account.quit_first'), true);
             return;

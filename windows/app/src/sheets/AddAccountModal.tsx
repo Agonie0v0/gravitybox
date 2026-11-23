@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  Check,
+  Copy,
   Download,
+  ExternalLink,
   FilePlus2,
   FolderOpen,
   Globe,
@@ -13,10 +16,56 @@ import { Modal } from '../components/Modal';
 import { useApp } from '../context/AppContext';
 import {
   backendRequest,
+  getAppInfo,
   openExternalUrl,
+  openFolder,
   pickImportJsonFiles,
   pickSaveJsonPath,
 } from '../lib/tauri';
+
+type OAuthLoginPhase =
+  | 'waiting'
+  | 'exchanging'
+  | 'saving'
+  | 'succeeded'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'expired';
+
+interface OAuthBeginReply {
+  id?: string;
+  url?: string;
+  authUrl?: string;
+}
+
+interface OAuthStatusReply {
+  id?: string;
+  phase?: OAuthLoginPhase | string;
+  state?: string;
+  status?: string;
+  error?: string;
+  message?: string;
+  expiresAt?: number;
+}
+
+/**
+ * Strictly validate that an OAuth authorization URL targets Google's HTTPS OAuth endpoint
+ * before passing it to the OS browser launcher or exposing copy/reopen fallback actions.
+ */
+function isSafeGoogleOAuthUrl(raw: string): boolean {
+  try {
+    const parsed = new URL(raw);
+    return (
+      parsed.protocol === 'https:' &&
+      parsed.hostname.toLowerCase() === 'accounts.google.com' &&
+      !parsed.username &&
+      !parsed.password
+    );
+  } catch {
+    return false;
+  }
+}
 
 export function AddAccountModal({
   open,
@@ -25,14 +74,18 @@ export function AddAccountModal({
   open: boolean;
   onClose: () => void;
 }) {
-  const { t, locale, status, accounts, refreshAll, showToast, askConfirm } = useApp();
+  const { t, locale, appInfo, status, accounts, refreshAll, showToast, askConfirm } = useApp();
   const [busy, setBusy] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [showManualToken, setShowManualToken] = useState(false);
   const [refreshToken, setRefreshToken] = useState('');
   const [oauthSessionId, setOauthSessionId] = useState<string | null>(null);
+  const [oauthAuthUrl, setOauthAuthUrl] = useState('');
+  const [copiedAuthUrl, setCopiedAuthUrl] = useState(false);
   const pollRef = useRef<number | null>(null);
+  const pollInFlightRef = useRef(false);
+  const copyTimerRef = useRef<number | null>(null);
 
   const currentEmail = (status.liveAccountEmail || status.activeAccountEmail || '').trim();
   const oauthConfigured = status.oauthClientConfigured === true;
@@ -42,19 +95,32 @@ export function AddAccountModal({
       window.clearInterval(pollRef.current);
       pollRef.current = null;
     }
+    pollInFlightRef.current = false;
   };
 
   useEffect(() => {
     if (!open) {
       stopPolling();
+      if (copyTimerRef.current) {
+        window.clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = null;
+      }
       setBusy(false);
       setStatusMsg('');
       setErrorMsg('');
       setShowManualToken(false);
       setRefreshToken('');
       setOauthSessionId(null);
+      setOauthAuthUrl('');
+      setCopiedAuthUrl(false);
     }
-    return () => stopPolling();
+    return () => {
+      stopPolling();
+      if (copyTimerRef.current) {
+        window.clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = null;
+      }
+    };
   }, [open]);
 
   const handleSaveCurrent = async () => {
@@ -159,34 +225,95 @@ export function AddAccountModal({
     }
   };
 
+  const handleOpenConfigDir = async () => {
+    setErrorMsg('');
+    try {
+      const dir = appInfo?.stateDir || (await getAppInfo()).stateDir;
+      if (!dir) {
+        throw new Error(locale === 'en' ? 'Unable to locate GravityBox config folder' : '无法定位 GravityBox 配置目录');
+      }
+      await openFolder(dir);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleReopenOAuthUrl = async () => {
+    if (!oauthAuthUrl || !isSafeGoogleOAuthUrl(oauthAuthUrl)) {
+      setErrorMsg(t('add_account.error.invalid_url'));
+      return;
+    }
+    setErrorMsg('');
+    try {
+      await openExternalUrl(oauthAuthUrl);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleCopyOAuthUrl = async () => {
+    if (!oauthAuthUrl || !isSafeGoogleOAuthUrl(oauthAuthUrl)) {
+      setErrorMsg(t('add_account.error.invalid_url'));
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(oauthAuthUrl);
+      setCopiedAuthUrl(true);
+      if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = window.setTimeout(() => setCopiedAuthUrl(false), 2000);
+    } catch {
+      setErrorMsg(locale === 'en' ? 'Failed to copy authorization link' : '复制授权链接失败');
+    }
+  };
+
   const handleOAuthBegin = async () => {
     setErrorMsg('');
     setStatusMsg(t('add_account.status.opening_google'));
     setBusy(true);
     try {
-      const res = await backendRequest<{ id?: string; authUrl?: string; url?: string }>({
+      const res = await backendRequest<OAuthBeginReply>({
         command: 'account_oauth_begin',
       });
-      const authUrl = res.authUrl || res.url || '';
-      const id = res.id || '';
-      if (!authUrl || !id) {
+      const authUrl = (res.authUrl || res.url || '').trim();
+      const id = (res.id || '').trim();
+      if (!authUrl || !id || !isSafeGoogleOAuthUrl(authUrl)) {
         throw new Error(t('add_account.error.invalid_url'));
       }
       setOauthSessionId(id);
+      setOauthAuthUrl(authUrl);
+      setCopiedAuthUrl(false);
       setStatusMsg(t('add_account.status.complete_in_browser'));
-      await openExternalUrl(authUrl);
+
+      try {
+        await openExternalUrl(authUrl);
+      } catch (openErr) {
+        setErrorMsg(
+          locale === 'en'
+            ? `Could not open browser automatically (${openErr instanceof Error ? openErr.message : String(openErr)}). Use "Reopen Browser" or "Copy Auth Link" below.`
+            : `未能自动拉起浏览器（${openErr instanceof Error ? openErr.message : String(openErr)}），请使用下方「重新打开浏览器」或「复制授权链接」。`,
+        );
+      }
 
       stopPolling();
+      let consecutiveErrors = 0;
       pollRef.current = window.setInterval(async () => {
+        if (pollInFlightRef.current) return;
+        pollInFlightRef.current = true;
         try {
-          const st = await backendRequest<{ state?: string; status?: string; error?: string; message?: string }>({
+          const st = await backendRequest<OAuthStatusReply>({
             command: 'account_oauth_status',
             id,
           });
-          const phase = st.state || st.status || '';
-          if (phase === 'succeeded' || phase === 'completed') {
+          consecutiveErrors = 0;
+          const phase = st.phase || st.state || st.status || '';
+          if (phase === 'exchanging') {
+            setStatusMsg(locale === 'en' ? 'Exchanging Google authorization...' : '正在交换 Google 授权凭据...');
+          } else if (phase === 'saving') {
+            setStatusMsg(t('add_account.status.saving'));
+          } else if (phase === 'succeeded' || phase === 'completed') {
             stopPolling();
             setOauthSessionId(null);
+            setOauthAuthUrl('');
             setBusy(false);
             showToast(st.message || t('oauth.msg.succeeded'));
             await refreshAll(true);
@@ -194,17 +321,30 @@ export function AddAccountModal({
           } else if (phase === 'failed' || phase === 'cancelled' || phase === 'expired') {
             stopPolling();
             setOauthSessionId(null);
+            setOauthAuthUrl('');
             setBusy(false);
             setStatusMsg('');
             setErrorMsg(st.error || st.message || t('add_account.error.incomplete'));
           }
-        } catch {
-          // keep polling
+        } catch (pollErr) {
+          consecutiveErrors += 1;
+          if (consecutiveErrors >= 6) {
+            stopPolling();
+            setOauthSessionId(null);
+            setOauthAuthUrl('');
+            setBusy(false);
+            setStatusMsg('');
+            setErrorMsg(pollErr instanceof Error ? pollErr.message : t('add_account.error.incomplete'));
+          }
+        } finally {
+          pollInFlightRef.current = false;
         }
       }, 900);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
       setStatusMsg('');
+      setOauthSessionId(null);
+      setOauthAuthUrl('');
       setBusy(false);
     }
   };
@@ -212,10 +352,13 @@ export function AddAccountModal({
   const handleCancelOAuthOrClose = async () => {
     if (oauthSessionId) {
       stopPolling();
-      await backendRequest({ command: 'account_oauth_cancel', id: oauthSessionId }).catch(() => {});
+      const activeId = oauthSessionId;
       setOauthSessionId(null);
+      setOauthAuthUrl('');
+      setCopiedAuthUrl(false);
       setBusy(false);
       setStatusMsg('');
+      await backendRequest({ command: 'account_oauth_cancel', id: activeId }).catch(() => {});
       return;
     }
     if (!busy) onClose();
@@ -265,7 +408,7 @@ export function AddAccountModal({
   };
 
   return (
-    <Modal open={open} onClose={handleCancelOAuthOrClose} maxWidth={500}>
+    <Modal open={open} onClose={handleCancelOAuthOrClose} maxWidth={520}>
       <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12, overflowY: 'auto' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <div
@@ -283,7 +426,7 @@ export function AddAccountModal({
           <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>{t('add_account.title')}</h3>
         </div>
 
-        {/* Card 1: Save current active Antigravity account */}
+        {/* Card 1: Save current active Antigravity account (recommended multi-account workflow) */}
         <div className="gb-card" style={{ padding: 13, display: 'flex', alignItems: 'center', gap: 12 }}>
           <div
             className="gb-icon-badge"
@@ -293,8 +436,10 @@ export function AddAccountModal({
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 13, fontWeight: 600 }}>{t('add_account.current_card_title')}</div>
-            <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
-              {t('add_account.save_current_sub')}
+            <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2, lineHeight: 1.45 }}>
+              {locale === 'en'
+                ? 'Recommended (no OAuth setup needed): sign in to the target Google account in Antigravity, then click Save Current Account to store it.'
+                : '多账号推荐方式（无需配置 OAuth）：先在 Antigravity 登录目标 Google 账号，再点「保存当前账号」一键收入。'}
             </div>
             {currentEmail && (
               <div
@@ -385,25 +530,25 @@ export function AddAccountModal({
 
         {/* Card 4: Google OAuth & Manual Refresh Token */}
         <div className="gb-card" style={{ padding: 13, display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
             <div
               className="gb-icon-badge"
-              style={{ background: 'var(--blue-soft)', border: '0.5px solid var(--blue-border)', color: 'var(--blue)' }}
+              style={{ background: 'var(--blue-soft)', border: '0.5px solid var(--blue-border)', color: 'var(--blue)', marginTop: 1 }}
             >
               <Globe size={15} />
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: 600 }}>{t('add_account.google_title')}</div>
-              <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
+              <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2, lineHeight: 1.45 }}>
                 {oauthConfigured
                   ? t('add_account.google_sub')
                   : locale === 'en'
-                  ? 'Supports OAuth login (when configured in .env) or manual Refresh Token'
-                  : '支持 OAuth 浏览器授权（配置 .env 后）或手动填写 Refresh Token'}
+                  ? 'Neither macOS nor Windows bundles OAuth keys by default. To enable browser sign-in, configure GRAVITYBOX_GOOGLE_CLIENT_ID and GRAVITYBOX_GOOGLE_CLIENT_SECRET in %APPDATA%\\GravityBox\\.env and restart GravityBox.'
+                  : '原版 macOS 与 Windows 默认均不内置 OAuth 密钥；如需浏览器授权，请在 %APPDATA%\\GravityBox\\.env 配置 GRAVITYBOX_GOOGLE_CLIENT_ID 与 GRAVITYBOX_GOOGLE_CLIENT_SECRET 后重启应用。'}
               </div>
             </div>
-            <div style={{ display: 'flex', gap: 6 }}>
-              {oauthConfigured && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6, flexShrink: 0 }}>
+              {oauthConfigured ? (
                 <button
                   type="button"
                   className="gb-btn gb-btn-sm"
@@ -411,6 +556,16 @@ export function AddAccountModal({
                   onClick={handleOAuthBegin}
                 >
                   {t('add_account.google_btn')}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="gb-btn gb-btn-sm"
+                  disabled={busy}
+                  onClick={() => void handleOpenConfigDir()}
+                >
+                  <FolderOpen size={12} />
+                  <span>{locale === 'en' ? 'Open Config Folder' : '打开配置目录'}</span>
                 </button>
               )}
               <button
@@ -420,13 +575,57 @@ export function AddAccountModal({
                 onClick={() => setShowManualToken((v) => !v)}
               >
                 <KeyRound size={12} />
-                <span>{locale === 'en' ? 'Token' : '手动 Token'}</span>
+                <span>{locale === 'en' ? 'Manual Token' : '手动 Token'}</span>
               </button>
             </div>
           </div>
 
+          {oauthSessionId && oauthAuthUrl && (
+            <div
+              className="gb-subcard"
+              style={{
+                padding: '9px 11px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+              }}
+            >
+              <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', lineHeight: 1.4 }}>
+                {locale === 'en'
+                  ? 'Waiting for Google browser authorization callback. If the browser did not open, reopen or copy the link:'
+                  : '正在等待浏览器完成 Google 授权回调；若浏览器未自动弹出，可重新打开或复制授权链接：'}
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="gb-btn gb-btn-sm"
+                  onClick={() => void handleReopenOAuthUrl()}
+                >
+                  <ExternalLink size={12} />
+                  <span>{locale === 'en' ? 'Reopen Browser' : '重新打开浏览器'}</span>
+                </button>
+                <button
+                  type="button"
+                  className="gb-btn gb-btn-sm"
+                  onClick={() => void handleCopyOAuthUrl()}
+                >
+                  {copiedAuthUrl ? <Check size={12} /> : <Copy size={12} />}
+                  <span>
+                    {copiedAuthUrl
+                      ? locale === 'en'
+                        ? 'Copied'
+                        : '已复制'
+                      : locale === 'en'
+                      ? 'Copy Auth Link'
+                      : '复制授权链接'}
+                  </span>
+                </button>
+              </div>
+            </div>
+          )}
+
           {showManualToken && (
-            <div style={{ display: 'flex', gap: 8, paddingTop: 4, borderTop: '1px solid var(--divider)' }}>
+            <div style={{ display: 'flex', gap: 8, paddingTop: 6, borderTop: '1px solid var(--divider)' }}>
               <input
                 type="password"
                 className="gb-input"

@@ -49,6 +49,8 @@ export {
   type Win32LsProcess,
   type Win32PortOwner,
   type Win32AppProcess,
+  type Win32GracefulCloseReason,
+  type Win32GracefulCloseOptions,
   type Win32GracefulCloseResult,
   type Win32PeVersion,
 } from './win32-helper.js';

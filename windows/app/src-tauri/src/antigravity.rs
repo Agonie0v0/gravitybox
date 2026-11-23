@@ -289,38 +289,95 @@ pub fn launch_antigravity() -> Result<(), String> {
     Ok(())
 }
 
-pub fn quit_antigravity_and_wait(resource_dir: Option<&Path>, timeout_ms: u64) -> Result<bool, String> {
+const SAFE_CLOSE_TIMEOUT_MS: u64 = 18_000;
+const SAFE_CLOSE_GRACE_MS: u64 = 2_500;
+const POST_CLOSE_SETTLE_MS: u64 = 400;
+const DEVTOOLS_READY_TIMEOUT_SECS: u64 = 15;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GracefulCloseOutcome {
+    pub closed: bool,
+    pub reason: String,
+}
+
+fn build_graceful_close_args(prefix: &str, timeout_ms: u64, grace_ms: u64) -> Vec<String> {
+    vec![
+        "app-graceful-close".to_string(),
+        "--prefix".to_string(),
+        prefix.to_string(),
+        "--timeout-ms".to_string(),
+        timeout_ms.to_string(),
+        "--terminate-background".to_string(),
+        "--grace-ms".to_string(),
+        grace_ms.to_string(),
+    ]
+}
+
+fn format_close_failure_message(reason: &str, timeout_ms: u64) -> String {
+    if reason == "visible_window_open" {
+        "检测到 Antigravity 仍有未关闭的可见窗口（例如未保存更改确认框），已停止关闭且未强制终止。请先在 Antigravity 中完成保存或确认关闭，再重试安全重启。".to_string()
+    } else {
+        let secs = (timeout_ms / 1000).max(1);
+        format!(
+            "Antigravity 在 {} 秒内未能完全退出，未强制终止可见工作窗口。请先保存工作并手动退出 Antigravity，再通过「打开 Antigravity」重新启动。",
+            secs
+        )
+    }
+}
+
+/// Remove a stale `DevToolsActivePort` regular file once all Antigravity processes have exited,
+/// preventing relaunch readiness checks from reading an obsolete port. Never follows symlinks.
+fn remove_stale_devtools_active_port(path: &Path) {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_file() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+pub fn quit_antigravity_detailed(
+    resource_dir: Option<&Path>,
+    timeout_ms: u64,
+) -> Result<GracefulCloseOutcome, String> {
     let install_dir = resolve_antigravity_dir();
     let prefix = install_dir.to_string_lossy().to_string();
     let helper = resolve_win_helper_exe(resource_dir)
         .ok_or_else(|| "未找到 gravitybox-win-helper.exe，无法安全关闭 Antigravity".to_string())?;
-    let timeout_str = timeout_ms.to_string();
-    let val = run_win_helper(
-        &helper,
-        &["app-graceful-close", "--prefix", &prefix, "--timeout-ms", &timeout_str],
-    )?;
+    let owned_args = build_graceful_close_args(&prefix, timeout_ms, SAFE_CLOSE_GRACE_MS);
+    let arg_refs: Vec<&str> = owned_args.iter().map(String::as_str).collect();
+    let val = run_win_helper(&helper, &arg_refs)?;
     let closed = val.get("closed").and_then(|v| v.as_bool()).unwrap_or(false);
+    let reason = val
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     if closed {
-        std::thread::sleep(Duration::from_millis(300));
+        std::thread::sleep(Duration::from_millis(POST_CLOSE_SETTLE_MS));
     }
-    Ok(closed)
+    Ok(GracefulCloseOutcome { closed, reason })
+}
+
+pub fn quit_antigravity_and_wait(resource_dir: Option<&Path>, timeout_ms: u64) -> Result<bool, String> {
+    Ok(quit_antigravity_detailed(resource_dir, timeout_ms)?.closed)
 }
 
 /// Safe relaunch matching macOS `AssistantProcessLifecycle.swift`:
-/// 1. Gracefully close running Antigravity via `gravitybox-win-helper.exe app-graceful-close` (never force-kill!)
-/// 2. Wait until all child processes exit
+/// 1. Gracefully close running Antigravity via `gravitybox-win-helper.exe app-graceful-close --terminate-background --grace-ms 2500`
+///    (never force-kills while any visible window remains open!)
+/// 2. Wait 400ms after all processes exit and remove any stale `%APPDATA%\Antigravity\DevToolsActivePort`
 /// 3. Relaunch `Antigravity.exe --remote-debugging-port=0`
-/// 4. Poll `%APPDATA%\Antigravity\DevToolsActivePort` and probe TCP loopback until ready
+/// 4. Poll `%APPDATA%\Antigravity\DevToolsActivePort` and probe TCP loopback for up to 15s until ready
 pub fn safe_relaunch_antigravity(resource_dir: Option<&Path>) -> Result<SafeRelaunchResult, String> {
     if is_antigravity_running(resource_dir) {
-        let closed = quit_antigravity_and_wait(resource_dir, 10_000)?;
-        if !closed {
-            return Err(
-                "Antigravity 在 10 秒内未能退出，未强制关闭。请先保存工作并手动退出 Antigravity，再通过「打开 Antigravity」重新启动。"
-                    .to_string(),
-            );
+        let outcome = quit_antigravity_detailed(resource_dir, SAFE_CLOSE_TIMEOUT_MS)?;
+        if !outcome.closed {
+            return Err(format_close_failure_message(&outcome.reason, SAFE_CLOSE_TIMEOUT_MS));
         }
     }
+
+    // All Antigravity processes are confirmed exited; clear stale DevToolsActivePort before relaunching
+    remove_stale_devtools_active_port(&resolve_devtools_active_port_path());
 
     let mut last_err: Option<String> = None;
     for attempt in 0..3 {
@@ -331,7 +388,7 @@ pub fn safe_relaunch_antigravity(resource_dir: Option<&Path>) -> Result<SafeRela
             last_err = Some(e);
             continue;
         }
-        let deadline = Instant::now() + Duration::from_secs(6);
+        let deadline = Instant::now() + Duration::from_secs(DEVTOOLS_READY_TIMEOUT_SECS);
         while Instant::now() < deadline {
             if has_live_devtools_port() {
                 return Ok(SafeRelaunchResult {
@@ -352,4 +409,59 @@ pub fn safe_relaunch_antigravity(resource_dir: Option<&Path>) -> Result<SafeRela
     }
 
     Err(last_err.unwrap_or_else(|| "未能自动重新打开 Antigravity，请手动打开".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn graceful_close_args_and_messages_match_contract() {
+        let args = build_graceful_close_args(
+            r"C:\Program Files\Antigravity",
+            SAFE_CLOSE_TIMEOUT_MS,
+            SAFE_CLOSE_GRACE_MS,
+        );
+        assert_eq!(
+            args,
+            vec![
+                "app-graceful-close",
+                "--prefix",
+                r"C:\Program Files\Antigravity",
+                "--timeout-ms",
+                "18000",
+                "--terminate-background",
+                "--grace-ms",
+                "2500",
+            ]
+        );
+
+        let visible_msg = format_close_failure_message("visible_window_open", SAFE_CLOSE_TIMEOUT_MS);
+        assert!(visible_msg.contains("可见窗口") && visible_msg.contains("保存"));
+
+        let timeout_msg = format_close_failure_message("timeout", SAFE_CLOSE_TIMEOUT_MS);
+        assert!(timeout_msg.contains("18 秒"));
+    }
+
+    #[test]
+    fn remove_stale_devtools_port_removes_regular_file_only() {
+        let tmp = strip_verbatim_prefix(&std::env::temp_dir())
+            .join(format!("gb-dtp-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let port_file = tmp.join("DevToolsActivePort");
+        std::fs::write(&port_file, "9222\n/devtools/browser/abc\n").unwrap();
+        assert!(port_file.is_file());
+
+        remove_stale_devtools_active_port(&port_file);
+        assert!(!port_file.exists());
+
+        // Calling again on missing file or directory must not fail or remove directory
+        remove_stale_devtools_active_port(&port_file);
+        remove_stale_devtools_active_port(&tmp);
+        assert!(tmp.is_dir());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

@@ -53,7 +53,7 @@ export async function safeRelaunchAntigravity(): Promise<{ ok: boolean; debugPor
   return invoke('safe_relaunch_antigravity_cmd');
 }
 
-export async function quitAntigravityAndWait(timeoutMs = 15_000): Promise<boolean> {
+export async function quitAntigravityAndWait(timeoutMs = 18_000): Promise<boolean> {
   if (!isTauriRuntime()) return true;
   return invoke<boolean>('quit_antigravity_and_wait_cmd', { timeoutMs });
 }
@@ -64,11 +64,15 @@ export async function getAntigravityRunning(): Promise<boolean> {
 }
 
 export async function openExternalUrl(url: string): Promise<void> {
+  const trimmed = url.trim();
+  if (!/^https?:\/\//i.test(trimmed)) {
+    throw new Error('Only http:// or https:// URLs are allowed');
+  }
   if (!isTauriRuntime()) {
-    window.open(url, '_blank', 'noopener,noreferrer');
+    window.open(trimmed, '_blank', 'noopener,noreferrer');
     return;
   }
-  await invoke('open_external_url', { url });
+  await invoke('open_external_url', { url: trimmed });
 }
 
 export async function openFolder(path: string): Promise<void> {

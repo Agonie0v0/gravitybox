@@ -84,7 +84,7 @@ pub async fn quit_antigravity_and_wait_cmd(
     timeout_ms: Option<u64>,
 ) -> Result<bool, String> {
     let res_dir = backend.resource_dir().map(|p| p.to_path_buf());
-    let timeout = timeout_ms.unwrap_or(15_000).clamp(1_000, 30_000);
+    let timeout = timeout_ms.unwrap_or(18_000).clamp(1_000, 35_000);
     tokio::task::spawn_blocking(move || quit_antigravity_and_wait(res_dir.as_deref(), timeout))
         .await
         .map_err(|e| format!("等待 Antigravity 退出失败: {}", e))?

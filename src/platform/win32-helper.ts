@@ -30,9 +30,23 @@ export interface Win32AppProcess {
   cmdLine: string;
 }
 
+export type Win32GracefulCloseReason =
+  | 'clean_exit'
+  | 'background_terminated'
+  | 'visible_window_open'
+  | 'timeout'
+  | (string & {});
+
 export interface Win32GracefulCloseResult {
   closed: boolean;
   remainingPids: number[];
+  reason?: Win32GracefulCloseReason;
+}
+
+export interface Win32GracefulCloseOptions extends Win32HelperOptions {
+  closeTimeoutMs?: number;
+  terminateBackground?: boolean;
+  graceMs?: number;
 }
 
 export interface Win32PeVersion {
@@ -403,26 +417,49 @@ export async function appProcesses(
 }
 
 /**
- * Gracefully close all processes under `prefix` by sending WM_CLOSE to their top-level windows
- * and waiting until they exit or timeout elapses.
+ * Gracefully close all processes under `prefix` using progressive staged shutdown:
+ * 1. Send WM_CLOSE to visible top-level windows (never force-kills while any visible window remains open).
+ * 2. Once no visible windows remain, send WM_CLOSE to hidden/tray top-level windows and wait `graceMs`.
+ * 3. Only when `terminateBackground` is explicitly enabled and 0 visible windows are re-confirmed,
+ *    terminate remaining headless/background processes under `prefix`.
  */
 export async function appGracefulClose(
   prefix: string,
-  options?: Win32HelperOptions & { closeTimeoutMs?: number },
+  options?: Win32GracefulCloseOptions,
 ): Promise<Win32GracefulCloseResult> {
   const closeTimeoutMs = Math.max(200, Math.floor(options?.closeTimeoutMs ?? 8_000));
   const args = ['app-graceful-close', '--prefix', prefix, '--timeout-ms', String(closeTimeoutMs)];
-  const processTimeoutMs = Math.max(options?.timeoutMs ?? 0, closeTimeoutMs + 4_000);
-  const res = await invokeWin32Helper<{ ok: true; closed?: boolean; remainingPids?: unknown }>(args, {
+  if (options?.terminateBackground === true) {
+    args.push('--terminate-background');
+  }
+  const graceMs =
+    typeof options?.graceMs === 'number' && Number.isFinite(options.graceMs)
+      ? Math.max(100, Math.floor(options.graceMs))
+      : undefined;
+  if (graceMs !== undefined) {
+    args.push('--grace-ms', String(graceMs));
+  }
+  const stageOverheadMs = (options?.terminateBackground === true ? 8_000 : 4_000) + (graceMs ?? 0);
+  const processTimeoutMs = Math.max(options?.timeoutMs ?? 0, closeTimeoutMs + stageOverheadMs);
+  const res = await invokeWin32Helper<{
+    ok: true;
+    closed?: boolean;
+    remainingPids?: unknown;
+    reason?: unknown;
+  }>(args, {
     ...options,
     timeoutMs: processTimeoutMs,
   });
   const remainingPids = Array.isArray(res.remainingPids)
     ? res.remainingPids.map((pid) => Number(pid)).filter((pid) => Number.isInteger(pid) && pid > 0)
     : [];
+  const reason = typeof res.reason === 'string' && res.reason.trim().length > 0
+    ? (res.reason.trim() as Win32GracefulCloseReason)
+    : undefined;
   return {
     closed: res.closed === true,
     remainingPids,
+    ...(reason !== undefined ? { reason } : {}),
   };
 }
 

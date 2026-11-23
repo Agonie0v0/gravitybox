@@ -18,7 +18,7 @@ use windows_sys::Win32::System::Memory::{
 };
 use windows_sys::Win32::System::Threading::{
     OpenProcess, PEB, PROCESS_BASIC_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_VM_READ, QueryFullProcessImageNameW,
+    PROCESS_TERMINATE, PROCESS_VM_READ, QueryFullProcessImageNameW, TerminateProcess,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GetWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW,
@@ -105,12 +105,31 @@ pub struct AppProcessesResponse {
     pub processes: Vec<AppProcessInfo>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct GracefulCloseOptions {
+    pub timeout_ms: u64,
+    pub terminate_background: bool,
+    pub grace_ms: u64,
+}
+
+impl Default for GracefulCloseOptions {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 8000,
+            terminate_background: false,
+            grace_ms: 2500,
+        }
+    }
+}
+
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct GracefulCloseResponse {
     pub ok: bool,
     pub closed: bool,
     pub remaining_pids: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Enumerate all running processes as `ProcessSnapshotEntry`.
@@ -617,32 +636,101 @@ pub fn app_processes(prefixes: &[String]) -> Result<AppProcessesResponse, Helper
     })
 }
 
-fn find_matching_pids(prefixes: &[String]) -> Result<Vec<u32>, HelperError> {
+const CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const VISIBLE_RETRY_INTERVAL: Duration = Duration::from_millis(1500);
+const ZERO_VISIBLE_STABLE_DURATION: Duration = Duration::from_millis(1200);
+const STAGE3_ROOT_WAIT_DURATION: Duration = Duration::from_millis(2000);
+const STAGE3_REMAINING_WAIT_DURATION: Duration = Duration::from_millis(3000);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MatchedProcess {
+    pid: u32,
+    parent_pid: u32,
+}
+
+fn find_matching_processes(prefixes: &[String]) -> Result<Vec<MatchedProcess>, HelperError> {
     let self_pid = std::process::id();
     let entries = snapshot_processes()?;
-    let mut pids = Vec::new();
+    let mut matched = Vec::new();
+    let mut seen = HashSet::new();
 
     for entry in entries {
         let pid = entry.pid;
-        if pid == 0 || pid == self_pid {
+        if pid == 0 || pid == self_pid || !seen.insert(pid) {
             continue;
         }
         let Some(exe_path) = query_pid_exe_path(pid) else {
             continue;
         };
         if prefixes.iter().any(|p| path_matches_prefix(&exe_path, p)) {
-            pids.push(pid);
+            matched.push(MatchedProcess {
+                pid,
+                parent_pid: entry.parent_pid,
+            });
         }
     }
 
-    pids.sort_unstable();
-    pids.dedup();
-    Ok(pids)
+    matched.sort_by_key(|m| m.pid);
+    Ok(matched)
+}
+
+fn sorted_pids(matched: &[MatchedProcess]) -> Vec<u32> {
+    matched.iter().map(|m| m.pid).collect()
+}
+
+fn pid_set(matched: &[MatchedProcess]) -> HashSet<u32> {
+    matched.iter().map(|m| m.pid).collect()
+}
+
+/// Select root processes within the matched set (those whose `parent_pid` is not in the matched set).
+/// Falls back to all matched PIDs only if a degenerate cycle leaves no root.
+fn select_root_pids(matched: &[MatchedProcess]) -> Vec<u32> {
+    let set = pid_set(matched);
+    let roots: Vec<u32> = matched
+        .iter()
+        .filter(|m| !set.contains(&m.parent_pid))
+        .map(|m| m.pid)
+        .collect();
+    if roots.is_empty() {
+        sorted_pids(matched)
+    } else {
+        roots
+    }
+}
+
+#[derive(Default)]
+struct WindowSnapshot {
+    visible_unowned: Vec<HWND>,
+    visible_owned: Vec<HWND>,
+    hidden_unowned: Vec<HWND>,
+    hidden_owned: Vec<HWND>,
+}
+
+impl WindowSnapshot {
+    fn has_visible(&self) -> bool {
+        !self.visible_unowned.is_empty() || !self.visible_owned.is_empty()
+    }
+
+    fn visible_close_targets(&self) -> &[HWND] {
+        if !self.visible_unowned.is_empty() {
+            &self.visible_unowned
+        } else {
+            &self.visible_owned
+        }
+    }
+
+    fn hidden_close_targets(&self) -> &[HWND] {
+        if !self.hidden_unowned.is_empty() {
+            &self.hidden_unowned
+        } else {
+            &self.hidden_owned
+        }
+    }
 }
 
 struct EnumWindowsState {
     target_pids: HashSet<u32>,
-    windows: Vec<(HWND, bool, bool)>, // (hwnd, is_visible, has_owner)
+    snapshot: WindowSnapshot,
 }
 
 unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -654,33 +742,23 @@ unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL 
     if state.target_pids.contains(&win_pid) {
         let is_visible = unsafe { IsWindowVisible(hwnd) } != 0;
         let has_owner = !unsafe { GetWindow(hwnd, GW_OWNER) }.is_null();
-        state.windows.push((hwnd, is_visible, has_owner));
+        match (is_visible, has_owner) {
+            (true, false) => state.snapshot.visible_unowned.push(hwnd),
+            (true, true) => state.snapshot.visible_owned.push(hwnd),
+            (false, false) => state.snapshot.hidden_unowned.push(hwnd),
+            (false, true) => state.snapshot.hidden_owned.push(hwnd),
+        }
     }
     1
 }
 
-pub fn app_graceful_close(
-    prefixes: &[String],
-    timeout_ms: u64,
-) -> Result<GracefulCloseResponse, HelperError> {
-    if prefixes.is_empty() || prefixes.iter().any(|p| p.trim().is_empty()) {
-        return Err(HelperError::invalid_args(
-            "app-graceful-close requires at least one non-empty --prefix",
-        ));
+fn collect_windows_for_pids(target_pids: &HashSet<u32>) -> WindowSnapshot {
+    if target_pids.is_empty() {
+        return WindowSnapshot::default();
     }
-
-    let initial_pids = find_matching_pids(prefixes)?;
-    if initial_pids.is_empty() {
-        return Ok(GracefulCloseResponse {
-            ok: true,
-            closed: true,
-            remaining_pids: Vec::new(),
-        });
-    }
-
     let mut state = EnumWindowsState {
-        target_pids: initial_pids.iter().copied().collect(),
-        windows: Vec::new(),
+        target_pids: target_pids.clone(),
+        snapshot: WindowSnapshot::default(),
     };
     unsafe {
         EnumWindows(
@@ -688,57 +766,338 @@ pub fn app_graceful_close(
             &mut state as *mut EnumWindowsState as LPARAM,
         );
     }
+    state.snapshot
+}
 
-    // Prefer visible top-level unowned windows, then visible windows, then unowned top-level windows
-    let mut targets: Vec<HWND> = state
-        .windows
-        .iter()
-        .filter(|&&(_, vis, owned)| vis && !owned)
-        .map(|&(h, _, _)| h)
-        .collect();
-    if targets.is_empty() {
-        targets = state
-            .windows
-            .iter()
-            .filter(|&&(_, vis, _)| vis)
-            .map(|&(h, _, _)| h)
-            .collect();
-    }
-    if targets.is_empty() {
-        targets = state
-            .windows
-            .iter()
-            .filter(|&&(_, _, owned)| !owned)
-            .map(|&(h, _, _)| h)
-            .collect();
-    }
-
-    for hwnd in targets {
+fn post_wm_close_all(targets: &[HWND]) {
+    for &hwnd in targets {
         unsafe {
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
         }
     }
+}
 
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+/// Terminate a single PID after re-verifying its live executable image path against `prefixes`.
+/// Prevents PID-reuse TOCTOU races and never terminates self.
+fn terminate_matching_pid(pid: u32, prefixes: &[String]) {
+    let self_pid = std::process::id();
+    if pid == 0 || pid == self_pid {
+        return;
+    }
+    let Some(handle) = OwnedHandle::new(unsafe {
+        OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
+    }) else {
+        return;
+    };
+    let Some(exe_path) = query_process_exe_path(handle.as_raw()) else {
+        return;
+    };
+    if !prefixes.iter().any(|p| path_matches_prefix(&exe_path, p)) {
+        return;
+    }
+    unsafe {
+        TerminateProcess(handle.as_raw(), 1);
+    }
+}
+
+fn wait_without_force_kill(
+    prefixes: &[String],
+    deadline: Instant,
+) -> Result<GracefulCloseResponse, HelperError> {
     loop {
-        let remaining = find_matching_pids(prefixes)?;
+        let matched = find_matching_processes(prefixes)?;
+        if matched.is_empty() {
+            return Ok(GracefulCloseResponse {
+                ok: true,
+                closed: true,
+                remaining_pids: Vec::new(),
+                reason: Some("clean_exit".to_string()),
+            });
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            let windows = collect_windows_for_pids(&pid_set(&matched));
+            let reason = if windows.has_visible() {
+                "visible_window_open"
+            } else {
+                "timeout"
+            };
+            return Ok(GracefulCloseResponse {
+                ok: true,
+                closed: false,
+                remaining_pids: sorted_pids(&matched),
+                reason: Some(reason.to_string()),
+            });
+        }
+        let sleep_for = CLOSE_POLL_INTERVAL.min(deadline.saturating_duration_since(now));
+        thread::sleep(sleep_for);
+    }
+}
+
+/// Progressive 3-stage safe shutdown for processes under `prefixes`:
+/// - Stage 1: Send `WM_CLOSE` to visible top-level windows (retrying once after 1.5s if no owned
+///   modal dialog is open). NEVER force-kills while any visible top-level window remains open.
+/// - Stage 2: Once 0 visible top-level windows are continuously confirmed for 1200ms, send
+///   `WM_CLOSE` to hidden/tray top-level windows and wait `opts.grace_ms`.
+/// - Stage 3 (only when `opts.terminate_background == true` AND 0 visible top-level windows are
+///   re-confirmed): terminate root matching processes first (wait up to 2000ms), then terminate
+///   any remaining windowless matching processes (wait up to 3000ms).
+pub fn app_graceful_close(
+    prefixes: &[String],
+    opts: GracefulCloseOptions,
+) -> Result<GracefulCloseResponse, HelperError> {
+    if prefixes.is_empty() || prefixes.iter().any(|p| p.trim().is_empty()) {
+        return Err(HelperError::invalid_args(
+            "app-graceful-close requires at least one non-empty --prefix",
+        ));
+    }
+
+    let initial = find_matching_processes(prefixes)?;
+    if initial.is_empty() {
+        return Ok(GracefulCloseResponse {
+            ok: true,
+            closed: true,
+            remaining_pids: Vec::new(),
+            reason: Some("clean_exit".to_string()),
+        });
+    }
+
+    let stage1_deadline = Instant::now() + Duration::from_millis(opts.timeout_ms);
+
+    // Stage 1: Gracefully close visible top-level windows and wait for 1200ms continuous 0-visible state.
+    let initial_windows = collect_windows_for_pids(&pid_set(&initial));
+    let mut sent_visible_close_at: Option<Instant> = None;
+    let mut retried_visible_close = false;
+    let mut zero_visible_since: Option<Instant> = if initial_windows.has_visible() {
+        post_wm_close_all(initial_windows.visible_close_targets());
+        sent_visible_close_at = Some(Instant::now());
+        None
+    } else {
+        Some(Instant::now())
+    };
+
+    loop {
+        let matched = find_matching_processes(prefixes)?;
+        if matched.is_empty() {
+            return Ok(GracefulCloseResponse {
+                ok: true,
+                closed: true,
+                remaining_pids: Vec::new(),
+                reason: Some("clean_exit".to_string()),
+            });
+        }
+
+        let windows = collect_windows_for_pids(&pid_set(&matched));
+        let now = Instant::now();
+
+        if windows.has_visible() {
+            // Hard safety guard: reset stability timer whenever any visible window exists.
+            zero_visible_since = None;
+
+            if sent_visible_close_at.is_none() {
+                post_wm_close_all(windows.visible_close_targets());
+                sent_visible_close_at = Some(now);
+            } else if !retried_visible_close
+                && now.duration_since(sent_visible_close_at.unwrap()) >= VISIBLE_RETRY_INTERVAL
+            {
+                retried_visible_close = true;
+                // Only retry on unowned main windows when no owned modal dialog (e.g. Save prompt) is visible.
+                if !windows.visible_unowned.is_empty() && windows.visible_owned.is_empty() {
+                    post_wm_close_all(&windows.visible_unowned);
+                }
+            }
+
+            if now >= stage1_deadline {
+                return Ok(GracefulCloseResponse {
+                    ok: true,
+                    closed: false,
+                    remaining_pids: sorted_pids(&matched),
+                    reason: Some("visible_window_open".to_string()),
+                });
+            }
+
+            let sleep_for = CLOSE_POLL_INTERVAL.min(stage1_deadline.saturating_duration_since(now));
+            if !sleep_for.is_zero() {
+                thread::sleep(sleep_for);
+            }
+        } else {
+            let since = *zero_visible_since.get_or_insert(now);
+            let stable_elapsed = now.duration_since(since);
+            if stable_elapsed >= ZERO_VISIBLE_STABLE_DURATION {
+                break;
+            }
+            if now >= stage1_deadline {
+                return Ok(GracefulCloseResponse {
+                    ok: true,
+                    closed: false,
+                    remaining_pids: sorted_pids(&matched),
+                    reason: Some("timeout".to_string()),
+                });
+            }
+            let until_stable = ZERO_VISIBLE_STABLE_DURATION.saturating_sub(stable_elapsed);
+            let sleep_for = CLOSE_POLL_INTERVAL
+                .min(until_stable)
+                .min(stage1_deadline.saturating_duration_since(now));
+            if !sleep_for.is_zero() {
+                thread::sleep(sleep_for);
+            }
+        }
+    }
+
+    // Stage 2: 0 visible top-level windows confirmed for 1200ms -> send WM_CLOSE to hidden/tray windows.
+    let stage2_matched = find_matching_processes(prefixes)?;
+    if stage2_matched.is_empty() {
+        return Ok(GracefulCloseResponse {
+            ok: true,
+            closed: true,
+            remaining_pids: Vec::new(),
+            reason: Some("clean_exit".to_string()),
+        });
+    }
+    let stage2_windows = collect_windows_for_pids(&pid_set(&stage2_matched));
+    if stage2_windows.has_visible() {
+        return wait_without_force_kill(prefixes, stage1_deadline);
+    }
+    post_wm_close_all(stage2_windows.hidden_close_targets());
+
+    let raw_stage2_deadline = Instant::now() + Duration::from_millis(opts.grace_ms);
+    let stage2_deadline = if opts.terminate_background {
+        raw_stage2_deadline
+    } else {
+        raw_stage2_deadline.min(stage1_deadline)
+    };
+
+    loop {
+        let matched = find_matching_processes(prefixes)?;
+        if matched.is_empty() {
+            return Ok(GracefulCloseResponse {
+                ok: true,
+                closed: true,
+                remaining_pids: Vec::new(),
+                reason: Some("clean_exit".to_string()),
+            });
+        }
+        let windows = collect_windows_for_pids(&pid_set(&matched));
+        if windows.has_visible() {
+            // A visible window appeared (e.g. confirmation dialog) -> never force-kill.
+            return wait_without_force_kill(prefixes, stage1_deadline);
+        }
+        let now = Instant::now();
+        if now >= stage2_deadline {
+            break;
+        }
+        let sleep_for = CLOSE_POLL_INTERVAL.min(stage2_deadline.saturating_duration_since(now));
+        if !sleep_for.is_zero() {
+            thread::sleep(sleep_for);
+        }
+    }
+
+    if !opts.terminate_background {
+        return wait_without_force_kill(prefixes, stage1_deadline);
+    }
+
+    // Stage 3a: Re-confirm 0 visible top-level windows, then terminate root processes first.
+    let stage3_matched = find_matching_processes(prefixes)?;
+    if stage3_matched.is_empty() {
+        return Ok(GracefulCloseResponse {
+            ok: true,
+            closed: true,
+            remaining_pids: Vec::new(),
+            reason: Some("clean_exit".to_string()),
+        });
+    }
+    let stage3_windows = collect_windows_for_pids(&pid_set(&stage3_matched));
+    if stage3_windows.has_visible() {
+        return Ok(GracefulCloseResponse {
+            ok: true,
+            closed: false,
+            remaining_pids: sorted_pids(&stage3_matched),
+            reason: Some("visible_window_open".to_string()),
+        });
+    }
+
+    for root_pid in select_root_pids(&stage3_matched) {
+        terminate_matching_pid(root_pid, prefixes);
+    }
+
+    let root_wait_deadline = Instant::now() + STAGE3_ROOT_WAIT_DURATION;
+    loop {
+        let remaining = find_matching_processes(prefixes)?;
         if remaining.is_empty() {
             return Ok(GracefulCloseResponse {
                 ok: true,
                 closed: true,
                 remaining_pids: Vec::new(),
+                reason: Some("background_terminated".to_string()),
             });
         }
-        let now = Instant::now();
-        if now >= deadline {
+        let windows = collect_windows_for_pids(&pid_set(&remaining));
+        if windows.has_visible() {
             return Ok(GracefulCloseResponse {
                 ok: true,
                 closed: false,
-                remaining_pids: remaining,
+                remaining_pids: sorted_pids(&remaining),
+                reason: Some("visible_window_open".to_string()),
             });
         }
-        let sleep_for = Duration::from_millis(100).min(deadline - now);
-        thread::sleep(sleep_for);
+        let now = Instant::now();
+        if now >= root_wait_deadline {
+            break;
+        }
+        let sleep_for = CLOSE_POLL_INTERVAL.min(root_wait_deadline.saturating_duration_since(now));
+        if !sleep_for.is_zero() {
+            thread::sleep(sleep_for);
+        }
+    }
+
+    // Stage 3b: Re-confirm 0 visible top-level windows, then terminate any remaining windowless processes.
+    let remaining = find_matching_processes(prefixes)?;
+    if remaining.is_empty() {
+        return Ok(GracefulCloseResponse {
+            ok: true,
+            closed: true,
+            remaining_pids: Vec::new(),
+            reason: Some("background_terminated".to_string()),
+        });
+    }
+    let remaining_windows = collect_windows_for_pids(&pid_set(&remaining));
+    if remaining_windows.has_visible() {
+        return Ok(GracefulCloseResponse {
+            ok: true,
+            closed: false,
+            remaining_pids: sorted_pids(&remaining),
+            reason: Some("visible_window_open".to_string()),
+        });
+    }
+
+    for proc_item in &remaining {
+        terminate_matching_pid(proc_item.pid, prefixes);
+    }
+
+    let rem_wait_deadline = Instant::now() + STAGE3_REMAINING_WAIT_DURATION;
+    loop {
+        let still = find_matching_processes(prefixes)?;
+        if still.is_empty() {
+            return Ok(GracefulCloseResponse {
+                ok: true,
+                closed: true,
+                remaining_pids: Vec::new(),
+                reason: Some("background_terminated".to_string()),
+            });
+        }
+        let now = Instant::now();
+        if now >= rem_wait_deadline {
+            return Ok(GracefulCloseResponse {
+                ok: true,
+                closed: false,
+                remaining_pids: sorted_pids(&still),
+                reason: Some("timeout".to_string()),
+            });
+        }
+        let sleep_for = CLOSE_POLL_INTERVAL.min(rem_wait_deadline.saturating_duration_since(now));
+        if !sleep_for.is_zero() {
+            thread::sleep(sleep_for);
+        }
     }
 }
 
@@ -830,14 +1189,200 @@ mod tests {
     }
 
     #[test]
+    fn select_root_pids_identifies_tree_roots() {
+        let tree = vec![
+            MatchedProcess { pid: 100, parent_pid: 1 },
+            MatchedProcess { pid: 101, parent_pid: 100 },
+            MatchedProcess { pid: 102, parent_pid: 101 },
+            MatchedProcess { pid: 200, parent_pid: 55 },
+        ];
+        assert_eq!(select_root_pids(&tree), vec![100, 200]);
+
+        // Degenerate cycle fallback returns all matched PIDs
+        let cycle = vec![
+            MatchedProcess { pid: 10, parent_pid: 20 },
+            MatchedProcess { pid: 20, parent_pid: 10 },
+        ];
+        assert_eq!(select_root_pids(&cycle), vec![10, 20]);
+    }
+
+    #[test]
+    fn window_snapshot_visible_guard_and_target_priority() {
+        let mut snap = WindowSnapshot::default();
+        assert!(!snap.has_visible());
+        assert!(snap.visible_close_targets().is_empty());
+        assert!(snap.hidden_close_targets().is_empty());
+
+        let h_hidden = 1usize as HWND;
+        let h_owned_vis = 2usize as HWND;
+        let h_unowned_vis = 3usize as HWND;
+
+        snap.hidden_unowned.push(h_hidden);
+        assert!(!snap.has_visible());
+        assert_eq!(snap.hidden_close_targets(), &[h_hidden]);
+
+        // Even an owned visible dialog (e.g. Save changes prompt) triggers has_visible()
+        snap.visible_owned.push(h_owned_vis);
+        assert!(snap.has_visible());
+        assert_eq!(snap.visible_close_targets(), &[h_owned_vis]);
+
+        // When unowned visible window also exists, visible_close_targets prioritizes unowned main window
+        snap.visible_unowned.push(h_unowned_vis);
+        assert!(snap.has_visible());
+        assert_eq!(snap.visible_close_targets(), &[h_unowned_vis]);
+    }
+
+    #[test]
     fn app_graceful_close_returns_closed_when_no_matching_process() {
         let res = app_graceful_close(
             &[r"C:\__gravitybox_nonexistent_app_dir__".to_string()],
-            200,
+            GracefulCloseOptions {
+                timeout_ms: 200,
+                terminate_background: false,
+                grace_ms: 100,
+            },
         )
         .expect("app_graceful_close");
         assert!(res.ok);
         assert!(res.closed);
         assert!(res.remaining_pids.is_empty());
+        assert_eq!(res.reason.as_deref(), Some("clean_exit"));
+    }
+
+    struct TempDummyHarness {
+        dir: std::path::PathBuf,
+        children: Vec<std::process::Child>,
+    }
+
+    impl TempDummyHarness {
+        fn new(tag: &str) -> Self {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "gravitybox-close-test-{tag}-{}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("create temp test dir");
+            Self {
+                dir,
+                children: Vec::new(),
+            }
+        }
+
+        fn spawn_dummy(&mut self, exe_name: &str, ping_count: &str) -> u32 {
+            use std::os::windows::process::CommandExt;
+            use std::process::{Command, Stdio};
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+            let sys_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+            let src_ping = std::path::PathBuf::from(sys_root)
+                .join("System32")
+                .join("PING.EXE");
+            let dst = self.dir.join(exe_name);
+            if !dst.exists() {
+                std::fs::copy(&src_ping, &dst).expect("copy ping.exe to temp dir");
+            }
+            let child = Command::new(&dst)
+                .args(["127.0.0.1", "-n", ping_count])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+                .expect("spawn dummy process");
+            let pid = child.id();
+            self.children.push(child);
+            pid
+        }
+
+        fn dir_str(&self) -> String {
+            self.dir.to_string_lossy().to_string()
+        }
+    }
+
+    impl Drop for TempDummyHarness {
+        fn drop(&mut self) {
+            for child in &mut self.children {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn app_graceful_close_default_mode_does_not_terminate_background_process() {
+        let mut harness = TempDummyHarness::new("default");
+        let pid = harness.spawn_dummy("dummy_bg.exe", "30");
+
+        let res = app_graceful_close(
+            &[harness.dir_str()],
+            GracefulCloseOptions {
+                timeout_ms: 400,
+                terminate_background: false,
+                grace_ms: 200,
+            },
+        )
+        .expect("app_graceful_close default");
+
+        assert!(res.ok);
+        assert!(!res.closed);
+        assert_eq!(res.reason.as_deref(), Some("timeout"));
+        assert!(res.remaining_pids.contains(&pid));
+        assert!(
+            harness.children[0].try_wait().unwrap().is_none(),
+            "default mode must never force-kill headless background process"
+        );
+    }
+
+    #[test]
+    fn app_graceful_close_terminate_background_cleans_up_windowless_processes() {
+        let mut harness = TempDummyHarness::new("term-bg");
+        let _pid1 = harness.spawn_dummy("dummy_main.exe", "30");
+        let _pid2 = harness.spawn_dummy("dummy_sidecar.exe", "30");
+
+        let res = app_graceful_close(
+            &[harness.dir_str()],
+            GracefulCloseOptions {
+                timeout_ms: 5000,
+                terminate_background: true,
+                grace_ms: 250,
+            },
+        )
+        .expect("app_graceful_close terminate_background");
+
+        assert!(res.ok);
+        assert!(res.closed);
+        assert!(res.remaining_pids.is_empty());
+        assert_eq!(res.reason.as_deref(), Some("background_terminated"));
+
+        for child in &mut harness.children {
+            let status = child.wait().expect("wait terminated dummy");
+            assert!(!status.success());
+        }
+    }
+
+    #[test]
+    fn app_graceful_close_reports_clean_exit_when_process_exits_naturally() {
+        let mut harness = TempDummyHarness::new("clean");
+        let _pid = harness.spawn_dummy("dummy_short.exe", "2");
+
+        let res = app_graceful_close(
+            &[harness.dir_str()],
+            GracefulCloseOptions {
+                timeout_ms: 5000,
+                terminate_background: true,
+                grace_ms: 800,
+            },
+        )
+        .expect("app_graceful_close clean exit");
+
+        assert!(res.ok);
+        assert!(res.closed);
+        assert!(res.remaining_pids.is_empty());
+        assert_eq!(res.reason.as_deref(), Some("clean_exit"));
     }
 }
