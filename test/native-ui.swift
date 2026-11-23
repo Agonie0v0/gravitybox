@@ -3770,7 +3770,7 @@ import Cocoa
             check(standbyHost.singleAccountRefreshNotices["sb-elapsed"] == deferredNotice, "standbyDeferred must store notice in singleAccountRefreshNotices")
             let coolingMenuCard = standbyMenu.accountsCardsStack.arrangedSubviews.compactMap { $0 as? MenuExpandableAccountCardView }.first { $0.accountId == "sb-cooling" }
             let elapsedMenuCard = standbyMenu.accountsCardsStack.arrangedSubviews.compactMap { $0 as? MenuExpandableAccountCardView }.first { $0.accountId == "sb-elapsed" }
-            check(coolingMenuCard?.timestampLabel.stringValue.contains("切换后同步") == true && coolingMenuCard?.timestampLabel.textColor == .secondaryLabelColor, "Menu cooling card footer shows plain recorded timestamp in secondaryLabelColor")
+            check(coolingMenuCard?.timestampLabel.stringValue.contains("切换后更新") == true && coolingMenuCard?.timestampLabel.textColor == .secondaryLabelColor, "Menu cooling card footer shows plain recorded timestamp in secondaryLabelColor")
             check(elapsedMenuCard?.timestampLabel.stringValue == L10n.t("accounts.standby.reset_passed") && elapsedMenuCard?.timestampLabel.textColor == Design.blue, "Menu elapsed card footer shows reset_passed in Design.blue")
             check(elapsedMenuCard?.quotaRowViews.first?.resetLabel.stringValue == L10n.t("accounts.standby.likely_reset"), "Menu elapsed card window shows compact 预计已重置 instead of 已过期")
             check(elapsedMenuCard?.warningLabel.isHidden == false && elapsedMenuCard?.warningLabel.stringValue == deferredNotice && elapsedMenuCard?.warningLabel.textColor == .secondaryLabelColor, "Menu elapsed card displays deferred notice in neutral secondaryLabelColor")
@@ -6519,7 +6519,7 @@ import Cocoa
                 matchingSshHosts: [],
                 hasSshHosts: true
             )
-            check(offlineMenuCard.timestampLabel.stringValue.contains("切换后同步"), "MenuExpandableAccountCardView for truly offline standby must retain 切换后同步 (got \(offlineMenuCard.timestampLabel.stringValue))")
+            check(offlineMenuCard.timestampLabel.stringValue.contains("切换后更新"), "MenuExpandableAccountCardView for truly offline standby must retain 切换后更新 (got \(offlineMenuCard.timestampLabel.stringValue))")
         }
 
         // MARK: - P0-1 & P0-6 Regression Guards (Breathing Pulse Reduce-Motion Safety & Proxy URL Redaction)

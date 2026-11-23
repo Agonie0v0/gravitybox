@@ -1005,7 +1005,7 @@ final class AccountsPage: NSObject {
         } else if !isCollapsed, stamp > 0 {
             let dateStr = Self.dateFormatter.string(from: Date(timeIntervalSince1970: stamp))
             if standbyMode == "snapshot_cooling" {
-                card.updateLabel.stringValue = L10n.t("accounts.standby.recorded_at", ["time": dateStr], fallback: "记录于 \(dateStr) · 切换后同步")
+                card.updateLabel.stringValue = L10n.t("accounts.standby.recorded_at", ["time": dateStr], fallback: "记录于 \(dateStr) · 切换后更新")
                 card.updateLabel.textColor = .secondaryLabelColor
                 card.updateLabel.toolTip = nil
                 card.updateLabel.setAccessibilityHelp(L10n.t("accounts.standby.multi_device_hint"))

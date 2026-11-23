@@ -1453,7 +1453,7 @@ final class MenuExpandableAccountCardView: NSBox {
         } else if let standbyMode, standbyMode == "snapshot_cooling", stamp > 0 {
             let date = Date(timeIntervalSince1970: stamp)
             let fmt = Calendar.current.isDateInToday(date) ? Self.todayFormatter : Self.dateFormatter
-            timestampLabel.stringValue = L10n.t("accounts.standby.recorded_at", ["time": fmt.string(from: date)], fallback: "记录于 \(fmt.string(from: date)) · 切换后同步")
+            timestampLabel.stringValue = L10n.t("accounts.standby.recorded_at", ["time": fmt.string(from: date)], fallback: "记录于 \(fmt.string(from: date)) · 切换后更新")
             timestampLabel.textColor = .secondaryLabelColor
             timestampLabel.toolTip = nil
             timestampLabel.setAccessibilityHelp(L10n.t("accounts.standby.multi_device_hint"))

@@ -522,7 +522,7 @@
     "accounts.quota_not_updated": "配额未更新",
     "accounts.updated_at": "更新于 {time}",
     "accounts.updated_at_stale": "更新于 {time} · 待刷新",
-    "accounts.standby.recorded_at": "记录于 {time} · 切换后同步",
+    "accounts.standby.recorded_at": "记录于 {time} · 切换后更新",
     "accounts.standby.reset_passed": "已到重置时间 · 切换后更新",
     "accounts.standby.likely_reset": "预计已重置",
     "accounts.standby.likely_reset_sync": "预计已重置 · 切换后更新",

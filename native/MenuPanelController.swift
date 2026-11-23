@@ -1885,7 +1885,7 @@ final class MenuPanelController: NSViewController {
         } else if standbyMode == "snapshot_cooling", stamp > 0 {
             let date = Date(timeIntervalSince1970: stamp)
             let fmt = Calendar.current.isDateInToday(date) ? Self.timeFormatter : Self.dateTimeFormatter
-            quotaFooterLabel.stringValue = offlinePrefix + L10n.t("accounts.standby.recorded_at", ["time": fmt.string(from: date)], fallback: "记录于 \(fmt.string(from: date)) · 切换后同步")
+            quotaFooterLabel.stringValue = offlinePrefix + L10n.t("accounts.standby.recorded_at", ["time": fmt.string(from: date)], fallback: "记录于 \(fmt.string(from: date)) · 切换后更新")
             quotaFooterLabel.textColor = .secondaryLabelColor
             quotaFooterLabel.toolTip = nil
             quotaFooterLabel.setAccessibilityHelp(L10n.t("accounts.standby.multi_device_hint"))
