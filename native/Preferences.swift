@@ -33,7 +33,7 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
     let launchAntigravityOnStartSwitch = DesignSwitch()
     let storageBadge = pillBadge("", color: Design.blue)
     static var defaultStorageSubtitle: String {
-        L10n.t("settings.storage.default_subtitle", fallback: "清理无损缓存与历史日志，保留核心数据")
+        L10n.t("settings.storage.default_subtitle", fallback: "一键释放运行缓存与超期日志，登录态与对话完好保留")
     }
     let storageSubtitleLabel = text(PreferencesController.defaultStorageSubtitle, size: 11, color: Design.secondary, wrap: true)
     var manageCacheBtn: NSButton!
@@ -157,16 +157,16 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
         let enhanceGroup = vertical([
             languageRow,
             divider(),
-            settingRow(icon: "chart.bar.xaxis", tint: .systemIndigo, title: L10n.t("settings.hud.title", fallback: "对话状态栏"), subtitle: L10n.t("settings.hud.subtitle", fallback: "在 Antigravity 输入框下方显示轮次、Token 与上下文"), control: hudSwitch),
+            settingRow(icon: "dock.rectangle", tint: .systemIndigo, title: L10n.t("settings.hud.title", fallback: "对话状态栏"), subtitle: L10n.t("settings.hud.subtitle", fallback: "在 Antigravity 输入框下方显示轮次、Token 与上下文"), control: hudSwitch),
             divider(),
             proxySection
         ], spacing: 12)
         for child in enhanceGroup.arrangedSubviews { fillWidth(child, in: enhanceGroup) }
 
         let dataSyncGroup = vertical([
-            settingRow(icon: "arrow.clockwise", tint: Design.blue, title: L10n.t("settings.refresh.title", fallback: "配额刷新间隔"), subtitle: L10n.t("settings.refresh.subtitle", fallback: "定时更新已保存账号的剩余配额"), control: refresh),
+            settingRow(icon: "timer", tint: Design.blue, title: L10n.t("settings.refresh.title", fallback: "配额刷新间隔"), subtitle: L10n.t("settings.refresh.subtitle", fallback: "定时刷新当前活跃与在线 SSH 账号的配额，其余备用账号切换后同步"), control: refresh),
             divider(),
-            settingRow(icon: "dollarsign.circle", tint: Design.blue, title: L10n.t("settings.pricing_sync.title", fallback: "自动更新价格基准"), subtitle: L10n.t("settings.pricing_sync.subtitle", fallback: "自动同步公开模型费率，每 24 小时检查一次"), control: pricingControlGroup)
+            settingRow(icon: "tag", tint: Design.blue, title: L10n.t("settings.pricing_sync.title", fallback: "自动更新价格基准"), subtitle: L10n.t("settings.pricing_sync.subtitle", fallback: "自动同步公开模型费率，每 24 小时检查一次"), control: pricingControlGroup)
         ], spacing: 12)
         for child in dataSyncGroup.arrangedSubviews { fillWidth(child, in: dataSyncGroup) }
 
@@ -191,7 +191,7 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
         let systemAndStorageGroup = vertical([
             settingRow(icon: "power", tint: .systemGray, title: L10n.t("settings.login.title", fallback: "登录时启动"), subtitle: L10n.t("settings.login.subtitle", fallback: "登录 macOS 时自动在菜单栏驻留"), control: login),
             divider(),
-            settingRow(icon: "arrow.up.forward.app", tint: .systemTeal, title: L10n.t("settings.launch_antigravity.title", fallback: "启动时自动打开 Antigravity"), subtitle: L10n.t("settings.launch_antigravity.subtitle", fallback: "打开 GravityBox 时静默驻留菜单栏，并自动拉起带调试端口的 Antigravity"), control: launchAntigravityOnStartSwitch),
+            settingRow(icon: "macwindow.badge.plus", tint: .systemTeal, title: L10n.t("settings.launch_antigravity.title", fallback: "启动时自动打开 Antigravity"), subtitle: L10n.t("settings.launch_antigravity.subtitle", fallback: "打开 GravityBox 时静默驻留菜单栏，并自动拉起带调试端口的 Antigravity"), control: launchAntigravityOnStartSwitch),
             divider(),
             storageRow
         ], spacing: 12)
@@ -461,7 +461,7 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
             lastInspectedProxyState = nil
             proxySubtitleLabel.stringValue = L10n.t(
                 "settings.proxy.status.disabled",
-                fallback: "为 Antigravity 注入代理环境，无需开启代理工具 TUN 模式"
+                fallback: "为 Antigravity 与 GravityBox 共享 HTTP/HTTPS 代理，无需开启 TUN 模式"
             )
             proxySubtitleLabel.textColor = Design.secondary
             proxyRelaunchBtn.isHidden = true
@@ -535,7 +535,7 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
             lastInspectedProxyState = nil
             proxySubtitleLabel.stringValue = L10n.t(
                 "settings.proxy.status.system_pac",
-                fallback: "当前系统代理为 PAC 模式，Go 后端暂不支持直接解析 PAC；建议改用「手动指定」填入代理工具的本地 HTTP 端口"
+                fallback: "当前系统代理为 PAC 模式，暂不支持直接解析；建议改用「手动指定」填入本地 HTTP 端口"
             )
             proxySubtitleLabel.textColor = accessibleWarningColor()
             proxyRelaunchBtn.isHidden = true

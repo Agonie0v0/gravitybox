@@ -669,7 +669,7 @@ func compactMetric(_ title: String, value: NSTextField, detail: NSTextField, act
         case .tokens: return ("sparkles", Design.blue)
         case .cost: return ("dollarsign.circle.fill", .systemTeal)
         case .requests: return ("paperplane.fill", .systemIndigo)
-        case .general: return ("chart.bar.fill", Design.blue)
+        case .general: return ("chart.xyaxis.line", Design.blue)
         }
     }()
     let badgeBox = NSBox()

@@ -103,7 +103,7 @@ final class UsageEventCard: NSView {
     private let outputTitleLabel = text(L10n.t("usage_event.output"), size: 11, color: Design.secondary)
     private let cacheReadTitleLabel = text(L10n.t("usage_event.cache_read"), size: 11, color: Design.secondary)
     private let cacheWriteTitleLabel = text(L10n.t("usage_event.cache_write"), size: 11, color: Design.secondary)
-    let modelIcon = symbol("sparkles", size: 16, color: Design.secondary)
+    let modelIcon = symbol("hexagon", size: 16, color: Design.secondary)
     private let card = DesignCardBox()
     private var hoverTracking: NSTrackingArea?
     private let hoverMotion = DesignMotion()
@@ -277,7 +277,7 @@ final class UsageEventCard: NSView {
         timeLabel.stringValue = stamp > 0 ? Self.dateFormat.string(from:Date(timeIntervalSince1970:stamp)) : L10n.t("usage_event.time_unknown")
         inputLabel.stringValue = InterfaceText.formatInteger(intVal(event, "input_tokens")); outputLabel.stringValue = InterfaceText.formatInteger(intVal(event, "output_tokens")); cacheLabel.stringValue = InterfaceText.formatInteger(intVal(event, "cached_tokens")); cacheWriteLabel.stringValue = InterfaceText.formatInteger(intVal(event, "cache_write_tokens"))
         if let brand = ModelIcons.brands(for:model).first,let image = ModelIcons.image(brand) { modelIcon.image = image; modelIcon.contentTintColor = ModelIcons.tintColor(for: image) }
-        else { modelIcon.image = NSImage(systemSymbolName:"sparkles",accessibilityDescription:nil); modelIcon.contentTintColor = Design.secondary }
+        else { modelIcon.image = NSImage(systemSymbolName:"hexagon",accessibilityDescription:nil); modelIcon.contentTintColor = Design.secondary }
 
         let rawEnvKind = ((event["environment_kind"] as? String) ?? (event["environmentKind"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let rawEnvId = ((event["environment_id"] as? String) ?? (event["environmentId"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)

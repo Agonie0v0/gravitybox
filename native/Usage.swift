@@ -571,7 +571,7 @@ final class UsagePage: NSObject {
         contextBarRow.heightAnchor.constraint(equalToConstant: 28).isActive = true
         contextBarRow.isHidden = true
 
-        let histIcon = symbol("info.circle.fill", size: 13, color: Design.blue)
+        let histIcon = symbol("clock.badge.checkmark", size: 13, color: Design.blue)
         histIcon.setContentHuggingPriority(.required, for: .horizontal)
         historicalEnvNoticeLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         historicalEnvNoticeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -1522,7 +1522,7 @@ final class UsagePage: NSObject {
         modelsCountLabel.stringValue = modelRows.isEmpty ? "" : L10n.t("usage.models.count", ["count": modelRows.count])
 
         guard !modelRows.isEmpty else {
-            let empty = vertical([symbol("chart.bar", size: 22, color: Design.secondary), text(L10n.t("usage.models.empty"), size: 13, color: Design.secondary)], spacing: 10)
+            let empty = vertical([symbol("chart.bar.doc.horizontal", size: 22, color: Design.secondary), text(L10n.t("usage.models.empty"), size: 13, color: Design.secondary)], spacing: 10)
             empty.alignment = .centerX; empty.heightAnchor.constraint(greaterThanOrEqualToConstant: 90).isActive = true
             modelsBreakdownStack.addArrangedSubview(empty); fillWidth(empty, in: modelsBreakdownStack)
             return

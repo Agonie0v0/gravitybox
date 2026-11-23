@@ -954,7 +954,7 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
             return badgeTint.withAlphaComponent(isDark ? 0.34 : 0.20)
         }
         if synced {
-            statusIconView.image = NSImage(systemSymbolName: "checkmark.seal.fill", accessibilityDescription: nil)
+            statusIconView.image = NSImage(systemSymbolName: "dollarsign.arrow.circlepath", accessibilityDescription: nil)
             statusIconView.contentTintColor = .systemGreen
             titleLabel.stringValue = healedCount > 0 ? L10n.t("pricing_sheet.synced_healed") : L10n.t("pricing_sheet.synced")
             if healedCount > 0 {
@@ -1009,7 +1009,7 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
             bannerBox.enablesHoverHighlight = false
             bannerBox.contentViewMargins = .zero
 
-            let bannerIcon = symbol("sparkles", size: 12.5, color: accessibleWarningColor())
+            let bannerIcon = symbol("tag.slash", size: 12.5, color: accessibleWarningColor())
             bannerIcon.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
                 bannerIcon.widthAnchor.constraint(equalToConstant: 14),

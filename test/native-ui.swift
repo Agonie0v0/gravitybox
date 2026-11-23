@@ -171,7 +171,7 @@ import Cocoa
             case "maintenance_scan":
                 let reqRetention = intVal(payload, "retentionDays", fallback: 7)
                 var scanEntries: [[String: Any]] = [
-                    ["name": "Cache", "title": "网络与静态资源缓存", "subtitle": "界面静态资源与临时网络响应数据", "icon": "internaldrive", "category": "safe", "defaultSelected": true, "bytes": 524_288_000, "fileCount": 1820, "exists": true, "clearable": true],
+                    ["name": "Cache", "title": "网络与静态资源缓存", "subtitle": "界面静态资源与临时网络响应数据", "icon": "tray.full", "category": "safe", "defaultSelected": true, "bytes": 524_288_000, "fileCount": 1820, "exists": true, "clearable": true],
                     ["name": "AgentBrowserCache", "title": "浏览器沙箱加速缓存", "subtitle": "Browser 沙箱的网页与编译缓存（保留站点登录与 Cookie）", "icon": "globe", "category": "safe", "defaultSelected": true, "bytes": 324_009_984, "fileCount": 1410, "exists": true, "clearable": true],
                     ["name": "PartitionsCache", "title": "内嵌视图子分区缓存", "subtitle": "内嵌浏览器与隔离分区的静态资源及编译缓存", "icon": "square.split.2x2", "category": "safe", "defaultSelected": true, "bytes": 96_468_992, "fileCount": 420, "exists": true, "clearable": true],
                     ["name": "OrphanAgentData", "title": "已删对话残留与临时文件", "subtitle": "含 6 个已删主对话遗留的孤儿记录、崩溃日志与临时媒体", "icon": "trash.slash", "category": "safe", "defaultSelected": true, "bytes": 48_234_496, "fileCount": 192, "exists": true, "clearable": true]
@@ -2659,7 +2659,7 @@ import Cocoa
             // Future unknown multi-window standalone pool (5h + weekly + daily) & ModelIcons graceful fallback
             check(ModelIcons.brands(for: "Nova Models").isEmpty && ModelIcons.image("nova") == nil && ModelIcons.fallbackIcon() != nil, "Unknown future pool degrades cleanly to fallback icon without mislabeling or crashing")
             let fallbackHeader = MenuQuotaHelpers.groupHeader("Nova Models", brands: ["nova"], fontSize: 11.5, iconSize: 13)
-            check((fallbackHeader as? NSStackView)?.arrangedSubviews.contains(where: { $0 is NSImageView }) == true, "MenuQuotaHelpers.groupHeader renders fallback sparkles icon for unknown future pool")
+            check((fallbackHeader as? NSStackView)?.arrangedSubviews.contains(where: { $0 is NSImageView }) == true, "MenuQuotaHelpers.groupHeader renders fallback model icon for unknown future pool")
             let futureIso5h = ISO8601DateFormatter().string(from: Date().addingTimeInterval(3 * 3600 + 25 * 60))
             let futureIsoDaily = ISO8601DateFormatter().string(from: Date().addingTimeInterval(11 * 3600 + 10 * 60))
             let futureIsoWeekly = ISO8601DateFormatter().string(from: Date().addingTimeInterval(4 * 24 * 3600 + 2 * 3600))

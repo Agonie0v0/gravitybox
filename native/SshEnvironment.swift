@@ -1084,7 +1084,7 @@ enum SshEnvironmentVisuals {
     static func leadingIcon(for kind: EnvironmentContextPill.Item.Kind, pointSize: CGFloat = 12) -> NSImage? {
         switch kind {
         case .all:
-            let img = NSImage(systemSymbolName: "globe", accessibilityDescription: nil)?
+            let img = NSImage(systemSymbolName: "square.3.layers.3d", accessibilityDescription: nil)?
                 .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium))
             img?.isTemplate = true
             return img
@@ -2690,7 +2690,7 @@ final class EnvironmentPickerControl: NSView {
         switch kind {
         case .all:
             cell.leadingImage = nil
-            cell.leadingSymbolName = "globe"
+            cell.leadingSymbolName = "square.3.layers.3d"
         case .local:
             cell.leadingImage = nil
             cell.leadingSymbolName = "laptopcomputer"

@@ -150,7 +150,7 @@ extension CachePage {
         let defaultIcon: String
         switch rawId {
         case "conversations": defaultIcon = "bubble.left.and.bubble.right"
-        case "gravitybox": defaultIcon = "lock.shield"
+        case "gravitybox": defaultIcon = "person.text.rectangle"
         default: defaultIcon = "folder.badge.gearshape"
         }
         let icon = !rawIcon.isEmpty ? rawIcon : defaultIcon
@@ -212,7 +212,7 @@ extension CachePage {
 
         switch kind {
         case .runtime:
-            headerIcon = "sparkles"
+            headerIcon = "memorychip"
             headerTint = Design.blue
             headerTitle = L10n.t("maintenance.popover.runtime.title")
             headerSubtitle = L10n.t("maintenance.popover.runtime.subtitle")
@@ -273,7 +273,7 @@ extension CachePage {
         case .history:
             let amberTint = Design.color(0xD97706, 0xFBBF24)
             let winTitle = localizedRetentionWindowTitle()
-            headerIcon = "clock.arrow.circlepath"
+            headerIcon = "list.bullet.rectangle.portrait"
             headerTint = amberTint
             headerTitle = L10n.t("maintenance.popover.history.title", ["window": winTitle])
             headerSubtitle = L10n.t("maintenance.popover.history.subtitle")

@@ -88,7 +88,7 @@ final class AccountsPage: NSObject {
 
     let autoSwitchToggle = DesignSwitch()
     let autoSwitchBadgeBox = NSBox()
-    let autoSwitchBadgeIcon = symbol("arrow.triangle.2.circlepath", size: 13.5, color: Design.blue)
+    let autoSwitchBadgeIcon = symbol("arrow.left.arrow.right", size: 13.5, color: Design.blue)
     let autoSwitchStatusBadge = pillBadge(L10n.t("accounts.smart_switch.disabled"), color: Design.inactivePill)
     let policySubtitleLabel = text("", size: 11, color: Design.secondary)
     let configButton = button(L10n.t("accounts.smart_switch.config_btn"), target: nil, action: #selector(showPolicySettings))
@@ -311,7 +311,7 @@ final class AccountsPage: NSObject {
         root.spacing = Design.Spacing.page
 
         // B12: 待生效横幅
-        let pendingIcon = symbol("arrow.uturn.backward.circle.fill", size: 16, color: Design.blue)
+        let pendingIcon = symbol("person.crop.circle.badge.exclamationmark", size: 16, color: Design.blue)
         rollbackButton.controlSize = .small
         rollbackButton.bezelColor = .controlAccentColor
         rollbackButton.action = #selector(rollbackSwitch)

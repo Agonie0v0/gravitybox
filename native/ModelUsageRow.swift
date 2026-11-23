@@ -22,7 +22,7 @@ final class ModelUsageRow: NSView {
         costLabel.font = .monospacedDigitSystemFont(ofSize: isUnpriced ? 12.5 : 14, weight: .semibold)
         costLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        let icon = symbol("sparkles", size: 15, color: Design.secondary)
+        let icon = symbol("hexagon", size: 15, color: Design.secondary)
         if let brand = ModelIcons.brands(for: name).first, let image = ModelIcons.image(brand) {
             icon.image = image
             icon.contentTintColor = ModelIcons.tintColor(for: image)

@@ -1138,7 +1138,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
                     iv.imageScaling = .scaleProportionallyUpOrDown
                     return iv
                 } else {
-                    return symbol("sparkles", size: 16, color: Design.blue)
+                    return symbol("app.fill", size: 16, color: Design.blue)
                 }
             }()
             brandIconView.translatesAutoresizingMaskIntoConstraints = false
@@ -1159,7 +1159,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
 
             let installBtn = SidebarLaunchButton(
                 title: L10n.t("sidebar.install_update", fallback: "安装更新"),
-                symbolName: "arrow.down.circle",
+                symbolName: "arrow.down.app",
                 isUpdatePrompt: true,
                 target: self,
                 action: #selector(installUpdateFromSidebar)

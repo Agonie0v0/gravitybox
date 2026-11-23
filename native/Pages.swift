@@ -1700,7 +1700,7 @@ final class DashboardPage: NSObject {
                     title: group.displayName,
                     percentage: nil,
                     resetText: "",
-                    icon: "sparkles",
+                    icon: "hexagon",
                     placeholder: ph,
                     stale: group.quotaState == "stale"
                 ))
@@ -1919,7 +1919,7 @@ final class DashboardPage: NSObject {
                 QuotaBarSpec(title: L10n.t("quota.bar.gemini_weekly"), percentage: nil, resetText: "", icon: "calendar", placeholder: failedTxt, stale: false)
             ],
             [
-                QuotaBarSpec(title: L10n.t("quota.bar.claude_5h"), percentage: nil, resetText: "", icon: "cpu", placeholder: failedTxt, stale: false),
+                QuotaBarSpec(title: L10n.t("quota.bar.claude_5h"), percentage: nil, resetText: "", icon: "hourglass", placeholder: failedTxt, stale: false),
                 QuotaBarSpec(title: L10n.t("quota.bar.claude_weekly"), percentage: nil, resetText: "", icon: "calendar", placeholder: failedTxt, stale: false)
             ]
         ], into: coreQuotaStack, compact: true)

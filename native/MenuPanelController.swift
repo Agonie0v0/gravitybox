@@ -36,7 +36,7 @@ final class MenuPanelController: NSViewController {
     let periodSelector: MenuSegmentedTabsView
     private var lastKnownUsageEnvironments: [[String: Any]] = []
     private var lastKnownUsageBreakdown: [String: Any]? = nil
-    let usageScopeLabel = text(L10n.t("menu_panel.usage_scope_default", fallback: "本机历史用量 · 非按账号归属"), size: 11, color: Design.secondary, wrap: true)
+    let usageScopeLabel = text(L10n.t("menu_panel.usage_scope_default", fallback: "全部环境用量汇总"), size: 11, color: Design.secondary, wrap: true)
     let tokensTile: MenuMetricTileView
     let requestsTile: MenuMetricTileView
     let costTile: MenuMetricTileView
@@ -301,7 +301,7 @@ final class MenuPanelController: NSViewController {
                 iv.setAccessibilityElement(false)
                 return iv
             }
-            let fallback = symbol("sparkles", size: 13.5, color: Design.blue)
+            let fallback = symbol("app.fill", size: 13.5, color: Design.blue)
             fallback.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
             return fallback
         }()
@@ -1751,7 +1751,7 @@ final class MenuPanelController: NSViewController {
         guard let account = active else {
             let liveUnsaved = !app.statusValue.liveAccountEmail.isEmpty
             quotaAccountNameLabel.stringValue = !app.reachable ? L10n.t("menu_panel.usage.waiting_service", fallback: "正在等待本机服务…") : (liveUnsaved ? L10n.t("menu_panel.quota.unsaved_live", fallback: "运行中账号尚未保存") : L10n.t("menu_panel.quota.no_saved", fallback: "尚未保存账号"))
-            quotaEmailLabel.stringValue = liveUnsaved ? L10n.t("menu_panel.quota.detected_unsaved", ["email": app.statusValue.liveAccountEmail], fallback: "检测到 \(app.statusValue.liveAccountEmail)，请前往账号页保存") : L10n.t("menu_panel.quota.empty_hint", fallback: "点击下方按钮在主界面保存当前账号或登录备用账号")
+            quotaEmailLabel.stringValue = liveUnsaved ? L10n.t("menu_panel.quota.detected_unsaved", ["email": app.statusValue.liveAccountEmail], fallback: "检测到 \(app.statusValue.liveAccountEmail)，请前往账号页保存") : L10n.t("menu_panel.quota.empty_hint", fallback: "点击下方按钮前往账号页，保存当前账号或从 JSON 导入")
             quotaHeaderEmail = app.statusValue.liveAccountEmail
             quotaTierBadge.isHidden = true
             quotaStatusBadge.isHidden = true

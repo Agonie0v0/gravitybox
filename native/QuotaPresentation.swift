@@ -299,10 +299,10 @@ enum QuotaPresentation {
         }
 
         func iconName(for window: GroupWindow) -> String {
-            if isStandalone { return "sparkles" }
+            if isStandalone { return "hexagon" }
             if window.period == "weekly" || window.id == "weekly" { return "calendar" }
             if window.period == "daily" || window.id == "daily" { return "clock" }
-            if key == "claude" { return "cpu" }
+            if key == "claude" { return "hourglass" }
             return "bolt.fill"
         }
     }

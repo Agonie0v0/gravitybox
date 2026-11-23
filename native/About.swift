@@ -155,7 +155,7 @@ final class AboutPage: NSObject {
         dataRight.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let specsInner = vertical([
-            specRow(icon: "cpu", tint: .systemIndigo, key: L10n.t("about.target_app", fallback: "目标应用"), right: versionSpecLabel),
+            specRow(icon: "macwindow", tint: .systemIndigo, key: L10n.t("about.target_app", fallback: "目标应用"), right: versionSpecLabel),
             divider(),
             specRow(icon: "folder", tint: .systemOrange, key: L10n.t("about.data_dir", fallback: "GravityBox 数据目录"), right: dataRight)
         ], spacing: 11)
@@ -315,7 +315,7 @@ final class AboutPage: NSObject {
             releaseNotesBtn.isHidden = true
         case .updateAvailable(let release):
             statusLine.isHidden = false
-            updateStatusIcon.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
+            updateStatusIcon.image = NSImage(systemSymbolName: "arrow.up.circle.fill", accessibilityDescription: nil)
             updateStatusIcon.contentTintColor = Design.blue
             updateStatusLabel.textColor = .labelColor
             updateStatusLabel.stringValue = L10n.t("about.status.available", ["tag": release.tagName], fallback: "发现新版本 \(release.tagName)")
@@ -346,7 +346,7 @@ final class AboutPage: NSObject {
             releaseNotesBtn.isHidden = false
         case .readyToInstall(let release, _):
             statusLine.isHidden = false
-            updateStatusIcon.image = NSImage(systemSymbolName: "checkmark.shield.fill", accessibilityDescription: nil)
+            updateStatusIcon.image = NSImage(systemSymbolName: "checkmark.diamond.fill", accessibilityDescription: nil)
             updateStatusIcon.contentTintColor = .systemGreen
             updateStatusLabel.textColor = .labelColor
             updateStatusLabel.stringValue = L10n.t("about.status.ready", ["tag": release.tagName], fallback: "\(release.tagName) 更新包已就绪")
@@ -360,7 +360,7 @@ final class AboutPage: NSObject {
             releaseNotesBtn.isHidden = false
         case .installing(let release):
             statusLine.isHidden = false
-            updateStatusIcon.image = NSImage(systemSymbolName: "gearshape.2.fill", accessibilityDescription: nil)
+            updateStatusIcon.image = NSImage(systemSymbolName: "wrench.and.screwdriver.fill", accessibilityDescription: nil)
             updateStatusIcon.contentTintColor = Design.blue
             updateStatusLabel.textColor = .labelColor
             updateStatusLabel.stringValue = L10n.t("about.status.installing", ["tag": release.tagName], fallback: "正在准备安装 \(release.tagName)…")

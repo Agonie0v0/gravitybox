@@ -213,7 +213,7 @@ final class AccountPolicySheet: NSObject {
         saveButton.keyEquivalent = "\r"
         errorLabel.isHidden = true
 
-        let headerBadge = iconBadge("arrow.triangle.2.circlepath", tint: Design.blue, size: 32)
+        let headerBadge = iconBadge("arrow.left.arrow.right", tint: Design.blue, size: 32)
         let titleLabel = text(L10n.t("policy.title", fallback: "备用推荐配置"), size: 16, weight: .semibold, color: .labelColor)
         self.titleLabel = titleLabel
         let heading = horizontal([headerBadge, titleLabel, flexibleSpace()], spacing: 10)

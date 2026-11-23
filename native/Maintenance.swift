@@ -28,22 +28,22 @@ final class CachePage: NSObject, NSPopoverDelegate {
     }
 
     static let catalogSpecByName: [String: (prefix: String, icon: String)] = [
-        "Cache": ("maintenance.catalog.cache", "internaldrive"),
-        "Code Cache": ("maintenance.catalog.code_cache", "cpu"),
-        "GPUCache": ("maintenance.catalog.gpu_cache", "sparkles.tv"),
+        "Cache": ("maintenance.catalog.cache", "tray.full"),
+        "Code Cache": ("maintenance.catalog.code_cache", "chevron.left.forwardslash.chevron.right"),
+        "GPUCache": ("maintenance.catalog.gpu_cache", "display"),
         "DawnCache": ("maintenance.catalog.dawn_cache", "cube.transparent"),
         "DawnWebGPUCache": ("maintenance.catalog.dawn_webgpu_cache", "cube"),
         "DawnGraphiteCache": ("maintenance.catalog.dawn_graphite_cache", "paintbrush.pointed"),
         "GraphiteDawnCache": ("maintenance.catalog.graphite_dawn_cache", "wand.and.rays"),
         "ShaderCache": ("maintenance.catalog.shader_cache", "circle.hexagongrid"),
-        "CachedData": ("maintenance.catalog.cached_data", "memorychip"),
+        "CachedData": ("maintenance.catalog.cached_data", "doc.zipper"),
         "CachedExtensionVSIXs": ("maintenance.catalog.cached_vsix", "puzzlepiece.extension"),
         "CachedProfilesData": ("maintenance.catalog.cached_profiles", "person.crop.square"),
         "Crashpad": ("maintenance.catalog.crashpad", "waveform.path.ecg"),
         "logs": ("maintenance.catalog.logs", "doc.text"),
         "blob_storage": ("maintenance.catalog.blob_storage", "archivebox"),
         "PartitionsCache": ("maintenance.catalog.partitions_cache", "square.split.2x2"),
-        "AgentBrowserCache": ("maintenance.catalog.agent_browser_cache", "globe"),
+        "AgentBrowserCache": ("maintenance.catalog.agent_browser_cache", "safari"),
         "OrphanAgentData": ("maintenance.catalog.orphan_agent_data", "trash.slash"),
         "AgentTaskStepLogs": ("maintenance.catalog.task_step_logs", "terminal"),
         "AgentVerboseTranscripts": ("maintenance.catalog.verbose_transcripts", "doc.on.doc"),
@@ -51,9 +51,9 @@ final class CachePage: NSObject, NSPopoverDelegate {
         "Service Worker": ("maintenance.catalog.service_worker", "gearshape.2"),
         "Session Storage": ("maintenance.catalog.session_storage", "rectangle.stack"),
         "WebStorage": ("maintenance.catalog.web_storage", "externaldrive"),
-        "Local Storage": ("maintenance.catalog.local_storage", "internaldrive"),
+        "Local Storage": ("maintenance.catalog.local_storage", "cylinder"),
         "Cookies": ("maintenance.catalog.cookies", "key"),
-        "Network Persistent State": ("maintenance.catalog.network_state", "network")
+        "Network Persistent State": ("maintenance.catalog.network_state", "antenna.radiowaves.left.and.right")
     ]
 
     unowned let app: Assistant
@@ -315,7 +315,7 @@ final class CachePage: NSObject, NSPopoverDelegate {
         historySizeLabel.setContentHuggingPriority(.required, for: .horizontal)
         historySizeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        let runtimeIcon = Self.makeIconBadge(symbolName: "sparkles", tint: Design.blue)
+        let runtimeIcon = Self.makeIconBadge(symbolName: "memorychip", tint: Design.blue)
         runtimeTitleLabel.setContentHuggingPriority(.required, for: .horizontal)
         runtimeTitleLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         let runtimeTitleRow = horizontal([runtimeTitleLabel, runtimeInfoButton], spacing: 5)
@@ -332,7 +332,7 @@ final class CachePage: NSObject, NSPopoverDelegate {
         runtimeRow.alignment = .centerY
 
         let amberTint = Design.color(0xD97706, 0xFBBF24)
-        let historyIcon = Self.makeIconBadge(symbolName: "clock.arrow.circlepath", tint: amberTint)
+        let historyIcon = Self.makeIconBadge(symbolName: "list.bullet.rectangle.portrait", tint: amberTint)
         historyTitleLabel.setContentHuggingPriority(.required, for: .horizontal)
         historyTitleLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         retentionPopup.setContentHuggingPriority(.required, for: .horizontal)

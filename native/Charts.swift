@@ -154,7 +154,7 @@ final class QuotaBarView: NSView {
         }
     }
 
-    init(title: String = "", percentage: Int? = nil, resetText: String = "", icon: String = "sparkles", unknownPlaceholder: String? = nil, stale: Bool = false) {
+    init(title: String = "", percentage: Int? = nil, resetText: String = "", icon: String = "hexagon", unknownPlaceholder: String? = nil, stale: Bool = false) {
         self.percentage = max(0, min(100, percentage ?? 0))
         self.percentageKnown = percentage != nil
         self.staleData = stale
@@ -328,7 +328,7 @@ final class QuotaBarView: NSView {
                 iconView.image = icon.isEmpty ? nil : NSImage(systemSymbolName: icon, accessibilityDescription: nil)
                 iconView.isHidden = icon.isEmpty
             }
-            applyModelIcon(fallback: icon ?? "sparkles")
+            applyModelIcon(fallback: icon ?? "hexagon")
         }
         self.percentage = nextPct
         self.percentageKnown = nextKnown
@@ -355,7 +355,7 @@ final class QuotaBarView: NSView {
     }
 }
 
-func quotaBar(title: String = "", percentage: Int? = nil, resetText: String = "", icon: String = "sparkles", unknownPlaceholder: String? = nil, stale: Bool = false) -> QuotaBarView {
+func quotaBar(title: String = "", percentage: Int? = nil, resetText: String = "", icon: String = "hexagon", unknownPlaceholder: String? = nil, stale: Bool = false) -> QuotaBarView {
     QuotaBarView(title: title, percentage: percentage, resetText: resetText, icon: icon, unknownPlaceholder: unknownPlaceholder, stale: stale)
 }
 

@@ -509,7 +509,8 @@ func settingRow(icon: String, tint: NSColor, title: String, badge: NSView? = nil
             imgView.centerYAnchor.constraint(equalTo: iconBox.centerYAnchor)
         ])
     } else {
-        let iconView = symbol(icon.replacingOccurrences(of: ".fill", with: ""), size: 13.5, color: tint)
+        let resolvedIcon = icon.hasSuffix(".fill") ? String(icon.dropLast(5)) : icon
+        let iconView = symbol(resolvedIcon, size: 13.5, color: tint)
         iconView.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13.5, weight: .medium)
         iconBox.addSubview(iconView)
         NSLayoutConstraint.activate([

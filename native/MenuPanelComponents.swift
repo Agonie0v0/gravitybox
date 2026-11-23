@@ -478,7 +478,7 @@ final class MenuMetricTileView: NSView {
         case "cache":
             iconName = "bolt.badge.clock.fill"
         default:
-            iconName = "chart.bar.fill"
+            iconName = "chart.xyaxis.line"
         }
         let iconTint = NSColor(name: nil) { appearance in
             appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
@@ -944,7 +944,7 @@ final class MenuModelUsageItemView: NSView {
     let rawModel: String
     let iconView: NSImageView = {
         let view = NSImageView(
-            image: NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
+            image: NSImage(systemSymbolName: "hexagon", accessibilityDescription: nil)
                 ?? NSImage(systemSymbolName: "square", accessibilityDescription: nil)
                 ?? NSImage()
         )
