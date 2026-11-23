@@ -83,7 +83,7 @@ test('跨时段真实事件累计：历史事件金额永久冻结，不随调�
 
 test('远程价格同步：优雅处理无网络或非法响应，绝不抛错阻断', async t => {
   const temp = await mkdtemp(join(tmpdir(), 'gravitybox-pricing-offline-'));
-  t.after(() => rm(temp, { recursive: true, force: true }));
+  t.after(() => rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const manager = new UsageStatsManager({
     stateDir: temp,
     geminiDir: join(temp, 'gemini'),
@@ -113,7 +113,7 @@ test('远程价格同步：请求头报告当前构建版本，测试缓存与�
     assert.equal(capturedUserAgent, `GravityBox/${version}`);
   } finally {
     await new Promise(resolve => server.close(resolve));
-    await rm(temp, { recursive: true, force: true });
+    await rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -163,7 +163,7 @@ test('多源容灾：主源失败时自动无感故障切换至备用源，并�
     assert.ok(status.modelCount > 0);
   } finally {
     await new Promise(resolve => mockServer.close(resolve));
-    await rm(temp, { recursive: true, force: true });
+    await rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -185,7 +185,7 @@ test('安全防投毒校验：单价超过 $500/MTok 时严密拦截', async () 
     }),
     /超出合理范围/
   );
-  await rm(temp, { recursive: true, force: true });
+  await rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 test('全自动智能补齐未计价（零按钮、用户无感）：仅补齐未计价历史，已锁定账本绝不动摇', async () => {
@@ -211,7 +211,7 @@ test('全自动智能补齐未计价（零按钮、用户无感）：仅补齐�
   assert.equal(manager.rateLocks[lockedKey].usd, 5.0, '原本正常锁定的记录金额绝不受影响');
   assert.equal(manager.rateLocks[unpricedKey], undefined, '未计价记录旧锁已被释放以允许重新匹配新价');
 
-  await rm(temp, { recursive: true, force: true });
+  await rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 test('Hydrogen 定价、xhigh 后缀匹配与 Antigravity 动态模型过滤（不影响历史计价）', async t => {
@@ -237,7 +237,7 @@ test('Hydrogen 定价、xhigh 后缀匹配与 Antigravity 动态模型过滤（�
   assert.equal(calculateEstimatedUsd(1_000_000, 100_000, 2_000_000, resolvedAfter, 500_000), 1.5 + 0.75 + 0.15 + 0.9375);
 
   const temp = await mkdtemp(join(tmpdir(), 'gravitybox-active-pricing-'));
-  t.after(() => rm(temp, { recursive: true, force: true }));
+  t.after(() => rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const manager = new UsageStatsManager({
     stateDir: temp,
     geminiDir: join(temp, 'gemini'),
@@ -274,7 +274,7 @@ test('Hydrogen 定价、xhigh 后缀匹配与 Antigravity 动态模型过滤（�
 
 test('已下架历史模型从价格基准过滤后，历史 SQLite 用量费用仍准确核算且无未计价告警', async t => {
   const temp = await mkdtemp(join(tmpdir(), 'gravitybox-retired-usage-'));
-  t.after(() => rm(temp, { recursive: true, force: true }));
+  t.after(() => rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const convDir = join(temp, 'antigravity', 'conversations');
   await mkdir(convDir, { recursive: true });
   const dbPath = join(convDir, 'retired-history.db');
@@ -338,7 +338,7 @@ test('Orchestrator 双阶段模型识别与合并计费（Argon / Carbon + 执�
 
   // 3. 端到端 SQLite 扫描 + 合并归类与计费验证
   const temp = await mkdtemp(join(tmpdir(), 'gravitybox-orchestrator-usage-'));
-  t.after(() => rm(temp, { recursive: true, force: true }));
+  t.after(() => rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
   const convDir = join(temp, 'antigravity', 'conversations');
   await mkdir(convDir, { recursive: true });
   const dbPath = join(convDir, 'orchestrator-session.db');
