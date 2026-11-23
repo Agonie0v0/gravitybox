@@ -1567,6 +1567,89 @@ test('P1-12 & P1-13: revalueLedger 保护缺 cacheWrite 合法锁/强制 environ
   });
 });
 
+test('sqlite-worker 修复: closeSqliteDatabase 抗 ROLLBACK 异常防句柄泄漏，createSqlBlobChunkReader 单次物化中等 BLOB 且不越界超大 BLOB', async () => {
+  const { closeSqliteDatabase, createSqlBlobChunkReader } = await import('../dist/sqlite-worker.js');
+
+  // 1. ROLLBACK 抛错时仍必须执行 close()，且 close() 自身抛错也不向外泄漏异常
+  let closedCount = 0;
+  closeSqliteDatabase({
+    exec() { throw new Error('cannot rollback - no transaction is active'); },
+    close() { closedCount += 1; },
+  });
+  assert.equal(closedCount, 1, 'ROLLBACK 抛错后仍必须调用 db.close()');
+
+  assert.doesNotThrow(() => {
+    closeSqliteDatabase({
+      exec() { throw new Error('rollback failed'); },
+      close() { throw new Error('close failed'); },
+    });
+    closeSqliteDatabase(undefined);
+  });
+
+  // 2. <=64MB BLOB：前 3 次走 substr，第 4 次起单次物化并零拷贝切片
+  const payload = Uint8Array.from({ length: 64 }, (_, i) => i);
+  let substrCalls = 0;
+  let fullCalls = 0;
+  const reader = createSqlBlobChunkReader(
+    payload.byteLength,
+    7,
+    () => ({
+      get(start1Based, length, key) {
+        assert.equal(key, 7);
+        substrCalls += 1;
+        return { chunk: payload.slice(start1Based - 1, start1Based - 1 + length) };
+      },
+    }),
+    () => ({
+      get(key) {
+        assert.equal(key, 7);
+        fullCalls += 1;
+        return { data: payload };
+      },
+    })
+  );
+
+  assert.deepEqual([...reader(0, 4)], [0, 1, 2, 3]);
+  assert.deepEqual([...reader(4, 4)], [4, 5, 6, 7]);
+  assert.deepEqual([...reader(8, 4)], [8, 9, 10, 11]);
+  assert.equal(substrCalls, 3);
+  assert.equal(fullCalls, 0);
+
+  // 第 4、5 次读取应触发且仅触发 1 次全量物化，并用 subarray 返回切片
+  const slice4 = reader(12, 4);
+  const slice5 = reader(16, 4);
+  assert.deepEqual([...slice4], [12, 13, 14, 15]);
+  assert.deepEqual([...slice5], [16, 17, 18, 19]);
+  assert.equal(substrCalls, 3);
+  assert.equal(fullCalls, 1);
+
+  // 3. >64MB 超大 BLOB：即使超过 3 次调用也绝不全量物化
+  let hugeSubstrCalls = 0;
+  let hugeFullCalls = 0;
+  const hugeReader = createSqlBlobChunkReader(
+    65 * 1024 * 1024,
+    99,
+    () => ({
+      get(start1Based, length) {
+        hugeSubstrCalls += 1;
+        return { chunk: payload.slice(start1Based - 1, start1Based - 1 + length) };
+      },
+    }),
+    () => ({
+      get() {
+        hugeFullCalls += 1;
+        return { data: payload };
+      },
+    })
+  );
+  for (let i = 0; i < 5; i += 1) {
+    assert.deepEqual([...hugeReader(i, 2)], [i, i + 1]);
+  }
+  assert.equal(hugeSubstrCalls, 5);
+  assert.equal(hugeFullCalls, 0);
+});
+
+
 
 
 

@@ -5398,10 +5398,43 @@ import Cocoa
             check(prefs.proxySubtitleLabel.stringValue.contains("Shell") && prefs.proxySubtitleLabel.stringValue.contains("9999"), "Active + overriddenByShell must explain shell override")
 
             // Switch to manual mode (empty field -> shows manual input container without snapping back)
-            prefs.proxyModePopup.selectItem(at: 2)
-            prefs.proxyModeChanged()
-            check(!prefs.proxyManualContainer.isHidden, "Selecting manual mode must reveal proxyManualContainer")
-            check((prefs.proxyModePopup.selectedItem?.representedObject as? String) == "manual", "proxyModePopup must stay on manual while entering URL")
+            autoreleasepool {
+                let prefsHostWin = makeHeadlessHostWindow(width: 780, height: 640)
+                prefsHostWin.contentView = prefs.view
+                // Simulate initial window layout while still in non-manual (system) mode (proxyManualContainer detached & unlaid-out)
+                prefs.view.layoutSubtreeIfNeeded()
+                check(prefs.proxyManualContainer.isHidden, "proxyManualContainer must be hidden before first manual reveal")
+
+                prefs.proxyModePopup.selectItem(at: 2)
+                prefs.proxyModeChanged()
+                check(!prefs.proxyManualContainer.isHidden, "Selecting manual mode must reveal proxyManualContainer")
+                check((prefs.proxyModePopup.selectedItem?.representedObject as? String) == "manual", "proxyModePopup must stay on manual while entering URL")
+                let manualPopupConstraintW = prefs.proxyModePopup.constraints.first(where: { $0.identifier == "design-control-width" })?.constant ?? 0
+                let expectedManualPopupW = Design.fittedPopUpWidth(prefs.proxyModePopup)
+                check(abs(manualPopupConstraintW - expectedManualPopupW) < 0.5 && manualPopupConstraintW > offProxyWidth + 12, "Selecting manual mode must immediately sync proxyModePopup width constraint (got \(manualPopupConstraintW), expected \(expectedManualPopupW))")
+                check(prefs.proxyManualField.frame.width > 200 && prefs.proxyManualField.frame.height >= 28, "First reveal of manual proxy input must synchronously lay out non-zero proxyManualField frame before focus (got \(prefs.proxyManualField.frame))")
+                if let textCell = prefs.proxyManualField.cell as? DesignTextCell {
+                    let bounds = prefs.proxyManualField.bounds
+                    let drawRect = textCell.drawingRect(forBounds: bounds)
+                    let titleRect = textCell.titleRect(forBounds: bounds)
+                    check(abs(drawRect.minX - 6.0) < 0.01 && abs(drawRect.width - (bounds.width - 12.0)) < 0.01 && drawRect.minY >= 5.0 && abs(drawRect.midY - bounds.midY) < 1.0, "DesignTextCell.drawingRect must inset horizontally by 6pt once and center vertically without double-insetting (got \(drawRect) in bounds \(bounds))")
+                    check(drawRect == titleRect, "DesignTextCell.titleRect must match drawingRect (got \(titleRect) vs \(drawRect))")
+                } else {
+                    check(false, "proxyManualField must use DesignTextCell")
+                }
+                _ = prefsHostWin.makeFirstResponder(prefs.proxyManualField)
+                if let editor = prefs.proxyManualField.currentEditor() {
+                    let editorRectInField = prefs.proxyManualField.convert(editor.bounds, from: editor)
+                    check(abs(editorRectInField.minX - 6.0) < 0.5 && abs(editorRectInField.width - (prefs.proxyManualField.bounds.width - 12.0)) < 1.0 && editorRectInField.minY >= 5.0, "Active field editor in proxyManualField must lock to single 6pt inset and centered Y without jumping or double-insetting (got \(editorRectInField), bounds=\(prefs.proxyManualField.bounds))")
+                } else {
+                    check(false, "makeFirstResponder(proxyManualField) must attach active field editor")
+                }
+                _ = prefsHostWin.makeFirstResponder(nil)
+                prefsHostWin.endEditing(for: nil)
+                pump()
+                prefsHostWin.contentView = nil
+                prefsHostWin.orderOut(nil)
+            }
 
             // Invalid manual URL shows error and keeps manual container visible
             prefs.proxyManualField.stringValue = "socks5://127.0.0.1:1080"
@@ -5500,6 +5533,7 @@ import Cocoa
                 "English Preferences must display localized startup launch title and omit removed switch"
             )
             L10n.shared.setLanguage("zh-Hans", notify: false)
+            pump()
         }
 
         // Wave 1-2 SSH 全端适配契约测试（多窗口去重、picker 0/1/2 自适应、总览伴生条、账号占用/只读区/并发刷新、切号共享提示、菜单栏微标/跟随焦点/Tab2跳转）

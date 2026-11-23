@@ -719,6 +719,12 @@ private func inputTextRect(_ rect: NSRect, font: NSFont? = nil) -> NSRect {
     return NSRect(x: rect.minX + 6, y: rect.midY - height / 2, width: max(0, rect.width - 12), height: height)
 }
 final class DesignTextCell: NSTextFieldCell {
+    override func drawingRect(forBounds theRect: NSRect) -> NSRect {
+        inputTextRect(theRect, font: font)
+    }
+    override func titleRect(forBounds theRect: NSRect) -> NSRect {
+        inputTextRect(theRect, font: font)
+    }
     override func draw(withFrame rect: NSRect, in view: NSView) {
         let focused = (view as? NSTextField)?.currentEditor() != nil
         drawInput(rect, focused: focused)
@@ -729,14 +735,14 @@ final class DesignTextCell: NSTextFieldCell {
         let display = stringValue.isEmpty ? (placeholderString ?? "") : stringValue
         guard !display.isEmpty else { return }
         let color: NSColor = stringValue.isEmpty ? Design.secondary : (isEnabled ? NSColor.labelColor : Design.secondary)
-        (display as NSString).draw(in: inputTextRect(rect, font: font), withAttributes: [
+        (display as NSString).draw(in: drawingRect(forBounds: rect), withAttributes: [
             .font: font ?? .systemFont(ofSize: 12),
             .foregroundColor: color,
             .paragraphStyle: style
         ])
     }
     override func edit(withFrame rect: NSRect, in view: NSView, editor: NSText, delegate: Any?, event: NSEvent?) {
-        let textRect = inputTextRect(rect, font: font)
+        let textRect = drawingRect(forBounds: rect)
         editor.alignment = alignment
         if let tv = editor as? NSTextView {
             tv.drawsBackground = false
@@ -746,7 +752,7 @@ final class DesignTextCell: NSTextFieldCell {
         super.edit(withFrame: textRect, in: view, editor: editor, delegate: delegate, event: event)
     }
     override func select(withFrame rect: NSRect, in view: NSView, editor: NSText, delegate: Any?, start: Int, length: Int) {
-        let textRect = inputTextRect(rect, font: font)
+        let textRect = drawingRect(forBounds: rect)
         editor.alignment = alignment
         if let tv = editor as? NSTextView {
             tv.drawsBackground = false

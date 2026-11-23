@@ -737,6 +737,9 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
     }
 
     @objc func proxyModeChanged() {
+        if proxyModePopup.cell is DesignPopUpCell {
+            Design.syncPopUpWidth(proxyModePopup)
+        }
         guard let rawMode = proxyModePopup.selectedItem?.representedObject as? String,
               let mode = AntigravityProxyMode(rawValue: rawMode) else { return }
         switch mode {
@@ -749,19 +752,32 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
                 showError(error)
             }
             refreshProxyRowState(force: true)
+            if view?.window != nil {
+                view.layoutSubtreeIfNeeded()
+            }
         case .manual:
             let candidate = proxyManualField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if candidate.isEmpty {
                 editingManualProxyMode = true
                 proxyManualValidationError = nil
                 refreshProxyRowState(force: true)
-                #if NATIVE_UI_TEST
-                if !Assistant.headlessOffscreenUI {
-                    view.window?.makeFirstResponder(proxyManualField)
+                if view?.window != nil {
+                    view.layoutSubtreeIfNeeded()
                 }
-                #else
-                view.window?.makeFirstResponder(proxyManualField)
-                #endif
+                DispatchQueue.main.async { [weak self] in
+                    guard let self,
+                          self.editingManualProxyMode,
+                          !self.proxyManualContainer.isHidden,
+                          let window = self.view?.window,
+                          self.proxyManualField.window === window else { return }
+                    #if NATIVE_UI_TEST
+                    if !Assistant.headlessOffscreenUI {
+                        window.makeFirstResponder(self.proxyManualField)
+                    }
+                    #else
+                    window.makeFirstResponder(self.proxyManualField)
+                    #endif
+                }
                 return
             }
             do {
@@ -774,6 +790,9 @@ final class PreferencesController: NSObject, NSTextFieldDelegate {
                 proxyManualValidationError = error.localizedDescription
             }
             refreshProxyRowState(force: true)
+            if view?.window != nil {
+                view.layoutSubtreeIfNeeded()
+            }
         }
     }
 
