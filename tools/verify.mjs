@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
-import { sourceDigest, collectReleaseArtifacts, checkReleaseConsistency, renderReleaseConsistency } from './release-integrity.mjs';
+import { sourceDigest, vendorEvidence, collectReleaseArtifacts, checkReleaseConsistency, renderReleaseConsistency } from './release-integrity.mjs';
 import { describeValidationScope, parseTargetAppVersionArg, recordedScopeFields, resolveValidationScope, VALIDATION_SCOPE_TARGETED } from './release-scope.mjs';
 import { computeSwiftInputsDigest, nativeBuildArgs } from './native-build.mjs';
 
@@ -225,9 +225,10 @@ async function main() {
   async function runNoVendorGatesBatch(tasks) {
     if (!tasks.length) return;
     const { loadDictLayers, properNounViolations, runCoverageReport } = await import(pathToFileURL(join(root, 'tools/coverage-report.mjs')).href);
+    const { inlineSlotViolations } = await import(pathToFileURL(join(root, 'tools/extract-inline-groups-ast.mjs')).href);
     const dictDir = join(root, 'dict');
     const dictLoaded = await loadDictLayers(dictDir);
-    const preloadedDict = { ...dictLoaded, violations: properNounViolations(dictLoaded.entries) };
+    const preloadedDict = { ...dictLoaded, violations: properNounViolations(dictLoaded.entries), slotViolations: inlineSlotViolations(dictLoaded.entries) };
     for (const task of tasks) {
       const name = `词典门禁-${task.targetVersion}`;
       process.stdout.write(`检查：${name}\n`);
@@ -330,6 +331,7 @@ async function main() {
   await mkdir(join(root, '.cache'), { recursive: true });
   await writeFile(join(root, '.cache/verified-release.json'), JSON.stringify({
     digest,
+    vendorEvidence: await vendorEvidence(root),
     artifacts: await collectReleaseArtifacts(root),
     nativeBinarySha256: createHash('sha256').update(await readFile(join(root, '.cache/GravityBox-native-verified'))).digest('hex'),
     at: new Date().toISOString(),

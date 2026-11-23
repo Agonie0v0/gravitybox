@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { cp, mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { includeDictionaryPath, sourceDigest } from '../tools/release-integrity.mjs';
+import { includeDictionaryPath, sourceDigest, vendorEvidence } from '../tools/release-integrity.mjs';
 
 test('dictionary backups never enter release inputs or packaged resources', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gb-dictionary-release-'));
@@ -31,5 +31,8 @@ test('dictionary backups never enter release inputs or packaged resources', asyn
   assert.notEqual(await sourceDigest(root), before);
   const dictionaryChanged = await sourceDigest(root);
   await writeFile(join(root, 'vendor/main.js'), 'official evidence');
-  assert.notEqual(await sourceDigest(root), dictionaryChanged);
+  assert.equal(await sourceDigest(root), dictionaryChanged, 'P1-29: vendor/ 变动不得改变源码 sourceDigest');
+  const evidence = await vendorEvidence(root);
+  assert.equal(evidence.present, true);
+  assert.ok(evidence.digest && evidence.digest.length === 64);
 });

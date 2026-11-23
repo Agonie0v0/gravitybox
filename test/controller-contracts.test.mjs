@@ -429,5 +429,56 @@ describeContractGroup("连接与控制 · debug-port-missing", { concurrency: fa
     assert.equal(updateCalls, 1, '保持全量翻译时应热更新词典而非销毁重建为保守模式');
     assert.equal(lastBootSource, '', '未切换保守模式时不应触发重引导降级');
   });
+
+  test('P1-47: probeRemoteSessions 遇到 RPC 异常时复位 probing 不中断批次；maintenancePreflight 容错已关页', async () => {
+    const mockEndpoint = { port: 19222, pid: process.pid, browserURL: 'ws://127.0.0.1:19222', appVersion: '2.34.0', legacyPatch: false };
+    const ctrl = new Controller({
+      appPath: '/Applications/Antigravity.app',
+      profile: '/tmp/gb-p1-47-profile',
+      dictionary: dictionaryFromEntries({ Settings: '设置' }),
+      discoverEndpoint: async () => mockEndpoint,
+      onStatus: () => {},
+    });
+
+    let maintenanceEvalCalls = 0;
+    const throwingSession = {
+      targetId: 'ssh-page-1',
+      url: 'https://127.0.0.1:19001/c/_new',
+      contextId: 11,
+      sourceKind: 'remote',
+      remoteKey: 'remote-err-1',
+      environmentId: 'ssh:err-host',
+      hostLabel: 'err-host',
+      detaching: false,
+      lastFocusedAt: Date.now(),
+      rpcClient: {
+        probeUserAndQuota: async () => {
+          throw new Error('synthetic rpc transport crash');
+        },
+      },
+      cdp: {
+        evaluate: async (expr) => {
+          if (String(expr).includes('maintenanceState')) {
+            maintenanceEvalCalls += 1;
+            throw new Error('target closed');
+          }
+          return { busy: false, checked: true };
+        },
+      },
+    };
+    ctrl.pages.set('ssh-page-1', throwingSession);
+
+    const snapshots = await ctrl.probeRemoteSessions({ force: true });
+    assert.equal(snapshots.length, 1);
+    assert.equal(snapshots[0].probing, false, 'RPC 抛错后 probing 必须复位为 false');
+    assert.equal(snapshots[0].lastError, 'rpc_error');
+
+    // maintenancePreflight: 真正进入逐页 maintenanceState 校验并容错已关闭页面抛错
+    ctrl.endpoint = mockEndpoint;
+    const preflight = await ctrl.maintenancePreflight();
+    assert.equal(preflight.ok, true);
+    assert.equal(preflight.pid, process.pid);
+    assert.equal(maintenanceEvalCalls, 1, '必须实际调用 maintenanceState 并容错抛错');
+  });
 });
 

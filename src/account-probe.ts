@@ -17,8 +17,11 @@ import {
   normalizeLiveGroups,
   normalizeLiveModels,
   resolveModelsWithGroupDescriptions,
+  type Family,
 } from './quota.js';
 import type { LiveLanguageServerStatus, ModelQuota, QuotaData, QuotaGroup } from './accounts.js';
+import { groupToQuotaGroup, modelQuotaFromNormalized } from './account-quota.js';
+import { sanitizeFallbackTierLabel } from './pricing.js';
 import { bt } from './i18n.js';
 
 const execFileAsync = promisify(execFile);
@@ -367,7 +370,6 @@ export function resolveProbeSubscriptionTier(
     : [
         userStatus.userTier?.id,
         userStatus.userTier?.name,
-        userStatus.userTier?.description,
         userStatus.g1Tier,
         userStatus.g1_tier,
         userStatus.paidTier?.id,
@@ -379,17 +381,39 @@ export function resolveProbeSubscriptionTier(
         userStatus.planStatus?.planInfo?.planName,
         userStatus.planStatus?.planInfo?.teamsTier,
       ];
-  const allCandidates = [...primaryCandidates, ...fallbackCandidates];
-  if (allCandidates.some(v => typeof v === 'string' && /ultra/i.test(v))) {
+  const lowConfidenceCandidates = isEnterpriseVertex ? [] : [userStatus.userTier?.description];
+  if (primaryCandidates.some(v => typeof v === 'string' && /ultra/i.test(v))) {
     return 'ULTRA';
   }
   for (const candidate of primaryCandidates) {
     const resolved = classifySubscriptionTierCandidate(candidate);
     if (resolved) return resolved;
   }
+  if (fallbackCandidates.some(v => typeof v === 'string' && /ultra/i.test(v))) {
+    return 'ULTRA';
+  }
   for (const candidate of fallbackCandidates) {
     const resolved = classifySubscriptionTierCandidate(candidate);
     if (resolved) return resolved;
+  }
+  for (const candidate of lowConfidenceCandidates) {
+    const resolved = classifySubscriptionTierCandidate(candidate);
+    if (resolved) return resolved;
+  }
+  const rawFallbackCandidates = isEnterpriseVertex
+    ? primaryCandidates
+    : [
+        userStatus.userTier?.id,
+        userStatus.userTier?.name,
+        userStatus.g1Tier,
+        userStatus.g1_tier,
+        userStatus.paidTier?.id,
+        userStatus.paidTier?.name,
+        ...fallbackCandidates,
+      ];
+  for (const candidate of rawFallbackCandidates) {
+    const cleaned = sanitizeFallbackTierLabel(candidate);
+    if (cleaned) return cleaned;
   }
   return '';
 }
@@ -413,6 +437,92 @@ export function mergeSubscriptionTier(
     return saved || 'FREE';
   }
   return fresh;
+}
+
+export function buildLiveProbeResultFromRpc(
+  userStatusData: any,
+  quotaSummaryData: any,
+  mappers: {
+    modelQuotaFromNormalized: (model: ReturnType<typeof applyFamilyWindows>[number]) => ModelQuota;
+    groupToQuotaGroup: (group: ReturnType<typeof mergeGroupSets>[number]) => QuotaGroup;
+  } = { modelQuotaFromNormalized, groupToQuotaGroup },
+  options?: { sourcePrefix?: 'live' | 'remote_rpc'; quotaSummaryError?: string; projectId?: string | null }
+): LiveLanguageServerStatus | null {
+  try {
+    const userStatus = userStatusData?.userStatus ?? userStatusData;
+    if (!userStatus?.email) return null;
+    const prefix = options?.sourcePrefix ?? 'live';
+    const email = String(userStatus.email);
+    const name = userStatus.name ? String(userStatus.name) : null;
+    const userTierId = typeof userStatus.userTier?.id === 'string' ? userStatus.userTier.id : null;
+    const userTierName = typeof userStatus.userTier?.name === 'string' ? userStatus.userTier.name : null;
+    const isEnterpriseVertex = isEnterpriseVertexUserStatus(userStatus);
+    const accountType: 'consumer' | 'enterprise_vertex' = isEnterpriseVertex ? 'enterprise_vertex' : 'consumer';
+    const tier = resolveProbeSubscriptionTier(userStatus, isEnterpriseVertex);
+
+    const observedAt = Math.floor(Date.now() / 1000);
+    const cascadeData = userStatus.cascadeModelConfigData ?? {};
+    const clientConfigs = cascadeData.clientModelConfigs || cascadeData.client_model_configs || [];
+    const clientModelSorts = cascadeData.clientModelSorts ?? cascadeData.client_model_sorts;
+    const groups = mergeGroupSets([normalizeLiveGroups(quotaSummaryData, observedAt)]);
+    const models = resolveModelsWithGroupDescriptions(
+      mergeModelCatalogues([normalizeLiveModels(clientConfigs, observedAt, { clientModelSorts })]),
+      groups,
+    );
+    const windows = familyWindowsFromGroups(groups, Date.now());
+    const applied = applyFamilyWindows(models, windows);
+    const liveArgon = buildArgonStatus(applied, groups, windows, Date.now(), tier);
+    const liveCarbon = buildCarbonStatus(applied, groups, windows, Date.now(), liveArgon, tier);
+    const isIgnoredStandalone = (family: 'gemini' | 'claude' | 'argon' | 'carbon'): boolean =>
+      (family === 'argon' && (liveArgon.mode === 'unified' || liveArgon.mode === 'disabled'))
+      || (family === 'carbon' && (liveCarbon.mode === 'unified' || liveCarbon.mode === 'disabled'));
+    const missingFamilies: Family[] = (['gemini', 'claude', 'argon', 'carbon'] as const).filter(family =>
+      !isIgnoredStandalone(family)
+      && models.some(model => model.family === family && !isExcludedFromStandaloneModelPool(model))
+      && !groups.some(group => group.family === family && group.buckets.some(bucket => bucket.disabled !== true && bucket.remaining_fraction_known))
+      && !((family === 'argon' || family === 'carbon') && models.some(m => m.family === family && !isExcludedFromStandaloneModelPool(m) && m.own_percentage_known && !m.own_stale)));
+    const hasMissingExplicitOther = models.some(model =>
+      model.family === 'other'
+      && !isExcludedFromStandaloneModelPool(model)
+      && Boolean(model.quota_bucket_name && model.quota_bucket_name.trim())
+      && (!model.own_percentage_known || model.own_stale)
+    ) && !groups.some(group => group.family === 'other' && group.buckets.some(bucket => bucket.disabled !== true && bucket.remaining_fraction_known));
+    if (hasMissingExplicitOther) {
+      missingFamilies.push('other');
+    }
+    const quotaData: QuotaData = {
+      models: applied.map(mappers.modelQuotaFromNormalized),
+      quota_groups: groups.map(mappers.groupToQuotaGroup),
+      is_forbidden: false,
+      subscription_tier: tier,
+      last_updated: observedAt,
+      model_forwarding_rules: {},
+      source: 'live',
+      refresh_state: {
+        complete: Boolean(quotaSummaryData) && models.length > 0 && groups.length > 0 && missingFamilies.length === 0,
+        endpointsAttempted: [`${prefix}:GetUserStatus`, `${prefix}:RetrieveUserQuotaSummary`],
+        endpointsSucceeded: [`${prefix}:GetUserStatus`, ...(quotaSummaryData ? [`${prefix}:RetrieveUserQuotaSummary`] : [])],
+        missingFamilies,
+        missingWindows: [],
+        carriedGroups: 0,
+        refreshedAt: observedAt,
+        ...(options?.quotaSummaryError ? { error: options.quotaSummaryError } : {}),
+        ...(typeof options?.projectId === 'string' && options.projectId.trim() ? { projectId: options.projectId.trim() } : {}),
+      },
+      quota_warnings: models.length === 0 ? [`NO_MODEL_RECORDS:${bt('account_probe.warn.no_model_records')}`] : undefined,
+    };
+
+    return {
+      email,
+      name,
+      tier,
+      accountType,
+      userTierId,
+      userTierName,
+      quota: quotaData,
+    };
+  } catch {}
+  return null;
 }
 
 export async function probeLiveLanguageServerOnce(
@@ -520,67 +630,7 @@ export async function probeLiveLanguageServerOnce(
       } catch {}
     }
 
-    try {
-      const email = String(userStatus.email);
-      const name = userStatus.name ? String(userStatus.name) : null;
-      const userTierId = typeof userStatus.userTier?.id === 'string' ? userStatus.userTier.id : null;
-      const userTierName = typeof userStatus.userTier?.name === 'string' ? userStatus.userTier.name : null;
-      const isEnterpriseVertex = isEnterpriseVertexUserStatus(userStatus);
-      const accountType: 'consumer' | 'enterprise_vertex' = isEnterpriseVertex ? 'enterprise_vertex' : 'consumer';
-      const tier = resolveProbeSubscriptionTier(userStatus, isEnterpriseVertex);
-
-      const observedAt = Math.floor(Date.now() / 1000);
-      const cascadeData = userStatus.cascadeModelConfigData ?? {};
-      const clientConfigs = cascadeData.clientModelConfigs || cascadeData.client_model_configs || [];
-      const clientModelSorts = cascadeData.clientModelSorts ?? cascadeData.client_model_sorts;
-      const groups = mergeGroupSets([normalizeLiveGroups(quotaSummaryData, observedAt)]);
-      const models = resolveModelsWithGroupDescriptions(
-        mergeModelCatalogues([normalizeLiveModels(clientConfigs, observedAt, { clientModelSorts })]),
-        groups,
-      );
-      const windows = familyWindowsFromGroups(groups, Date.now());
-      const applied = applyFamilyWindows(models, windows);
-      const liveArgon = buildArgonStatus(applied, groups, windows, Date.now(), tier);
-      const liveCarbon = buildCarbonStatus(applied, groups, windows, Date.now(), liveArgon, tier);
-      const isIgnoredStandalone = (family: 'gemini' | 'claude' | 'argon' | 'carbon'): boolean =>
-        (family === 'argon' && (liveArgon.mode === 'unified' || liveArgon.mode === 'disabled'))
-        || (family === 'carbon' && (liveCarbon.mode === 'unified' || liveCarbon.mode === 'disabled'));
-      const missingFamilies = (['gemini', 'claude', 'argon', 'carbon'] as const).filter(family =>
-        !isIgnoredStandalone(family)
-        && models.some(model => model.family === family && !isExcludedFromStandaloneModelPool(model))
-        && !groups.some(group => group.family === family && group.buckets.some(bucket => bucket.disabled !== true && bucket.remaining_fraction_known))
-        && !((family === 'argon' || family === 'carbon') && models.some(m => m.family === family && !isExcludedFromStandaloneModelPool(m) && m.own_percentage_known && !m.own_stale)));
-      const quotaData: QuotaData = {
-        models: applied.map(mappers.modelQuotaFromNormalized),
-        quota_groups: groups.map(mappers.groupToQuotaGroup),
-        is_forbidden: false,
-        subscription_tier: tier,
-        last_updated: observedAt,
-        model_forwarding_rules: {},
-        source: 'live',
-        refresh_state: {
-          complete: models.length > 0 && groups.length > 0 && missingFamilies.length === 0,
-          endpointsAttempted: ['live:GetUserStatus', 'live:RetrieveUserQuotaSummary'],
-          endpointsSucceeded: ['live:GetUserStatus', ...(quotaSummaryData ? ['live:RetrieveUserQuotaSummary'] : [])],
-          missingFamilies,
-          missingWindows: [],
-          carriedGroups: 0,
-          refreshedAt: observedAt,
-        },
-        quota_warnings: models.length === 0 ? [`NO_MODEL_RECORDS:${bt('account_probe.warn.no_model_records')}`] : undefined,
-      };
-
-      return {
-        email,
-        name,
-        tier,
-        accountType,
-        userTierId,
-        userTierName,
-        quota: quotaData,
-      };
-    } catch {}
-    return null;
+    return buildLiveProbeResultFromRpc(userStatusData, quotaSummaryData, mappers);
   };
 
   try {

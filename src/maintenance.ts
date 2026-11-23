@@ -11,19 +11,22 @@ import {
   HISTORY_SLIMMING_NAMES,
   STATEFUL_CACHE_NAMES,
   antigravityRunning,
-  browserProfileRunning,
   getCacheMetadata,
   hasAntigravityCommand,
   hasBrowserProfileCommand,
   isStrictSubpath,
   namesForMaintenanceScopes,
   normalizeMaintenanceScopes,
+  normalizeProcessProbeState,
   normalizeRetentionDays,
+  probeAntigravityRunning,
+  probeBrowserProfileRunning,
   readProcessCommands,
   type CacheCategory,
   type CacheMaintenanceOptions,
   type InspectedCacheEntry,
   type MaintenanceScope,
+  type ProcessProbeState,
   type SubTargetSpec,
 } from './maintenance-catalog.js';
 import { bt } from './i18n.js';
@@ -42,6 +45,17 @@ import {
 } from './maintenance-discovery.js';
 
 export * from './maintenance-catalog.js';
+
+const FORBIDDEN_MAINTENANCE_SEGMENTS = new Set([
+  'User',
+  'Cookies',
+  'Local Storage',
+  'Session Storage',
+  'WebStorage',
+  'Network Persistent State',
+  'conversation_summaries.db',
+  'state.vscdb',
+]);
 
 function isTrashPermissionError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
@@ -76,13 +90,15 @@ export class CacheMaintenance {
     fingerprints: string[];
   };
 
+  private useDefaultRunningProbe = false;
+
   constructor(
     private profile: string,
     private trash = join(homedir(), '.Trash'),
-    private running = antigravityRunning,
+    private running: () => Promise<boolean | ProcessProbeState> = antigravityRunning,
     private options: CacheMaintenanceOptions = {},
   ) {
-    if (running === antigravityRunning) this.running = () => antigravityRunning(this.options.appPath);
+    this.useDefaultRunningProbe = running === antigravityRunning;
   }
 
   setTarget(profile: string, options: CacheMaintenanceOptions = {}) {
@@ -90,10 +106,11 @@ export class CacheMaintenance {
     this.options = options;
     this.prepared = undefined;
     this.cachedProtectedSummary = undefined;
-    this.running = () => antigravityRunning(this.options.appPath);
+    this.useDefaultRunningProbe = true;
+    this.running = antigravityRunning;
   }
 
-  setHooks(hooks: Pick<CacheMaintenanceOptions, 'archiveDatabases' | 'onMutated' | 'browserRunning'>) {
+  setHooks(hooks: Pick<CacheMaintenanceOptions, 'archiveDatabases' | 'onMutated' | 'browserRunning' | 'processProbe'>) {
     this.options = { ...this.options, ...hooks };
   }
 
@@ -191,30 +208,81 @@ export class CacheMaintenance {
     return this.allowedRootDirs().some(root => isStrictSubpath(root, candidatePath));
   }
 
-  private async isBrowserProfileBusy(): Promise<boolean> {
-    if (this.options.browserRunning) {
-      return await this.options.browserRunning();
+  private async probeHostState(): Promise<ProcessProbeState> {
+    if (this.useDefaultRunningProbe) {
+      return await probeAntigravityRunning(this.options.appPath, this.options.processProbe ?? readProcessCommands);
     }
-    const agentDir = this.officialAgentDir();
-    if (!agentDir) return false;
-    return await browserProfileRunning(join(agentDir, 'browser_profile'));
+    try {
+      return normalizeProcessProbeState(await this.running());
+    } catch {
+      return 'unknown';
+    }
   }
 
-  private async inspectProcessState(): Promise<{ running: boolean; browserBusy: boolean }> {
+  private async probeBrowserState(): Promise<ProcessProbeState> {
+    if (this.options.browserRunning) {
+      try {
+        return normalizeProcessProbeState(await this.options.browserRunning());
+      } catch {
+        return 'unknown';
+      }
+    }
+    const agentDir = this.officialAgentDir();
+    if (!agentDir) return 'stopped';
+    return await probeBrowserProfileRunning(join(agentDir, 'browser_profile'), this.options.processProbe ?? readProcessCommands);
+  }
+
+  private async guardHostStoppedForMutation(runningErrorKey: 'maintenance.err.quit_before_clear' | 'maintenance.err.quit_before_restore' | 'maintenance.err.quit_before_recovery'): Promise<void> {
+    const state = await this.probeHostState();
+    if (state === 'running') throw Error(bt(runningErrorKey));
+    if (state === 'unknown') throw Error(bt('maintenance.err.process_probe_unknown'));
+  }
+
+  private async inspectProcessState(): Promise<{
+    hostState: ProcessProbeState;
+    browserState: ProcessProbeState;
+    running: boolean;
+    browserBusy: boolean;
+    processProbeUnknown: boolean;
+  }> {
     const agentDir = this.officialAgentDir();
     const browserProfileDir = agentDir ? join(agentDir, 'browser_profile') : '';
-    if (this.options.browserRunning) {
-      const [running, browserBusy] = await Promise.all([
-        this.running(),
-        this.options.browserRunning(),
+    if (!this.useDefaultRunningProbe || this.options.browserRunning) {
+      const [hostState, browserState] = await Promise.all([
+        this.probeHostState(),
+        this.probeBrowserState(),
       ]);
-      return { running, browserBusy };
+      return {
+        hostState,
+        browserState,
+        running: hostState === 'running',
+        browserBusy: browserState === 'running',
+        processProbeUnknown: hostState === 'unknown',
+      };
     }
-    const commands = await readProcessCommands();
-    if (!commands) return { running: false, browserBusy: false };
+    let commands: string[] | null = null;
+    try {
+      commands = await (this.options.processProbe ?? readProcessCommands)();
+    } catch {
+      commands = null;
+    }
+    if (!commands) {
+      return {
+        hostState: 'unknown',
+        browserState: browserProfileDir ? 'unknown' : 'stopped',
+        running: false,
+        browserBusy: false,
+        processProbeUnknown: true,
+      };
+    }
+    const hostState: ProcessProbeState = hasAntigravityCommand(commands, this.options.appPath) ? 'running' : 'stopped';
+    const browserState: ProcessProbeState = browserProfileDir && hasBrowserProfileCommand(commands, browserProfileDir) ? 'running' : 'stopped';
     return {
-      running: hasAntigravityCommand(commands, this.options.appPath),
-      browserBusy: browserProfileDir ? hasBrowserProfileCommand(commands, browserProfileDir) : false,
+      hostState,
+      browserState,
+      running: hostState === 'running',
+      browserBusy: browserState === 'running',
+      processProbeUnknown: false,
     };
   }
 
@@ -245,7 +313,7 @@ export class CacheMaintenance {
   }
 
   private async guardJournalMove(snapshot: string, move: JournalMove): Promise<void> {
-    if (await this.running()) throw Error(bt('maintenance.err.quit_before_recovery'));
+    await this.guardHostStoppedForMutation('maintenance.err.quit_before_recovery');
     for (const path of [move.from, move.to]) {
       const root = isStrictSubpath(snapshot, path) ? snapshot : this.allowedRootDirs().find(root => isStrictSubpath(root, path));
       if (!root) throw Error(bt('maintenance.err.tx_out_of_bounds'));
@@ -258,12 +326,14 @@ export class CacheMaintenance {
       });
     }
     if (move.from.includes('browser_profile') || move.to.includes('browser_profile')) {
-      if (await this.isBrowserProfileBusy()) throw Error(bt('maintenance.err.browser_busy_pause'));
+      const browserState = await this.probeBrowserState();
+      if (browserState === 'running') throw Error(bt('maintenance.err.browser_busy_pause'));
+      if (browserState === 'unknown') throw Error(bt('maintenance.err.process_probe_unknown'));
     }
   }
 
   private async recoverPendingSnapshots(): Promise<void> {
-    if (await this.running()) return;
+    if (await this.probeHostState() !== 'stopped') return;
     for (const vaultRoot of this.candidateTrashDirs()) {
       let names: string[];
       try {
@@ -645,7 +715,7 @@ export class CacheMaintenance {
         fingerprints: fullEntries.map(e => e.fingerprint),
       };
 
-      const { running, browserBusy } = procState;
+      const { running, browserBusy, hostState, browserState, processProbeUnknown } = procState;
       const usingFallbackTrash = !primaryAccessible;
       const trashDir = primaryAccessible ? resolve(this.trash) : this.fallbackTrashDir();
 
@@ -709,6 +779,10 @@ export class CacheMaintenance {
         usingFallbackTrash,
         running,
         browserBusy,
+        hostState,
+        browserState,
+        processProbeUnknown,
+        ...(processProbeUnknown ? { probeWarning: bt('maintenance.err.process_probe_unknown') } : {}),
         scannedAt: Math.floor(Date.now() / 1000),
       };
     }, { label: bt('maintenance.lock.scan') });
@@ -778,8 +852,7 @@ export class CacheMaintenance {
       for (const sub of row.subTargets) {
         if (!this.isAllowedTargetPath(sub.path)) throw Error(bt('maintenance.err.clear_out_of_bounds'));
         const resolvedSub = resolve(sub.path);
-        const forbiddenSegments = new Set(['User', 'Cookies', 'Local Storage', 'Session Storage', 'WebStorage', 'Network Persistent State', 'conversation_summaries.db', 'state.vscdb']);
-        if (resolvedSub.split(sep).some(seg => forbiddenSegments.has(seg))) {
+        if (resolvedSub.split(sep).some(seg => FORBIDDEN_MAINTENANCE_SEGMENTS.has(seg))) {
           throw Error(bt('maintenance.err.protected_path_hit'));
         }
         const to = row.isSingleLegacyRoot
@@ -850,9 +923,7 @@ export class CacheMaintenance {
   }) {
     return this.mutex.run(async () => {
       this.prepared = undefined;
-      if (await this.running()) {
-        throw Error(bt('maintenance.err.quit_before_clear'));
-      }
+      await this.guardHostStoppedForMutation('maintenance.err.quit_before_clear');
       const scopes: MaintenanceScope[] = normalizeMaintenanceScopes(smartOptions?.scopes);
       const retentionDays = smartOptions?.retentionDays !== undefined
         ? normalizeRetentionDays(smartOptions.retentionDays)
@@ -864,7 +935,7 @@ export class CacheMaintenance {
 
       let candidateNames = namesForMaintenanceScopes(scopes);
       const skippedNames: string[] = [];
-      if (candidateNames.includes('AgentBrowserCache') && await this.isBrowserProfileBusy()) {
+      if (candidateNames.includes('AgentBrowserCache') && (await this.probeBrowserState()) !== 'stopped') {
         candidateNames = candidateNames.filter(n => n !== 'AgentBrowserCache');
         skippedNames.push('AgentBrowserCache');
       }
@@ -937,9 +1008,7 @@ export class CacheMaintenance {
       if (!saved || saved.token !== token || Date.now() - saved.at > 120000) {
         throw Error(bt('maintenance.err.manifest_expired'));
       }
-      if (await this.running()) {
-        throw Error(bt('maintenance.err.quit_before_clear'));
-      }
+      await this.guardHostStoppedForMutation('maintenance.err.quit_before_clear');
       const allowedSet = new Set<string>(ALL_ALLOWED_CACHE_NAMES);
       let targetNames: string[];
       if (Array.isArray(selectedNames) && selectedNames.length > 0) {
@@ -951,13 +1020,16 @@ export class CacheMaintenance {
         targetNames = saved.entries.filter(e => e.defaultSelected !== false).map(e => e.name);
       }
 
-      // 独立沙箱浏览器进程（如 MCP Chromium）占用时：局部跳过 AgentBrowserCache，不阻断其余项
+      // 独立沙箱浏览器进程（如 MCP Chromium）占用或无法确认浏览器进程状态时：局部跳过 AgentBrowserCache，不阻断其余项
       const skippedNames: string[] = [];
-      if (targetNames.includes('AgentBrowserCache') && await this.isBrowserProfileBusy()) {
-        targetNames = targetNames.filter(n => n !== 'AgentBrowserCache');
-        skippedNames.push('AgentBrowserCache');
-        if (targetNames.length === 0) {
-          throw Error(bt('maintenance.err.browser_busy_clear'));
+      if (targetNames.includes('AgentBrowserCache')) {
+        const browserState = await this.probeBrowserState();
+        if (browserState !== 'stopped') {
+          targetNames = targetNames.filter(n => n !== 'AgentBrowserCache');
+          skippedNames.push('AgentBrowserCache');
+          if (targetNames.length === 0) {
+            throw Error(bt(browserState === 'unknown' ? 'maintenance.err.process_probe_unknown' : 'maintenance.err.browser_busy_clear'));
+          }
         }
       }
 
@@ -1010,9 +1082,7 @@ export class CacheMaintenance {
       if (typeof snapshotId !== 'string' || !/^GravityBox-缓存-\d+$/.test(snapshotId)) {
         throw Error(bt('maintenance.err.invalid_snapshot_id'));
       }
-      if (await this.running()) {
-        throw Error(bt('maintenance.err.quit_before_restore'));
-      }
+      await this.guardHostStoppedForMutation('maintenance.err.quit_before_restore');
       let dir = '';
       for (const vaultRoot of this.candidateTrashDirs()) {
         const candidate = join(vaultRoot, snapshotId);
@@ -1097,6 +1167,9 @@ export class CacheMaintenance {
             throw Error(bt('maintenance.err.snapshot_out_of_bounds'));
           }
           const normFrom = resolve(fromPath);
+          if (normFrom.split(sep).some(seg => FORBIDDEN_MAINTENANCE_SEGMENTS.has(seg))) {
+            throw Error(bt('maintenance.err.protected_path_hit'));
+          }
           const normTo = resolve(toPath);
           if (seenFromPaths.has(normFrom) || seenToPaths.has(normTo)) {
             throw Error(bt('maintenance.err.duplicate_item', { name: entryName }));

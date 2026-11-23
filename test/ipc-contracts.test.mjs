@@ -167,6 +167,28 @@ test('幂等性保留所有业务id，传输requestId可变，异目标必须冲
   assert.notDeepEqual(canonicalPayload({data:{id:'a'}}),canonicalPayload({data:{id:'b'}}));
   const store=new IdempotencyStore();assert.equal(store.reserve('k','account-a',()=>{}),'owner');assert.equal(store.reserve('k','account-b',()=>{}),'conflict');
 });
+
+test('P1-45: IdempotencyStore 超时淘汰未完成条目时同步唤醒 waiters 返回超时错误，避免永久挂起', () => {
+  const store = new IdempotencyStore();
+  const realNow = Date.now;
+  let clock = 1_000_000;
+  Date.now = () => clock;
+  try {
+    assert.equal(store.reserve('slow-key', 'fp-1', () => {}), 'owner');
+    const waiterReplies = [];
+    assert.equal(store.reserve('slow-key', 'fp-1', r => waiterReplies.push(r)), 'waiting');
+    assert.equal(waiterReplies.length, 0);
+
+    // 推进超过 125s 的未完成淘汰窗口，再触发一次 reserve 清理过期项
+    clock += 126_000;
+    const timeoutPayload = { ok: false, error: '请求超时' };
+    assert.equal(store.reserve('other-key', 'fp-2', () => {}, timeoutPayload), 'owner');
+    assert.equal(waiterReplies.length, 1, '超时淘汰时必须立即回调挂起的 waiter');
+    assert.deepEqual(waiterReplies[0], timeoutPayload);
+  } finally {
+    Date.now = realNow;
+  }
+});
 });
 
 // Fixture state and hooks are scoped to this group; child cases run serially.
@@ -577,6 +599,11 @@ test('P0-02/P1-15/P1-17/P1-19/P1-20: 维护目录动态双语、resume切回中�
     for (const secret of ['SECRET_IPC_ACCESS_TOKEN', 'SECRET_IPC_REFRESH_TOKEN', 'SECRET_IPC_ID_TOKEN', 'access_token', 'refresh_token', 'id_token']) {
       assert.equal(exportIpcRaw.includes(secret), false, `account_export_backup 响应不得泄露 ${secret}`);
     }
+
+    const invalidReorderStr = await rpc(dir, { command: 'account_reorder', ids: 'not-an-array' });
+    assert.equal(invalidReorderStr.ok, false, 'account_reorder 传入非数组 ids 必须拒绝');
+    const invalidReorderElem = await rpc(dir, { command: 'account_reorder', ids: [123] });
+    assert.equal(invalidReorderElem.ok, false, 'account_reorder 传入非字符串元素 ids 必须拒绝');
 
     const mainSource = await readFile(fileURLToPath(new URL('../src/main.ts', import.meta.url)), 'utf8');
     assert.ok(!/if\s*\(\s*\['pause',\s*'restore',\s*'stop'\]/.test(mainSource), 'pause/restore 不得无差别取消所有任务');
