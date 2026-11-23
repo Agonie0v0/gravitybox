@@ -451,6 +451,25 @@ try {
     assert.equal(await main.evaluate('document.querySelector("#j04-notail-link")?.textContent'), 'quuxdocs');
     await main.evaluate('document.querySelector("#j04-notail-probe").remove()');
   });
+  await check('内联组防劫持与句子级组合回退：权限/删除确认完整汉化，未收录长句保持英文，MCP短标题正常汉化', async () => {
+    await main.evaluate(`document.body.insertAdjacentHTML('beforeend',
+      '<div id="inline-combo-probe" data-gravitybox-ui>' +
+        '<span id="perm-sub">Configure what the agent can do in local and remote conversations. <a id="perm-link" href="https://example.com">Learn more</a>.</span>' +
+        '<p id="del-confirm">Are you sure you want to delete <strong>my-mcp</strong>? This action cannot be undone.</p>' +
+        '<span id="unknown-cfg">Configure frobnicator widgets across orbital clusters. <a id="unknown-cfg-link" href="/x">Learn more</a>.</span>' +
+        '<h2 id="mcp-cfg-title">Configure chrome-devtools</h2>' +
+      '</div>'
+    )`);
+    await until(async () => await text(main, '#perm-sub') === '配置智能体在本地与远程对话中的操作权限。 了解更多。');
+    assert.equal(await main.evaluate('document.querySelector("#perm-link")?.textContent'), '了解更多');
+    assert.equal(await main.evaluate('document.querySelector("#perm-link")?.getAttribute("href")'), 'https://example.com');
+    await until(async () => await text(main, '#del-confirm') === '您确定要删除 my-mcp 吗？此操作无法撤销。');
+    await until(async () => await text(main, '#mcp-cfg-title') === '配置 chrome-devtools');
+    const unknownText = await text(main, '#unknown-cfg');
+    assert.equal(unknownText.includes('配置 frobnicator'), false, '未收录 Configure 长句绝不可被 Configure {server} 劫持成半中半英: ' + unknownText);
+    assert.equal(unknownText.startsWith('Configure frobnicator widgets across orbital clusters.'), true);
+    await main.evaluate('document.querySelector("#inline-combo-probe").remove()');
+  });
   await check('%s/ICU 占位符不支持时明确披露（能力清单与候选标记）', async () => {
     const tree = await main.send('Page.getFrameTree');const context = await main.send('Page.createIsolatedWorld', { frameId: tree.frameTree.frame.id, worldName: 'GRAVITYBOX-localization-v1' });
     const caps = await main.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.capabilities()', context.executionContextId);

@@ -225,9 +225,10 @@ async function main() {
   async function runNoVendorGatesBatch(tasks) {
     if (!tasks.length) return;
     const { loadDictLayers, properNounViolations, runCoverageReport } = await import(pathToFileURL(join(root, 'tools/coverage-report.mjs')).href);
+    const { inlineSlotViolations } = await import(pathToFileURL(join(root, 'tools/extract-inline-groups-ast.mjs')).href);
     const dictDir = join(root, 'dict');
     const dictLoaded = await loadDictLayers(dictDir);
-    const preloadedDict = { ...dictLoaded, violations: properNounViolations(dictLoaded.entries) };
+    const preloadedDict = { ...dictLoaded, violations: properNounViolations(dictLoaded.entries), slotViolations: inlineSlotViolations(dictLoaded.entries) };
     for (const task of tasks) {
       const name = `词典门禁-${task.targetVersion}`;
       process.stdout.write(`检查：${name}\n`);

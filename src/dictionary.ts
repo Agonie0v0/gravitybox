@@ -414,6 +414,7 @@ export function validateTemplateRules(data: unknown): DeclarativeTemplateRule[] 
     if (!key || key.length > 240 || !pattern || pattern.length > 320 || !pattern.startsWith('^') || !replacement || replacement.length > 400) continue;
     if (!/^[iu]*$/.test(flags)) continue;
     if (hasNestedQuantifiedGroup(pattern) || /(\([^)]*[+*][^)]*\))[+*?]/.test(pattern)) continue;
+    if (!/\{\d+\}/.test(key) && candidate.inlineOnly !== true && /\{\d+\}/.test(replacement)) continue;
     try {
       new RegExp(pattern, flags);
       out.push({

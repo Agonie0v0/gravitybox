@@ -421,7 +421,7 @@
         compiled.push({
           key,
           pattern,
-          inlineOnly: item.inlineOnly === true || key.includes('{0}'),
+          inlineOnly: item.inlineOnly === true || /\{\d+\}/.test(key),
           replace: (...args) => {
             const groups = args.slice(1, -2);
             return replacement.replace(/\$([1-9]\d?|\$)/g, (_, token) => {
@@ -693,6 +693,18 @@
       .replace(RE_WHITESPACE, '');
   }
 
+  const ENTITY_PROSE_STOP_WORDS = /^(?:a|an|the|your|our|my|this|that|these|those|what|when|where|how|why|which|who|all|any|some|each|every|more|most|allowed|denied|default|global|local|remote|external|workspace|editor|built-in|tab|link|hooks|new|other|in|on|at|to|for|from|with|by|of|as|if|or|and)\b/i;
+  function isEntityNameSlot(value, maxWords = 4) {
+    const v = String(value || '').trim();
+    if (!v || v.length > 80) return false;
+    if (/[.?!;:{}\n()]/.test(v)) return false;
+    if (v.includes(', ')) return false;
+    const words = v.split(/\s+/);
+    if (words.length > maxWords) return false;
+    if (words.length >= 2 && ENTITY_PROSE_STOP_WORDS.test(words[0])) return false;
+    return true;
+  }
+
   const TEMPLATE_RULES = [
     { key: "{model} Weekly Limit", pattern: /^(Gemini(?:\s+\d+(?:\.\d+)?)?(?:\s+[A-Za-z][\w-]{0,48}){1,3})\s+Weekly\s+Limit$/i, replace: (_, model) => `${model} 每周限额` },
     { key: "{model} Daily Limit", pattern: /^(Gemini(?:\s+\d+(?:\.\d+)?)?(?:\s+[A-Za-z][\w-]{0,48}){1,3})\s+Daily\s+Limit$/i, replace: (_, model) => `${model} 每日限额` },
@@ -805,7 +817,7 @@
 
     // 3. 针对特定目标的动态操作 (如 More actions for Google Drive)
     {
-      key: "More actions for {name}", pattern: /^More actions for\s+(.+)$/i,
+      key: "More actions for {name}", pattern: /^More actions for\s+([^.?!{}\n]{1,80})$/i,
       replace: (_, name) => `${name} 的更多操作`
     },
 
@@ -1444,7 +1456,7 @@
       replace: (_, b) => `已将 ${b} 发布到远端 origin。`
     },
     {
-      key: "All changes since {ref}", pattern: /^All\s+changes\s+since\s+(.+)$/i,
+      key: "All changes since {ref}", pattern: /^All\s+changes\s+since\s+([^.?!{}\n]{1,80})$/i,
       replace: (_, r) => `自 ${r} 以来的所有更改`
     },
     {
@@ -1962,7 +1974,7 @@
     },
     {
       key: "Add bundle {name}",
-      pattern: /^Add\s+bundle\s+(.+)$/i,
+      pattern: /^Add\s+bundle\s+([^.?!{}\n]{1,80})$/i,
       replace: (_, name) => `添加扩展包 ${name}`
     },
     {
@@ -2240,17 +2252,18 @@
     },
     {
       key: "Configure {server}",
-      pattern: /^Configure\s+(.+)$/i,
+      pattern: /^Configure\s+([^.!?;:{}\n()]{1,80})$/i,
+      guard: (_el, m) => isEntityNameSlot(m[1], 4),
       replace: (_, s) => `配置 ${s}`
     },
     {
       key: "More options for {title}",
-      pattern: /^More\s+options\s+for\s+(.+)$/i,
+      pattern: /^More\s+options\s+for\s+([^.?!{}\n]{1,80})$/i,
       replace: (_, t) => `${t} 的更多选项`
     },
     {
       key: "Forked from {source}",
-      pattern: /^Forked\s+from\s+(.+)$/i,
+      pattern: /^Forked\s+from\s+([^.?!{}\n]{1,80})$/i,
       replace: (_, s) => `复刻自 ${s}`
     },
     {
@@ -2265,23 +2278,23 @@
     },
     {
       key: "Secret for {provider}",
-      pattern: /^Secret\s+for\s+(.+)$/i,
+      pattern: /^Secret\s+for\s+([^.?!{}\n]{1,80})$/i,
       replace: (_, p) => `${p} 的密钥`
     },
     {
       key: "New secret for {account}",
-      pattern: /^New\s+secret\s+for\s+(.+)$/i,
+      pattern: /^New\s+secret\s+for\s+([^.?!{}\n]{1,80})$/i,
       replace: (_, a) => `${a} 的新密钥`
     },
     {
       key: "See more in {name}",
-      pattern: /^See\s+more\s+in\s+(.+)$/i,
-      replace: (_, n) => `在 ${n} 中查看更多`
+      pattern: /^See\s+more\s+in\s+([^.?!{}\n]{1,80})$/i,
+      replace: (_, n) => `在 ${nestedLabel(n)} 中查看更多`
     },
     {
       key: "See less in {name}",
-      pattern: /^See\s+less\s+in\s+(.+)$/i,
-      replace: (_, n) => `在 ${n} 中收起部分内容`
+      pattern: /^See\s+less\s+in\s+([^.?!{}\n]{1,80})$/i,
+      replace: (_, n) => `在 ${nestedLabel(n)} 中收起部分内容`
     },
     {
       key: "Sign in from the {panel} panel.",
@@ -2315,12 +2328,12 @@
     },
     {
       key: "Pin Entire {target}",
-      pattern: /^Pin\s+Entire\s+(.+)$/i,
+      pattern: /^Pin\s+Entire\s+([^.?!{}\n]{1,80})$/i,
       replace: (_, t) => `固定整个 ${nestedLabel(t)}`
     },
     {
       key: "Unpin {target}",
-      pattern: /^Unpin\s+(.+)$/i,
+      pattern: /^Unpin\s+([^.?!{}\n]{1,80})$/i,
       replace: (_, t) => `取消固定 ${nestedLabel(t)}`
     },
     {
@@ -2352,30 +2365,33 @@
   }
 
   for (const rule of TEMPLATE_RULES) {
-    rule.inlineOnly = rule.key.includes('{0}');
+    rule.inlineOnly = /\{\d+\}/.test(rule.key);
   }
   function matchTemplate(key, el) {
     if (isElapsedDurationNode(el) && /^\d+\s*(?:d|h|m|s|ms)(?:\s+\d+\s*(?:h|m|s|ms))*$/i.test(key)) {
       lastMatchedKeys = ['{duration}'];
       return formatDuration(key);
     }
-    const hasInlineSlot = key.includes('{0}');
+    const hasInlineSlot = /\{\d+\}/.test(key);
     for (let i = 0; i < customTemplateRules.length; i++) {
       const rule = customTemplateRules[i];
-      if (rule.inlineOnly && !hasInlineSlot) continue;
-      if (rule.pattern.test(key)) {
-        lastMatchedKeys = [rule.key];
-        return key.replace(rule.pattern, rule.replace);
-      }
+      if (Boolean(rule.inlineOnly) !== hasInlineSlot) continue;
+      if (!rule.pattern.test(key)) continue;
+      const replaced = key.replace(rule.pattern, rule.replace);
+      if (!hasInlineSlot && /\{\d+\}/.test(replaced)) continue;
+      lastMatchedKeys = [rule.key];
+      return replaced;
     }
     for (let i = 0; i < TEMPLATE_RULES.length; i++) {
       const rule = TEMPLATE_RULES[i];
-      if (rule.inlineOnly && !hasInlineSlot) continue;
-      if (rule.guard && !rule.guard(el)) continue;
-      if (rule.pattern.test(key)) {
-        lastMatchedKeys = [rule.key];
-        return key.replace(rule.pattern, rule.replace);
-      }
+      if (Boolean(rule.inlineOnly) !== hasInlineSlot) continue;
+      const match = key.match(rule.pattern);
+      if (!match) continue;
+      if (rule.guard && !rule.guard(el, match)) continue;
+      const replaced = key.replace(rule.pattern, rule.replace);
+      if (!hasInlineSlot && /\{\d+\}/.test(replaced)) continue;
+      lastMatchedKeys = [rule.key];
+      return replaced;
     }
     return undefined;
   }
@@ -2808,6 +2824,69 @@
       return !slot || slot.group !== el || slot.groupParent !== node.parentElement || (getValue(node, '') !== slot.last && getValue(node, '') !== slot.original);
     })) invalidateInlineGroup(el);
   }
+  function mapZhTerminalPunct(ch) {
+    if (ch === '.') return '。';
+    if (ch === '?') return '？';
+    if (ch === '!') return '！';
+    return '';
+  }
+  function translateInlineGroupText(norm, el) {
+    const direct = translation(norm, el);
+    if (direct !== norm && /[\u3400-\u9fff]/.test(direct)) {
+      return { zh: direct, keys: [...lastMatchedKeys] };
+    }
+    // Trailing standalone placeholder(s) after a complete sentence (e.g. "Main sentence. {0}.")
+    const trailingMatch = norm.match(/^([\s\S]+?[.?!])(\s*)((?:\{\d+\})+)([.?!])?$/);
+    if (trailingMatch) {
+      const [, prefix, sep, tailPh, tailPunct] = trailingMatch;
+      const prefixZh = translation(prefix, el);
+      const prefixKeys = [...lastMatchedKeys];
+      if (
+        prefixZh !== prefix &&
+        /[\u3400-\u9fff]/.test(prefixZh) &&
+        placeholderTokens(prefixZh).join(',') === placeholderTokens(prefix).join(',')
+      ) {
+        const mappedPunct = tailPunct ? mapZhTerminalPunct(tailPunct) : '';
+        return { zh: `${prefixZh}${sep ? ' ' : ''}${tailPh}${mappedPunct}`, keys: prefixKeys };
+      }
+    }
+    // Atomic sentence-level split: only accept if every sentence translates cleanly with preserved placeholders.
+    const sentences = norm.split(/(?<=[.?!])\s+/);
+    if (sentences.length < 2) return null;
+    const translatedParts = [];
+    const collectedKeys = [];
+    let hasTranslatedProse = false;
+    for (const rawSentence of sentences) {
+      const sentence = normalize(rawSentence);
+      if (!sentence) continue;
+      const purePh = sentence.match(/^((?:\{\d+\})+)([.?!])?$/);
+      if (purePh) {
+        translatedParts.push(`${purePh[1]}${purePh[2] ? mapZhTerminalPunct(purePh[2]) : ''}`);
+        continue;
+      }
+      const partZh = translation(sentence, el);
+      const partKeys = [...lastMatchedKeys];
+      if (
+        partZh === sentence ||
+        !/[\u3400-\u9fff]/.test(partZh) ||
+        placeholderTokens(partZh).join(',') !== placeholderTokens(sentence).join(',')
+      ) {
+        return null;
+      }
+      hasTranslatedProse = true;
+      translatedParts.push(partZh);
+      for (const k of partKeys) if (!collectedKeys.includes(k)) collectedKeys.push(k);
+    }
+    if (!hasTranslatedProse || !translatedParts.length) return null;
+    let combined = translatedParts[0];
+    for (let i = 1; i < translatedParts.length; i++) {
+      const prev = combined;
+      const next = translatedParts[i];
+      const needSpace = /\{\d+\}$/.test(prev) || /^\{\d+\}/.test(next);
+      combined += (needSpace ? ' ' : '') + next;
+    }
+    return { zh: combined, keys: collectedKeys };
+  }
   function tryTranslateInlineGroup(el, scan = 0, queue = waiting) {
     if (conservative && !inSystemSettings(el, scan) && !el.closest('[data-testid*="empty"],[data-testid*="sidecar"],[data-testid*="modal"],[data-testid*="card"],[role="region"]')) return false;
     const standard = isInlineGroupContainer(el, scan);
@@ -2821,13 +2900,13 @@
       invalidateRecordedGroupIfStale(el);
       const norm = normalize(composite.rawTemplate);
       if (!norm) return false;
-      const zh = translation(norm, el);
-      const groupKeys = [...lastMatchedKeys];
-      if (zh === norm || !/[\u3400-\u9fff]/.test(zh)) {
+      const resolved = translateInlineGroupText(norm, el);
+      if (!resolved) {
         if (inlineGroups.has(el)) invalidateInlineGroup(el);
         clearInlineGroupUnsupported(el);
         return true;
       }
+      const { zh, keys: groupKeys } = resolved;
       const segments = validateInlineSegments(norm, zh, composite.slotsMap);
       if (!segments) {
         if (inlineGroups.has(el)) invalidateInlineGroup(el);
@@ -2839,9 +2918,9 @@
     const { rawTemplate, inlineElements, slotsMap } = groupTemplate(el);
     const norm = normalize(rawTemplate);
     if (!norm) return false;
-    const zh = translation(norm, el);
-    const groupKeys = [...lastMatchedKeys];
-    if (zh === norm || !/[\u3400-\u9fff]/.test(zh)) { clearInlineGroupUnsupported(el); return false; }
+    const resolved = translateInlineGroupText(norm, el);
+    if (!resolved) { clearInlineGroupUnsupported(el); return false; }
+    const { zh, keys: groupKeys } = resolved;
     if (!inlineElements.length) {
       const items = slotsMap.get(0) || [];
       if (items.length <= 1) return false;
