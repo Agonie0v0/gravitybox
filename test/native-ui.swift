@@ -6959,6 +6959,49 @@ import Cocoa
             check(!Assistant.shouldSuppressMenuPopoverDismiss(isTrackingPopUpMenu: false), "Regression: MenuFloatingPanel dismissal must be allowed when no popup menu is tracking")
             check(Assistant.shouldSuppressMenuPopoverDismiss() == Design.isTrackingPopUpMenu, "Regression: default shouldSuppressMenuPopoverDismiss must mirror Design.isTrackingPopUpMenu")
 
+            // 跨 Space / 全屏空间下 NSMenu 弹窗子窗口挂载与层级保持回归保护
+            let hostForPopup = NSWindow(contentRect: NSRect(x: -24000, y: -24000, width: 320, height: 220), styleMask: [.titled], backing: .buffered, defer: false)
+            Assistant.configureHeadlessWindowIfNeeded(hostForPopup)
+            hostForPopup.level = .statusBar
+            hostForPopup.orderFront(nil)
+
+            let fakePopupContainer = NSWindow(contentRect: NSRect(x: -24000, y: -24000, width: 120, height: 90), styleMask: [.borderless], backing: .buffered, defer: false)
+            Assistant.configureHeadlessWindowIfNeeded(fakePopupContainer)
+            fakePopupContainer.level = .popUpMenu
+            fakePopupContainer.orderFront(nil)
+
+            let fakePopupGlassChild = NSWindow(contentRect: NSRect(x: -24000, y: -24000, width: 140, height: 110), styleMask: [.borderless], backing: .buffered, defer: false)
+            Assistant.configureHeadlessWindowIfNeeded(fakePopupGlassChild)
+            fakePopupContainer.addChildWindow(fakePopupGlassChild, ordered: .above)
+            fakePopupGlassChild.level = .popUpMenu
+
+            let fakeStatusBarWin = NSWindow(contentRect: NSRect(x: -24000, y: -24000, width: 28, height: 24), styleMask: [.borderless], backing: .buffered, defer: false)
+            Assistant.configureHeadlessWindowIfNeeded(fakeStatusBarWin)
+            fakeStatusBarWin.level = .statusBar
+            fakeStatusBarWin.orderFront(nil)
+
+            check(Design.isTrackedPopUpContainerWindow(fakePopupContainer, excluding: hostForPopup), "Regression: visible .popUpMenu container window must match popup anchoring")
+            check(!Design.isTrackedPopUpContainerWindow(hostForPopup, excluding: hostForPopup), "Regression: hostWindow must never be treated as its own popup window")
+            check(!Design.isTrackedPopUpContainerWindow(fakeStatusBarWin, excluding: hostForPopup), "Regression: .statusBar windows must not be captured as popup containers")
+
+            var anchoredList: [NSWindow] = []
+            let newlyAnchored = Design.anchorTrackedPopUpWindows(to: hostForPopup, in: [hostForPopup, fakeStatusBarWin, fakePopupContainer, fakePopupGlassChild], alreadyAnchored: &anchoredList)
+            check(newlyAnchored.count == 1 && newlyAnchored.first === fakePopupContainer, "Regression: anchorTrackedPopUpWindows must attach the popup container window to hostWindow")
+            check(fakePopupContainer.parent === hostForPopup, "Regression: popup container window must become child of hostWindow so WindowServer syncs its Space")
+            check(fakePopupContainer.level == .popUpMenu, "Regression: popup container window must keep .popUpMenu level above statusBar host")
+            check(fakePopupGlassChild.level == .popUpMenu, "Regression: popup glass child window must keep .popUpMenu level above statusBar host")
+
+            let repeatAnchored = Design.anchorTrackedPopUpWindows(to: hostForPopup, in: [hostForPopup, fakeStatusBarWin, fakePopupContainer, fakePopupGlassChild], alreadyAnchored: &anchoredList)
+            check(repeatAnchored.isEmpty, "Regression: already-anchored popup container must not be re-anchored repeatedly")
+
+            Design.detachTrackedPopUpWindows(anchoredList, from: hostForPopup)
+            check(fakePopupContainer.parent == nil, "Regression: detachTrackedPopUpWindows must cleanly remove popup child from hostWindow")
+            fakePopupContainer.removeChildWindow(fakePopupGlassChild)
+            fakePopupGlassChild.orderOut(nil)
+            fakePopupContainer.orderOut(nil)
+            fakeStatusBarWin.orderOut(nil)
+            hostForPopup.orderOut(nil)
+
             let nativeDir = URL(fileURLWithPath: #filePath)
                 .deletingLastPathComponent()
                 .deletingLastPathComponent()

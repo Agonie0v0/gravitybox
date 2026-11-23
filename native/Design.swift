@@ -280,16 +280,69 @@ enum Design {
         return NSPoint(x: 0, y: yOffset)
     }
 
+    static func isTrackedPopUpContainerWindow(_ window: NSWindow, excluding hostWindow: NSWindow) -> Bool {
+        guard window.isVisible, window !== hostWindow else { return false }
+        guard window.level.rawValue >= NSWindow.Level.popUpMenu.rawValue else { return false }
+        let className = window.className
+        if className.contains("StatusBar") { return false }
+        // Liquid Glass menus render inside a child _NSGlassEffectWindow owned by NSPopupMenuWindow;
+        // attach the container window so both move into the host window's space together.
+        if className.contains("Glass") && window.parent != nil { return false }
+        return className.contains("Popup") || className.contains("Menu") || window.parent == nil
+    }
+
+    @discardableResult
+    static func anchorTrackedPopUpWindows(
+        to hostWindow: NSWindow,
+        in windows: [NSWindow] = NSApp.windows,
+        alreadyAnchored: inout [NSWindow]
+    ) -> [NSWindow] {
+        var newlyAnchored: [NSWindow] = []
+        for candidate in windows {
+            guard isTrackedPopUpContainerWindow(candidate, excluding: hostWindow) else { continue }
+            guard !alreadyAnchored.contains(where: { $0 === candidate }) else { continue }
+            let targetLevel = NSWindow.Level(rawValue: max(candidate.level.rawValue, NSWindow.Level.popUpMenu.rawValue))
+            let childLevels = (candidate.childWindows ?? []).map {
+                ($0, NSWindow.Level(rawValue: max($0.level.rawValue, NSWindow.Level.popUpMenu.rawValue)))
+            }
+            if let existingParent = candidate.parent, existingParent !== hostWindow {
+                existingParent.removeChildWindow(candidate)
+            }
+            if candidate.parent === hostWindow {
+                // Re-attach once so WindowServer synchronizes child windows (e.g. _NSGlassEffectWindow) onto hostWindow's active space.
+                hostWindow.removeChildWindow(candidate)
+            }
+            hostWindow.addChildWindow(candidate, ordered: .above)
+            if candidate.level != targetLevel {
+                candidate.level = targetLevel
+            }
+            for (child, childLevel) in childLevels where child.level != childLevel {
+                child.level = childLevel
+            }
+            alreadyAnchored.append(candidate)
+            newlyAnchored.append(candidate)
+        }
+        return newlyAnchored
+    }
+
+    static func detachTrackedPopUpWindows(_ windows: [NSWindow], from hostWindow: NSWindow?) {
+        guard let hostWindow else { return }
+        for popupWindow in windows where popupWindow.parent === hostWindow {
+            hostWindow.removeChildWindow(popupWindow)
+        }
+    }
+
     static func popUpMenu(_ menu: NSMenu, below anchor: NSView, spacing: CGFloat = 6, matchAnchorWidth: Bool = false) {
         if matchAnchorWidth {
             menu.minimumWidth = max(menu.minimumWidth, anchor.bounds.width)
         }
+        let hostWindow = anchor.window
         #if !NATIVE_UI_TEST
-        if let panel = anchor.window as? MenuFloatingPanel {
+        if let panel = hostWindow as? MenuFloatingPanel {
             if !panel.isKeyWindow {
                 panel.makeKey()
             }
-        } else if let hostWindow = anchor.window, hostWindow.canBecomeKey {
+        } else if let hostWindow, hostWindow.canBecomeKey {
             if !NSApp.isActive {
                 activateApplicationForcingFront()
             }
@@ -298,12 +351,32 @@ enum Design {
             }
         }
         #else
-        if let panel = anchor.window as? MenuFloatingPanel, !panel.isKeyWindow {
+        if let panel = hostWindow as? MenuFloatingPanel, !panel.isKeyWindow {
             panel.makeKey()
         }
         #endif
+        var isTrackingThisMenu = true
+        var anchoredPopUpWindows: [NSWindow] = []
+        var trackingObserver: NSObjectProtocol?
+        if let hostWindow {
+            trackingObserver = NotificationCenter.default.addObserver(
+                forName: NSMenu.didBeginTrackingNotification,
+                object: nil,
+                queue: .main
+            ) { [weak hostWindow] _ in
+                DispatchQueue.main.async {
+                    guard isTrackingThisMenu, let hostWindow, hostWindow.isVisible else { return }
+                    _ = anchorTrackedPopUpWindows(to: hostWindow, alreadyAnchored: &anchoredPopUpWindows)
+                }
+            }
+        }
         activePopUpMenuDepth += 1
         defer {
+            isTrackingThisMenu = false
+            if let trackingObserver {
+                NotificationCenter.default.removeObserver(trackingObserver)
+            }
+            detachTrackedPopUpWindows(anchoredPopUpWindows, from: hostWindow)
             activePopUpMenuDepth = max(0, activePopUpMenuDepth - 1)
             if let panel = anchor.window as? MenuFloatingPanel, panel.isVisible {
                 panel.makeKey()
