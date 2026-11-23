@@ -507,13 +507,24 @@
      protection markers, data-testid) invalidates the element, and therefore its recorded subtree. */
   const protectionTokens = new WeakMap();
   const PROTECTIVE_CLASSES = new Set(['chat-message', 'message-content', 'conversation-title', 'terminal', 'output-view', 'debug-console', 'code-view', 'artifact-container', 'model-item', 'markdown', 'markdown-frontmatter', 'markdown-alert-title', 'notebook-markdown-cell', 'prose', 'file-tree', 'monaco-editor', 'xterm', 'gravitybox-project-name']);
-  const PROTECTION_ATTRS = ['class', 'role', 'contenteditable', 'data-testid', 'data-gravitybox-protect', 'data-gravitybox-user-content', 'data-gravitybox-user-name'];
+  const PROTECTION_ATTRS = ['class', 'role', 'contenteditable', 'data-testid', 'data-gravitybox-protect', 'data-gravitybox-user-content', 'data-gravitybox-user-name', 'data-message-id', 'data-message-author-role', 'href'];
+  const PROTECTION_ATTR_SET = new Set(PROTECTION_ATTRS);
+  const OBSERVER_ATTR_FILTER = [...TRANSLATABLE_ATTRS, ...PROTECTION_ATTRS];
+  function isProtectedHref(el) {
+    if (!el || el.tagName !== 'A') return '';
+    const href = el.getAttribute('href') || '';
+    if (!href) return '';
+    if (href.startsWith('/c/') || href.includes('/c/') || ENTITY_HREF.test(entityAnchorPath(el))) return '1';
+    return '';
+  }
   function protectionToken(el) {
     const raw = typeof el.className === 'string' ? el.className : '';
     let protective = '';
     for (const token of raw.split(/\s+/)) if (token && PROTECTIVE_CLASSES.has(token)) protective += token + ' ';
     return protective + '|' + (el.getAttribute('role') || '') + '|' + (el.getAttribute('contenteditable') || '') +
       '|' + (el.hasAttribute('data-gravitybox-protect') ? 'p' : '') + (el.hasAttribute('data-gravitybox-user-content') ? 'u' : '') + (el.hasAttribute('data-gravitybox-user-name') ? 'n' : '') +
+      '|' + (el.hasAttribute('data-message-id') ? 'm' : '') + (el.hasAttribute('data-message-author-role') ? 'a' : '') +
+      '|' + isProtectedHref(el) +
       '|' + (el.getAttribute('data-testid') || '');
   }
   function protectionChanged(el) {
@@ -2899,6 +2910,13 @@
     if (!reconcileQueue) { reconcilePasses++; reconcileQueue = { nodes: [...activeNodes], index: 0 }; }
     const queue = reconcileQueue;
     const scan = ++scanCount;
+    if (queue.index === 0 && inlineGroupContainers.size) {
+      refreshProjectNames(scan);
+      for (const groupEl of [...inlineGroupContainers]) {
+        if (!groupEl.isConnected) { inlineGroupContainers.delete(groupEl); continue; }
+        if (!eligible(groupEl, scan)) invalidateInlineGroup(groupEl);
+      }
+    }
     const started = performance.now();
     while (queue.index < queue.nodes.length && performance.now() - started < RECONCILE_BUDGET_MS) {
       const node = queue.nodes[queue.index++];
@@ -2992,11 +3010,11 @@
     }
     maxSliceMs = Math.max(maxSliceMs, performance.now() - flushStarted);
   }
-  const observerOptions = { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['title', 'aria-label', 'data-tooltip', 'placeholder', 'class', 'role', 'contenteditable', 'data-testid', 'data-gravitybox-protect', 'data-gravitybox-user-content', 'data-gravitybox-user-name'] };
+  const observerOptions = { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: OBSERVER_ATTR_FILTER };
   function observe(root) { if (!observed.has(root)) { observed.add(root); observer.observe(root, observerOptions); } }
-  /* Any mutation of class / role / contenteditable / data-gravitybox-protect can switch a node between
-     "translatable" and "protected", so a reconcile pass is requested; the reconcile walks only the
-     recorded nodes instead of re-scanning the changed node's whole subtree. */
+  /* Any mutation of class / role / contenteditable / protection / message / link attributes can switch
+     a node between "translatable" and "protected", so a reconcile pass is requested; the reconcile
+     walks only the recorded nodes instead of re-scanning the changed node's whole subtree. */
   observer = new MutationObserver(mutations => {
     if (!scanning) checkRoute();
     let hasAdded = false;
@@ -3009,6 +3027,7 @@
       if (mutation.type === 'childList') {
         if (inStaticProtected) {
           if (mutation.removedNodes.length && [...mutation.removedNodes].some(n => activeNodes.has(n))) reconcileRequested = true;
+          if (mutation.addedNodes.length && activeNodes.size > 0 && [...mutation.addedNodes].some(n => activeNodes.has(n) || (n.nodeType === Node.ELEMENT_NODE && (n.hasAttribute('data-gravitybox-loc') || n.querySelector?.('[data-gravitybox-loc="1"]'))))) reconcileRequested = true;
           continue;
         }
         for (const node of mutation.addedNodes) {
@@ -3031,7 +3050,8 @@
         const attr = mutation.attributeName || '';
         const slot = nodeSlots.get(mutation.target)?.get(attr);
         if (slot && getValue(mutation.target, attr) === slot.last) continue;
-        if (PROTECTION_ATTRS.includes(attr)) {
+        if (attr === 'href' && mutation.target.tagName !== 'A') continue;
+        if (PROTECTION_ATTR_SET.has(attr)) {
           if (!protectionChanged(mutation.target)) continue;
           reconcileRequested = true;
         }
@@ -3104,13 +3124,31 @@
     toggleLanguage(mode) {
       const next = mode || (languageMode === 'zh' ? 'en' : 'zh');
       languageMode = next;
-      for (const node of activeNodes) {
+      const scan = ++scanCount;
+      refreshProjectNames(scan);
+      for (const groupEl of [...inlineGroupContainers]) {
+        if (!groupEl.isConnected) { inlineGroupContainers.delete(groupEl); continue; }
+        if (!eligible(groupEl, scan)) invalidateInlineGroup(groupEl);
+      }
+      for (const node of [...activeNodes]) {
         if (!node.isConnected) { activeNodes.delete(node); continue; }
         const slots = nodeSlots.get(node);
-        if (!slots) continue;
-        for (const [attr, slot] of slots) {
-          const targetVal = languageMode === 'en' ? slot.original : slot.last;
-          setValue(node, attr, targetVal);
+        if (!slots) { activeNodes.delete(node); continue; }
+        for (const [attr, slot] of [...slots]) {
+          const current = getValue(node, attr);
+          if (!translatable(node, attr, scan)) {
+            if (current === slot.last) setValue(node, attr, slot.original);
+            slots.delete(attr);
+            if (!slots.size) activeNodes.delete(node);
+            syncElementLocFlag(attr ? node : node.parentElement);
+            if (slot.group) syncElementLocFlag(slot.group);
+            continue;
+          }
+          if (languageMode === 'en') {
+            if (current === slot.last) setValue(node, attr, slot.original);
+          } else {
+            if (current === slot.original) setValue(node, attr, slot.last);
+          }
           syncElementLocFlag(attr ? node : node.parentElement);
           if (slot.group) syncElementLocFlag(slot.group);
         }

@@ -1339,6 +1339,7 @@
     "maintenance.journal.err.manifest_identity": "维护事务清单身份不匹配",
     "maintenance.journal.err.manifest_invalid": "维护事务记录格式无效，原件已保留",
     "maintenance.err.quit_before_recovery": "请先退出 Antigravity，再恢复维护事务",
+    "maintenance.err.process_probe_unknown": "无法确认 Antigravity 进程状态，已暂停文件移动，请重试",
     "maintenance.err.tx_out_of_bounds": "维护事务路径超出受控目录",
     "maintenance.err.tx_root_mismatch": "维护事务根目录身份不匹配",
     "maintenance.err.tx_parent_mismatch": "维护事务父路径身份不匹配",

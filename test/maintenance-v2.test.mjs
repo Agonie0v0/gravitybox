@@ -635,3 +635,54 @@ test('P1-43: restore() Schema v2 预检拦截指向 User/state.vscdb 等核心�
   }
 });
 
+test('P0-07: 进程探测返回 null(超时/权限错误) 时进入 unknown 态，只读 scan 可返回但一切清理/恢复移动次数为 0', async () => {
+  const temp = await realpath(await mkdtemp(join(tmpdir(), 'gb-maint-p0-07-')));
+  const profile = join(temp, 'profile');
+  const trash = join(temp, 'trash');
+  const geminiDir = join(temp, 'gemini');
+  await Promise.all([mkdir(profile), mkdir(trash), mkdir(geminiDir)]);
+  try {
+    await mkdir(join(profile, 'Cache'), { recursive: true });
+    await writeFile(join(profile, 'Cache', 'a.bin'), 'cache-bytes');
+
+    // 先在确定停止时清理一次，留下可恢复快照用于测试 restore 门禁
+    const stoppedMaint = new CacheMaintenance(profile, trash, undefined, {
+      geminiDir,
+      processProbe: async () => [],
+    });
+    const baselineScan = await stoppedMaint.scan();
+    assert.equal(baselineScan.processProbeUnknown, false);
+    const cleared = await stoppedMaint.clear(baselineScan.token, ['Cache']);
+    assert.equal(cleared.moved, 1);
+
+    // 重新生成一点 Cache 供后续 scan / smartClear 测试
+    await mkdir(join(profile, 'Cache'), { recursive: true });
+    await writeFile(join(profile, 'Cache', 'b.bin'), 'cache-bytes-2');
+
+    for (const [label, probeFn] of [
+      ['返回 null（超时）', async () => null],
+      ['抛出 EPERM（权限错误）', async () => { const err = new Error('EPERM'); err.code = 'EPERM'; throw err; }],
+    ]) {
+      let mutatedCalls = 0;
+      const unknownMaint = new CacheMaintenance(profile, trash, undefined, {
+        geminiDir,
+        processProbe: probeFn,
+        onMutated: () => { mutatedCalls++; },
+      });
+
+      const scan = await unknownMaint.scan();
+      assert.equal(scan.processProbeUnknown, true, `${label}: scan 应允许只读返回并标记 processProbeUnknown`);
+      assert.ok(scan.entries.some(e => e.name === 'Cache' && e.bytes > 0));
+
+      await assert.rejects(() => unknownMaint.clear(scan.token, ['Cache']), /无法确认|process|retry|重试/i, `${label}: clear 必须拒绝`);
+      await assert.rejects(() => unknownMaint.smartClear({ scopes: ['runtime_cache'] }), /无法确认|process|retry|重试/i, `${label}: smartClear 必须拒绝`);
+      await assert.rejects(() => unknownMaint.restore(cleared.snapshotId), /无法确认|process|retry|重试/i, `${label}: restore 必须拒绝`);
+      assert.equal(mutatedCalls, 0, `${label}: 文件移动次数必须为 0`);
+      assert.equal(await readFile(join(profile, 'Cache', 'b.bin'), 'utf8'), 'cache-bytes-2');
+    }
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+

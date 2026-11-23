@@ -2080,6 +2080,53 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
       document.querySelector("#input").value = ${JSON.stringify(savedInputVal)};
     })()`);
   });
+  await check('P0-01: 节点原位复用进入保护区后自动恢复原文并注销记录，切语言不覆盖用户新值', async () => {
+    const tree = await main.send('Page.getFrameTree');
+    const ctx = await main.send('Page.createIsolatedWorld', { frameId: tree.frameTree.frame.id, worldName: 'GRAVITYBOX-localization-v1' });
+    await main.evaluate(`(() => {
+      document.body.insertAdjacentHTML('beforeend',
+        '<div id="p0-reuse-wrap">' +
+          '<button id="p0-reuse-msg">Settings</button>' +
+          '<button id="p0-reuse-role">Settings</button>' +
+          '<a id="p0-reuse-link" href="/settings">Settings</a>' +
+          '<button id="p0-reuse-user">Settings</button>' +
+        '</div>');
+    })()`);
+    await until(async () =>
+      (await text(main, '#p0-reuse-msg')) === '设置' &&
+      (await text(main, '#p0-reuse-role')) === '设置' &&
+      (await text(main, '#p0-reuse-link')) === '设置' &&
+      (await text(main, '#p0-reuse-user')) === '设置'
+    );
+
+    // 1. 节点原位加上 data-message-id / data-message-author-role / 会话 href 后，必须恢复原文并注销翻译记录
+    await main.evaluate(`(() => {
+      document.querySelector('#p0-reuse-msg').setAttribute('data-message-id', 'msg-1');
+      document.querySelector('#p0-reuse-role').setAttribute('data-message-author-role', 'user');
+      document.querySelector('#p0-reuse-link').setAttribute('href', '/c/12345678-1234-4123-8123-123456789abc');
+    })()`);
+    await until(async () =>
+      (await text(main, '#p0-reuse-msg')) === 'Settings' &&
+      (await text(main, '#p0-reuse-role')) === 'Settings' &&
+      (await text(main, '#p0-reuse-link')) === 'Settings'
+    );
+
+    // 2. 先复用为带保护属性并被用户写入新内容，即使来回切换语言也不得覆盖用户最新正文
+    await main.evaluate(`(() => {
+      const u = document.querySelector('#p0-reuse-user');
+      u.setAttribute('data-message-id', 'msg-user');
+      u.firstChild.nodeValue = 'User edited message Settings';
+    })()`);
+    await main.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.toggleLanguage("en")', ctx.executionContextId);
+    assert.equal(await text(main, '#p0-reuse-user'), 'User edited message Settings');
+    assert.equal(await text(main, '#p0-reuse-msg'), 'Settings');
+    await main.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.toggleLanguage("zh")', ctx.executionContextId);
+    assert.equal(await text(main, '#p0-reuse-user'), 'User edited message Settings');
+    assert.equal(await text(main, '#p0-reuse-msg'), 'Settings');
+    assert.equal(await text(main, '#p0-reuse-role'), 'Settings');
+    assert.equal(await text(main, '#p0-reuse-link'), 'Settings');
+    await main.evaluate('document.querySelector("#p0-reuse-wrap")?.remove()');
+  });
   const resources = (await execute('/bin/ps', ['-p', String(backend.pid), '-o', 'rss=,%cpu=,time='])).stdout.trim();
   const finalStatus = await status();
   const finalHeap = await main.send('Runtime.getHeapUsage');

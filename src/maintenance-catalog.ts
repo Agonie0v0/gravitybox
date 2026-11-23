@@ -278,15 +278,46 @@ export function hasBrowserProfileCommand(commands: string[], browserProfileDir: 
   return commands.some(trimmed => trimmed.includes(browserProfileDir) && !trimmed.includes('/bin/ps'));
 }
 
+export type ProcessProbeState = 'running' | 'stopped' | 'unknown';
+
+export function normalizeProcessProbeState(value: boolean | ProcessProbeState): ProcessProbeState {
+  if (value === 'running' || value === 'stopped' || value === 'unknown') return value;
+  return value ? 'running' : 'stopped';
+}
+
+export async function probeAntigravityRunning(
+  appPath = '/Applications/Antigravity.app',
+  probeCommands: () => Promise<string[] | null> = readProcessCommands,
+): Promise<ProcessProbeState> {
+  try {
+    const commands = await probeCommands();
+    if (!commands) return 'unknown';
+    return hasAntigravityCommand(commands, appPath) ? 'running' : 'stopped';
+  } catch {
+    return 'unknown';
+  }
+}
+
+export async function probeBrowserProfileRunning(
+  browserProfileDir: string,
+  probeCommands: () => Promise<string[] | null> = readProcessCommands,
+): Promise<ProcessProbeState> {
+  if (!browserProfileDir) return 'stopped';
+  try {
+    const commands = await probeCommands();
+    if (!commands) return 'unknown';
+    return hasBrowserProfileCommand(commands, browserProfileDir) ? 'running' : 'stopped';
+  } catch {
+    return 'unknown';
+  }
+}
+
 export async function antigravityRunning(appPath = '/Applications/Antigravity.app') {
-  const commands = await readProcessCommands();
-  return commands ? hasAntigravityCommand(commands, appPath) : false;
+  return (await probeAntigravityRunning(appPath)) !== 'stopped';
 }
 
 export async function browserProfileRunning(browserProfileDir: string): Promise<boolean> {
-  if (!browserProfileDir) return false;
-  const commands = await readProcessCommands();
-  return commands ? hasBrowserProfileCommand(commands, browserProfileDir) : false;
+  return (await probeBrowserProfileRunning(browserProfileDir)) !== 'stopped';
 }
 
 export interface CacheMaintenanceOptions {
@@ -294,7 +325,8 @@ export interface CacheMaintenanceOptions {
   stateDir?: string;
   fallbackTrashDir?: string;
   geminiDir?: string;
-  browserRunning?: () => Promise<boolean>;
+  browserRunning?: () => Promise<boolean | ProcessProbeState>;
+  processProbe?: () => Promise<string[] | null>;
   archiveDatabases?: (dbPaths: string[]) => Promise<unknown>;
   onMutated?: () => void | Promise<void>;
 }

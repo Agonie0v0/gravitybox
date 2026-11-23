@@ -1339,6 +1339,7 @@
     "maintenance.journal.err.manifest_identity": "Maintenance transaction manifest ownership mismatch",
     "maintenance.journal.err.manifest_invalid": "Invalid maintenance transaction log format; original file preserved",
     "maintenance.err.quit_before_recovery": "Please quit Antigravity before recovering the maintenance transaction",
+    "maintenance.err.process_probe_unknown": "Unable to verify whether Antigravity is running; file moves are paused—please retry",
     "maintenance.err.tx_out_of_bounds": "Maintenance transaction path exceeds managed directories",
     "maintenance.err.tx_root_mismatch": "Maintenance transaction root ownership mismatch",
     "maintenance.err.tx_parent_mismatch": "Maintenance transaction parent path ownership mismatch",
