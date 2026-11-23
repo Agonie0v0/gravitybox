@@ -9,19 +9,17 @@
 ## [1.2.0] - 2026-11-23
 
 ### Added
-- **Antigravity `2.33.0+` SSH Remote Window Zero-SSH Adaptation (`Milestone 1`)**：新增零外部 `ssh` 的 SSH 远程窗口准入与隔离（`src/ssh-context.ts` / `src/ssh-remote-rpc.ts`），基于 `browserContextId`、Main World `window.sshRemote` 与本机官方 `ssh -D` 子进程完成三联验真并解除 `connectOnce()` 冷启动单窗阻塞；通过 CDP Isolated World 同源 Connect JSON RPC 就地裁剪转发遥测，实现 SSH 窗口完整双语热适配（含打开 SSH 弹窗、路径 `(default)` 白名单、动态进度与多行错误拆译）、完整实时 HUD（及 `remote_unbridged` / `remote_stale` 平滑降级）与 `本机 / SSH: <host>` 上下文只读双周期配额查看（严防本机/远端串号，并在切号/安全重启/维护时展示活跃 SSH 保护提醒）。
-- **Unified Multi-Environment Ledger & Hybrid Account Attribution (`Milestone 2`)**：保持 `PRAGMA user_version = 2` 与 `1.1.3` 本地历史事件位级兼容，增量引入 `sync_receipts` 单事务原子写入（`events + event_revisions + rate_locks + sync_receipts`）与 `src/remote-usage-sync.ts` 同源 RPC 增量同步（按远端 `trajectoryId` 去重防同机多别名双计，独立 `usage-remote-observations.json` 时间线判定 `observed` / `inferred` / `unknown` 置信度）；在原生用量页、明细弹窗及事件卡片上线默认合并总览、`本机 % · SSH %` 占比、`environmentId × accountId` 正交筛选与离线 SSH 历史徽标（纯本机无 SSH 历史时自动隐藏筛选栏），并扩展 `tools/check-privacy.mjs` 拦截 SSH 公钥/敏感配置及非保留私网 IPv4。
-- **网络代理支持（HTTP / HTTPS）**：支持关闭、自动跟随 macOS 系统 HTTP/HTTPS 代理或手动指定 `http://` / `https://` 代理地址（不支持 PAC 与 SOCKS5），自动为 Antigravity 进程注入 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 环境、使 GravityBox 后台外联请求复用同一代理通道，并检测运行中进程的实际代理生效与 Shell 覆盖状态（`src/proxy.ts` / `native/SystemProxy.swift` / `native/AssistantProcessLifecycle.swift` / `native/Preferences.swift`）。
-- **Antigravity `2.34.0` 正式包收录与词典补全**：登记并验证 Google Antigravity `2.34.0` 官方正式包指纹与界面串提取快照（`ui-strings/2.34.0.json` / `assets/ui-extraction-manifest.json`），补全 `2.34.0` 新增词条至 `dict/base.json`，并修复 Tailwind 修饰符噪声过滤规则与保持跨端 ReDoS 安全正则一致性校验。
-- **Antigravity `2.34.0` BTW 侧边提问独立分栏支持**：支持对 BTW 侧边提问分栏窗口进行独立观测、轨迹前缀切片隔离及克隆前缀在用量账本中的去重归因，避免主会话与侧边提问互相串算（`src/hud/` / `src/usage-scanner.ts` / `runtime/`）。
+- **SSH 远程窗口零外部 `ssh` 适配**：通过本机 CDP 通道适配 Antigravity `2.33.0+` SSH 远程窗口（不拉起外部 `ssh` 进程），提供完整双语热适配、实时 HUD（含降级状态）、与本机隔离的 `本机 / SSH: <host>` 只读配额查看及活跃 SSH 保护提醒（`src/ssh-context.ts` / `src/ssh-remote-rpc.ts`）。
+- **本机 + SSH 统一多环境用量账本**：保持 `PRAGMA user_version = 2` 兼容，新增 `sync_receipts` 原子提交与同源 RPC 增量同步（按 `trajectoryId` 去重并基于时间线判定账号归属），上线合并总览、`本机 % · SSH %` 占比与 `environmentId × accountId` 筛选（`src/remote-usage-sync.ts` / `src/usage-ledger.ts`）。
+- **HTTP / HTTPS 网络代理支持**：支持关闭、跟随 macOS 系统代理或手动配置 `http(s)://` 代理，为 Antigravity 注入环境变量并检测运行中进程的代理生效与 Shell 覆盖状态（`src/proxy.ts` / `native/SystemProxy.swift`）。
+- **Antigravity `2.34.0` 正式包与 BTW 侧边提问支持**：收录 `2.34.0` 官方指纹与词典补全（`ui-strings/2.34.0.json`），支持 BTW 侧边提问独立分栏 HUD 观测与克隆前缀去重计费。
 
 ### Changed
-- **SSH 多主机 UI 优化**：总览页底部新增伴生 SSH 主机列表与下钻顶栏、菜单栏顶栏支持可展开范围胶囊（`MenuTopScopeExpanderView`）、用量页内嵌环境占比胶囊条与账号页新增远端只读卡片，全面优化多主机跨端视图切换与只读状态呈现（`native/Pages.swift` / `native/MenuPanelController.swift` / `native/MenuPanelComponents.swift` / `native/Usage.swift` / `native/Accounts.swift` / `native/SshEnvironment.swift`）。
+- **SSH 多主机 UI 优化**：总览页新增伴生 SSH 主机列表与下钻顶栏、菜单栏支持可展开范围切换胶囊、用量页内嵌环境占比条、账号页新增远端只读卡片（`native/`）。
 
 ### Fixed
-- **`sqlite-worker` 句柄泄漏与中等 BLOB 重复物化修复（`#26`，致谢 `@Agonie0v0`）**：在 `closeSqliteDatabase()` 中隔离 `ROLLBACK` 与 `close()` 防止无活跃事务时泄漏 SQLite 句柄，并通过 `createSqlBlobChunkReader()` 对中等大小 BLOB（`<= 64MB`）单次物化后按 `subarray()` 切片（`src/sqlite-worker.ts`）。
-- **原生界面交互、窗口激活与输入体验修复**：修复手动代理输入框初始文字纵向跳动及提前触发结束编辑的问题（`native/Preferences.swift` / `native/DesignControls.swift`）；将 `NSMenu` 弹出菜单锚定至宿主窗口空间、完善首次鼠标点击响应（`firstMouse`）、弹出菜单收起与激活逻辑，并统一备用账号冷却页脚文案为「切换后更新」及精简配额刷新副标题（`native/Design.swift` / `native/Assistant.swift` / `native/MenuPanelController.swift` / `assets/i18n/`）。
-- **IDE 本地化模板隔离、HUD 枚举与数据安全加固**：隔离内联与非内联模板规则、增加组合式回退翻译并新增 JSX 内联组门禁（`runtime/engine.js` / `tools/extract-inline-groups-ast.mjs`）；统一 `CortexStepStatus` 枚举并修复远端与子代理 HUD 指标、菜单/用量作用域隔离与账号拉取活锁；加固 SSH 分页、WAL 扫描、切号回滚、维护进程守卫及发布门禁摘要与跳过计数校验（`src/` / `tools/` / `native/`）。
+- **`sqlite-worker` 稳定性修复（`#26`，致谢 `@Agonie0v0`）**：修复无活跃事务关闭连接时的句柄泄漏，并优化中等 BLOB 的单次切片读取（`src/sqlite-worker.ts`）。
+- **原生交互与本地化/安全加固**：修复手动代理输入框跳动、`NSMenu` 弹窗锚定、`firstMouse` 点击响应与备用账号冷却文案统一；隔离 IDE 内联/非内联模板并新增 JSX 内联组门禁，统一 HUD 状态枚举并加固 SSH 分页、WAL 扫描与切号回滚守卫。
 
 ## [1.1.3] - 2026-11-21
 
