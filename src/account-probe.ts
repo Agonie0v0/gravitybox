@@ -370,7 +370,6 @@ export function resolveProbeSubscriptionTier(
     : [
         userStatus.userTier?.id,
         userStatus.userTier?.name,
-        userStatus.userTier?.description,
         userStatus.g1Tier,
         userStatus.g1_tier,
         userStatus.paidTier?.id,
@@ -382,15 +381,22 @@ export function resolveProbeSubscriptionTier(
         userStatus.planStatus?.planInfo?.planName,
         userStatus.planStatus?.planInfo?.teamsTier,
       ];
-  const allCandidates = [...primaryCandidates, ...fallbackCandidates];
-  if (allCandidates.some(v => typeof v === 'string' && /ultra/i.test(v))) {
+  const lowConfidenceCandidates = isEnterpriseVertex ? [] : [userStatus.userTier?.description];
+  if (primaryCandidates.some(v => typeof v === 'string' && /ultra/i.test(v))) {
     return 'ULTRA';
   }
   for (const candidate of primaryCandidates) {
     const resolved = classifySubscriptionTierCandidate(candidate);
     if (resolved) return resolved;
   }
+  if (fallbackCandidates.some(v => typeof v === 'string' && /ultra/i.test(v))) {
+    return 'ULTRA';
+  }
   for (const candidate of fallbackCandidates) {
+    const resolved = classifySubscriptionTierCandidate(candidate);
+    if (resolved) return resolved;
+  }
+  for (const candidate of lowConfidenceCandidates) {
     const resolved = classifySubscriptionTierCandidate(candidate);
     if (resolved) return resolved;
   }
@@ -440,7 +446,7 @@ export function buildLiveProbeResultFromRpc(
     modelQuotaFromNormalized: (model: ReturnType<typeof applyFamilyWindows>[number]) => ModelQuota;
     groupToQuotaGroup: (group: ReturnType<typeof mergeGroupSets>[number]) => QuotaGroup;
   } = { modelQuotaFromNormalized, groupToQuotaGroup },
-  options?: { sourcePrefix?: 'live' | 'remote_rpc' }
+  options?: { sourcePrefix?: 'live' | 'remote_rpc'; quotaSummaryError?: string; projectId?: string | null }
 ): LiveLanguageServerStatus | null {
   try {
     const userStatus = userStatusData?.userStatus ?? userStatusData;
@@ -493,13 +499,15 @@ export function buildLiveProbeResultFromRpc(
       model_forwarding_rules: {},
       source: 'live',
       refresh_state: {
-        complete: models.length > 0 && groups.length > 0 && missingFamilies.length === 0,
+        complete: Boolean(quotaSummaryData) && models.length > 0 && groups.length > 0 && missingFamilies.length === 0,
         endpointsAttempted: [`${prefix}:GetUserStatus`, `${prefix}:RetrieveUserQuotaSummary`],
         endpointsSucceeded: [`${prefix}:GetUserStatus`, ...(quotaSummaryData ? [`${prefix}:RetrieveUserQuotaSummary`] : [])],
         missingFamilies,
         missingWindows: [],
         carriedGroups: 0,
         refreshedAt: observedAt,
+        ...(options?.quotaSummaryError ? { error: options.quotaSummaryError } : {}),
+        ...(typeof options?.projectId === 'string' && options.projectId.trim() ? { projectId: options.projectId.trim() } : {}),
       },
       quota_warnings: models.length === 0 ? [`NO_MODEL_RECORDS:${bt('account_probe.warn.no_model_records')}`] : undefined,
     };

@@ -247,6 +247,9 @@ export async function scanDatabaseEvents(ctx: UsageScanContext, dbPath: string, 
     if (signal?.aborted) break;
     lastResult = await scanDatabaseEventsOnce(ctx, dbPath, true, signal);
   }
+  if (!lastResult.hasError && lastResult.changedDuringScan && !signal?.aborted) {
+    lastResult = await scanDatabaseEventsOnce(ctx, dbPath, true, signal);
+  }
   if (lastResult.hasError && !signal?.aborted && await isInitializingOrRemovedDb(dbPath, lastResult.error)) {
     const cached = ctx.fileCache.get(dbPath);
     return {
@@ -269,6 +272,7 @@ async function scanDatabaseEventsOnce(ctx: UsageScanContext, dbPath: string, byp
   error?: string;
   usedCached?: boolean;
   cacheHit?: boolean;
+  changedDuringScan?: boolean;
 }> {
   let fileStat: { dev: number; ino: number; birthtimeMs: number; mtimeMs: number; size: number } | null = null;
   let walMtimeMs = 0;
@@ -573,20 +577,33 @@ async function scanDatabaseEventsOnce(ctx: UsageScanContext, dbPath: string, byp
   const unknownTime = events.some(event => event.timestamp_seconds <= 0);
   const hasError = !stepOk && unknownTime;
   const timeError = hasError ? bt('scanner.err.timestamp_read_failed') : undefined;
-  ctx.setFileCacheEntry(dbPath, {
-    mtimeMs: after.mtimeMs,
-    size: after.size,
-    walMtimeMs: afterWal?.mtimeMs ?? 0,
-    walSize: afterWal?.size ?? 0,
-    events,
-    generationsScanned,
-    skippedLargeRecords,
-    projectionVersion: USAGE_PROJECTION_VERSION,
-    hasError,
-    error: timeError,
-    lastSuccessAt: hasError ? ctx.fileCache.get(dbPath)?.lastSuccessAt : Math.floor(Date.now() / 1000),
-  });
-  if (!hasError) ctx.markFileCacheDirty();
+  const changedDuringScan = Boolean(
+    fileStat && (
+      after.mtimeMs !== fileStat.mtimeMs ||
+      after.size !== fileStat.size ||
+      (afterWal?.mtimeMs ?? 0) !== walMtimeMs ||
+      (afterWal?.size ?? 0) !== walSize
+    )
+  );
+  if (changedDuringScan) {
+    // Do not bind a snapshot read before/during a WAL append to the newer file fingerprint.
+    ctx.fileCache.delete(dbPath);
+  } else {
+    ctx.setFileCacheEntry(dbPath, {
+      mtimeMs: after.mtimeMs,
+      size: after.size,
+      walMtimeMs: afterWal?.mtimeMs ?? 0,
+      walSize: afterWal?.size ?? 0,
+      events,
+      generationsScanned,
+      skippedLargeRecords,
+      projectionVersion: USAGE_PROJECTION_VERSION,
+      hasError,
+      error: timeError,
+      lastSuccessAt: hasError ? ctx.fileCache.get(dbPath)?.lastSuccessAt : Math.floor(Date.now() / 1000),
+    });
+    if (!hasError) ctx.markFileCacheDirty();
+  }
 
   return {
     events,
@@ -595,5 +612,6 @@ async function scanDatabaseEventsOnce(ctx: UsageScanContext, dbPath: string, byp
     ...(excludedForkedGenIndices.length > 0 ? { excludedForkedGenIndices } : {}),
     hasError,
     error: timeError,
+    ...(changedDuringScan ? { changedDuringScan: true } : {}),
   };
 }

@@ -97,12 +97,13 @@ test('资产与别名映射：ACTIVE_MODEL_KEYS / FEED_MODEL_KEYS 结构不变�
     'gemini-3.8-flash',
     'claude-opus-5-5',
     'claude-sonnet-5-5',
-    'gpt-oss-120b',
   ];
   assert.ok(ACTIVE_MODEL_KEYS.length >= BASELINE_ACTIVE_MODELS.length);
   assert.equal(new Set(ACTIVE_MODEL_KEYS).size, ACTIVE_MODEL_KEYS.length, 'ACTIVE_MODEL_KEYS 不得包含重复项');
   assert.equal(new Set(FEED_MODEL_KEYS).size, FEED_MODEL_KEYS.length, 'FEED_MODEL_KEYS 不得包含重复项');
-  assert.ok(FEED_MODEL_KEYS.length >= ACTIVE_MODEL_KEYS.length && FEED_MODEL_KEYS.length >= 21);
+  assert.ok(FEED_MODEL_KEYS.length >= ACTIVE_MODEL_KEYS.length && FEED_MODEL_KEYS.length >= 20);
+  assert.equal(ACTIVE_MODEL_KEYS.includes('gpt-oss-120b'), false, '无官方统一来源的 gpt-oss-120b 不得作为默认已定价活跃模型');
+  assert.equal(DEFAULT_API_PRICES['gpt-oss-120b'], undefined, 'DEFAULT_API_PRICES 不得包含无来源的 gpt-oss-120b 默认费率');
   for (const baseKey of BASELINE_ACTIVE_MODELS) {
     assert.ok(ACTIVE_MODEL_KEYS.includes(baseKey), `ACTIVE_MODEL_KEYS 必须包含基线模型 ${baseKey}`);
   }
@@ -159,7 +160,6 @@ test('Live ULTRA：活跃模型与已下架模型随目录不变式归类 + orch
     'gemini-3.8-flash',
     'claude-opus-5-5',
     'claude-sonnet-5-5',
-    'gpt-oss-120b',
   ]);
   const extraActiveModels = ACTIVE_MODEL_KEYS.filter((k) => !baselineCovered.has(k)).map((id) => ({
     model_id: id,
@@ -196,7 +196,9 @@ test('Live ULTRA：活跃模型与已下架模型随目录不变式归类 + orch
 
   assert.equal(Object.keys(snap.prices).length, ACTIVE_MODEL_KEYS.length);
   assert.equal(Object.keys(snap.retiredPrices).length, FEED_MODEL_KEYS.length - ACTIVE_MODEL_KEYS.length);
-  assert.deepEqual(snap.unpricedLiveModels, []);
+  assert.equal(snap.prices['gpt-oss-120b'], undefined, '无来源 gpt-oss-120b 不得进入已定价集合');
+  assert.deepEqual(snap.unpricedLiveModels.map(m => m.key), ['gpt-oss-120b']);
+  assert.equal(snap.unpricedLiveModels[0].displayName, 'GPT-OSS 120B');
   for (const activeKey of ACTIVE_MODEL_KEYS) {
     assert.ok(snap.prices[activeKey], `prices 应包含 ${activeKey}`);
     assert.equal(snap.retiredPrices[activeKey], undefined, `retiredPrices 不得重复包含 ${activeKey}`);
@@ -216,7 +218,9 @@ test('Live ULTRA：活跃模型与已下架模型随目录不变式归类 + orch
   }
   const allPriceKeys = [...Object.keys(snap.prices), ...Object.keys(snap.retiredPrices)];
   assert.equal(Object.keys(snap.pricingStatus).length, allPriceKeys.length);
-  assert.equal(Object.keys(snap.modelCatalogState).length, allPriceKeys.length);
+  assert.equal(Object.keys(snap.modelCatalogState).length, allPriceKeys.length + snap.unpricedLiveModels.length);
+  assert.equal(snap.pricingStatus['gpt-oss-120b'], undefined);
+  assert.equal(snap.modelCatalogState['gpt-oss-120b']?.availability, 'unpriced_live');
 });
 
 test('PRO 套餐：gemini-4-carbon-disabled 归类为 tier_locked；account_cloud 缺失活跃模型同样判定 tier_locked', () => {
@@ -239,7 +243,6 @@ test('PRO 套餐：gemini-4-carbon-disabled 归类为 tier_locked；account_clou
   assert.equal(livePro.modelCatalogState['gemini-4-argon']?.hostOrder, ACTIVE_MODEL_KEYS.indexOf('gemini-4-argon'));
   assert.equal(livePro.modelCatalogState['gemini-4-neon']?.availability, 'available');
   assert.equal(livePro.modelCatalogState['gemini-4-neon']?.hostOrder, ACTIVE_MODEL_KEYS.indexOf('gemini-4-neon'));
-  assert.equal(livePro.modelCatalogState['gpt-oss-120b']?.hostOrder, ACTIVE_MODEL_KEYS.indexOf('gpt-oss-120b'));
 
   const cloudPro = resolvePricingCatalogSnapshot({
     rawPricingTable: DEFAULT_API_PRICES,
@@ -1485,4 +1488,73 @@ test('P1-11 & P1-15: 损坏远端价格缓存自动跳过 ETag/SHA-256 自愈重
     now: Date.parse('2026-11-23T00:00:00Z'),
   });
   assert.equal(badSchemaRes.synced, false, '不兼容 schema !== 1 的远端定价包必须被显式拒收');
+});
+
+test('P0-06 & P1-14: gpt-oss-120b 新事件保持未定价且旧锁价保留原出处；gemini-2.5-pro 在 200K 边界精确触发长上下文阶梯', async (t) => {
+  const { resolvePricingFromTable, calculateEstimatedUsd } = await import('../dist/pricing.js');
+  const { UsageLedger } = await import('../dist/usage-ledger.js');
+  const { MODEL_NAMES, MODEL_CAPACITIES } = await import('../dist/model-catalog.js');
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+
+  assert.equal(MODEL_NAMES['gpt-oss-120b'], 'GPT-OSS 120B');
+  assert.equal(MODEL_CAPACITIES['gpt-oss-120b'], 128000);
+  assert.equal(resolvePricingFromTable(DEFAULT_API_PRICES, 'gpt-oss-120b', 1_760_000_000), null);
+
+  const dir = await mkdtemp(join(tmpdir(), 'gb-oss-unpriced-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const ledger = new UsageLedger(dir);
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  // 1) 新事件保留 Token 且不生成默认美元金额
+  await ledger.save([{
+    event_key: 'ev-oss-new-1',
+    source_id: 'src-oss',
+    generation_index: 0,
+    model: 'gpt-oss-120b',
+    input_tokens: 10000,
+    output_tokens: 2000,
+    cached_tokens: 5000,
+    total_tokens: 17000,
+    timestamp_seconds: nowSec,
+  }], { billingPrices: DEFAULT_API_PRICES });
+  const agg = await ledger.aggregate({ prices: DEFAULT_API_PRICES, accounts: [], now: nowSec });
+  assert.equal(agg.all_time.totals.total_tokens, 17000);
+  assert.equal(agg.all_time.estimated_usd, 0);
+  assert.equal(agg.all_time.unpriced_models, 1);
+
+  // 2) 旧锁价保留原 provenance（不会随默认目录移除而丢出处）
+  const legacyProv = { sourceUrl: 'https://custom.local/oss', platform: 'Self-hosted', verification: 'user' };
+  await ledger.save([{
+    event_key: 'ev-oss-legacy-lock',
+    source_id: 'src-oss-old',
+    generation_index: 0,
+    model: 'gpt-oss-120b',
+    input_tokens: 1_000_000,
+    output_tokens: 0,
+    cached_tokens: 0,
+    total_tokens: 1_000_000,
+    timestamp_seconds: nowSec - 100,
+  }], { billingPrices: { 'gpt-oss-120b': { model: 'gpt-oss-120b', input: 0.15, output: 0.6, cached: 0.075, provenance: legacyProv } } });
+  const { DatabaseSync } = await import('node:sqlite');
+  const dbCheck = new DatabaseSync(ledger.path, { readOnly: true });
+  try {
+    const row = dbCheck.prepare('SELECT unit_price, usd FROM rate_locks WHERE event_key = ?').get('ev-oss-legacy-lock');
+    assert.ok(row);
+    const unitPrice = JSON.parse(row.unit_price);
+    assert.equal(unitPrice.input, 0.15);
+    assert.deepEqual(unitPrice.provenance, legacyProv);
+    assert.ok(Math.abs(row.usd - 0.15) < 1e-9);
+  } finally {
+    dbCheck.close();
+  }
+
+  // 3) gemini-2.5-pro 200000 vs 200001 Token 边界
+  const baseCost = calculateEstimatedUsd(200_000, 100_000, 0, DEFAULT_API_PRICES['gemini-2.5-pro']);
+  // 200K * 1.25/1M + 100K * 10/1M = 0.25 + 1.0 = 1.25
+  assert.ok(Math.abs(baseCost - 1.25) < 1e-9, `<=200000 token 应走基础费率 1.25，实际 ${baseCost}`);
+
+  const tierCost = calculateEstimatedUsd(200_001, 100_000, 0, DEFAULT_API_PRICES['gemini-2.5-pro']);
+  // 200001 * 2.5/1M + 100K * 15/1M = 0.5000025 + 1.5 = 2.0000025
+  assert.ok(Math.abs(tierCost - 2.0000025) < 1e-9, `200001 token 应触发 >200K 阶梯费率，实际 ${tierCost}`);
 });

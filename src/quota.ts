@@ -173,10 +173,11 @@ export function normalizeResetTime(value: unknown): string | null {
 }
 
 export function classifyWindow(rawWindow: unknown, bucketId?: unknown, displayName?: unknown): WindowKind {
-  const text = `${String(rawWindow ?? '')} ${String(bucketId ?? '')} ${String(displayName ?? '')}`.toLowerCase();
-  if (/5\s*[-_]?\s*h(our)?s?\b|five[ _-]?hour|fivehour/.test(text)) return '5h';
-  if (/\bdaily\b|\b24\s*[-_]?\s*h(our)?s?\b|\b1\s*[-_]?\s*d(ay)?\b|per[ _-]?day/.test(text)) return 'daily';
-  if (/week|7\s*d|seven[ _-]?day/.test(text)) return 'weekly';
+  const raw = `${String(rawWindow ?? '')} ${String(bucketId ?? '')} ${String(displayName ?? '')}`.toLowerCase();
+  const text = raw.replace(/[_-]+/g, ' ');
+  if (/5\s*h(?:our)?s?\b|\bfive\s*hours?\b|fivehour/.test(text)) return '5h';
+  if (/\bdaily\b|\b24\s*h(?:our)?s?\b|\b1\s*d(?:ay)?\b|\bper\s*day\b/.test(text)) return 'daily';
+  if (/week|7\s*d|seven\s*day/.test(text)) return 'weekly';
   return 'unspecified';
 }
 
@@ -551,10 +552,12 @@ export function normalizeLiveModels(
   const models: NormalizedModel[] = [];
   for (const cfg of Array.isArray(clientConfigs) ? clientConfigs : []) {
     if (!cfg || typeof cfg !== 'object') continue;
-    const id = String(cfg.modelId ?? cfg.id ?? '');
+    const modelOrAlias = typeof cfg.modelOrAlias?.model === 'string' && cfg.modelOrAlias.model.trim()
+      ? cfg.modelOrAlias.model.trim()
+      : null;
+    const id = String(cfg.modelId ?? cfg.id ?? modelOrAlias ?? '').trim();
     if (!id) continue;
     const displayName = typeof (cfg.label ?? cfg.displayName) === 'string' ? String(cfg.label ?? cfg.displayName) : null;
-    const modelOrAlias = typeof cfg.modelOrAlias?.model === 'string' ? cfg.modelOrAlias.model : null;
     const rawProvider = cfg.modelProvider ?? cfg.model_provider ?? cfg.provider ?? '';
     const modelProvider = typeof rawProvider === 'string' && rawProvider.trim() ? rawProvider.trim() : null;
     const rawBucketName =

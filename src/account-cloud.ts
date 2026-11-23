@@ -124,7 +124,25 @@ export async function fetchCloudQuotaForAccount(params: {
           body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret,
             refresh_token: account.token.refresh_token, grant_type: 'refresh_token' }).toString(),
         });
-        if (!response.ok) throw new CodedAccountError('refresh_failed', bt('account_cloud.err.refresh_failed'));
+        if (!response.ok) {
+          let oauthError = '';
+          try {
+            const rawErr: any = typeof response.json === 'function'
+              ? await response.json()
+              : JSON.parse(await (response as any).text());
+            if (typeof rawErr?.error === 'string') oauthError = rawErr.error.trim().toLowerCase();
+          } catch {}
+          if (response.status === 429) {
+            throw new CodedAccountError('oauth_rate_limited', bt('account_cloud.err.oauth_rate_limited'));
+          }
+          if (response.status >= 500) {
+            throw new CodedAccountError('oauth_server_error', bt('account_cloud.err.oauth_server_error'));
+          }
+          if (oauthError === 'invalid_client' || oauthError === 'unauthorized_client') {
+            throw new CodedAccountError('oauth_client_error', bt('account_cloud.err.oauth_client_error'));
+          }
+          throw new CodedAccountError('refresh_failed', bt('account_cloud.err.refresh_failed'));
+        }
         const data: any = typeof response.json === 'function'
           ? await response.json()
           : JSON.parse(await (response as any).text());

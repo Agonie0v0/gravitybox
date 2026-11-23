@@ -665,6 +665,11 @@ export class AccountsManager {
       if (!diskAccount) return null;
       const diskStamp = Number(diskAccount.quota?.last_updated ?? 0);
       const remoteStamp = Number(remoteQuota.last_updated ?? 0);
+      const remoteProjectId = typeof remoteQuota.refresh_state?.projectId === 'string' ? remoteQuota.refresh_state.projectId.trim() : '';
+      const diskProjectId = typeof diskAccount.token?.project_id === 'string' ? diskAccount.token.project_id.trim() : '';
+      if (remoteProjectId && diskProjectId && remoteProjectId !== diskProjectId) {
+        return diskAccount;
+      }
       const hasDiskQuota = Boolean(
         diskAccount.quota && Array.isArray(diskAccount.quota.models) && diskAccount.quota.models.length > 0
       );
@@ -676,19 +681,56 @@ export class AccountsManager {
         return diskAccount;
       }
 
-      const nextTier =
-        typeof tier === 'string' && tier.trim()
-          ? tier.trim()
-          : (remoteQuota.subscription_tier ?? diskAccount.quota?.subscription_tier ?? null);
+      const oldQuota = diskAccount.quota;
+      const remoteSummaryFailed = remoteQuota.refresh_state?.complete === false || (remoteQuota.quota_groups?.length ?? 0) === 0;
+      const nextTier = mergeSubscriptionTier(
+        typeof tier === 'string' && tier.trim() ? tier.trim() : remoteQuota.subscription_tier,
+        oldQuota?.subscription_tier,
+        { allowFreeDowngrade: !remoteSummaryFailed }
+      );
+      const nowMs = Date.now();
+      const staleSeconds = this.getConfiguredQuotaStaleSeconds();
+      const freshGroups = normalizeStoredGroups(remoteQuota.quota_groups, remoteQuota.last_updated, 'live');
+      const prevGroups = normalizeStoredGroups(oldQuota?.quota_groups, oldQuota?.last_updated ?? remoteQuota.last_updated);
+      const { groups, staleGroups } = mergeGroupsWithPrevious(freshGroups, prevGroups, nowMs);
+      const { models, carriedCount } = mergeModelsWithPrevious(
+        remoteQuota.models.map(model => normalizedModelFromStored(model, 'live')),
+        (oldQuota?.models ?? []).map(model => normalizedModelFromStored(model))
+      );
+      const missingWindows = groups.flatMap(group =>
+        group.buckets.filter(bucket => bucket.stale).map(bucket => ({ family: group.family, window: bucket.window }))
+      );
+      const baseRefreshState = remoteQuota.refresh_state ?? this.getAccountQuotaOverview({ quota: remoteQuota }).refreshState;
+      const completeNow = Boolean(
+        baseRefreshState.complete !== false &&
+        staleGroups.length === 0 &&
+        groups.length > 0 &&
+        missingWindows.length === 0
+      );
+      const effectiveLastUpdated =
+        freshGroups.length === 0 && typeof oldQuota?.last_updated === 'number' && oldQuota.last_updated > 0
+          ? oldQuota.last_updated
+          : remoteQuota.last_updated;
       const mergedQuota: QuotaData = {
         ...remoteQuota,
+        last_updated: effectiveLastUpdated,
         ...(nextTier ? { subscription_tier: nextTier } : {}),
+        models: applyFamilyWindows(models, familyWindowsFromGroups(groups, nowMs, staleSeconds)).map(modelQuotaFromNormalized),
+        quota_groups: groups.map(groupToQuotaGroup),
+        ...(staleGroups.length ? { stale_groups: staleGroups } : {}),
+        refresh_state: {
+          ...baseRefreshState,
+          complete: completeNow,
+          missingWindows,
+          carriedGroups: staleGroups.length,
+          carriedModels: carriedCount,
+        },
       };
       const toSave: Account = {
         ...diskAccount,
         quota: mergedQuota,
-        quota_refresh_error: null,
-        quota_refresh_error_code: null,
+        quota_refresh_error: completeNow ? null : (diskAccount.quota_refresh_error ?? null),
+        quota_refresh_error_code: completeNow ? null : (diskAccount.quota_refresh_error_code ?? null),
       };
       const accountPath = join(this.accountsDir, `${id}.json`);
       const index = await this.loadIndex();
@@ -704,8 +746,8 @@ export class AccountsManager {
         last_used: toSave.last_used,
         custom_label: toSave.custom_label,
         quota: toSave.quota,
-        quota_refresh_error: null,
-        quota_refresh_error_code: null,
+        quota_refresh_error: toSave.quota_refresh_error,
+        quota_refresh_error_code: toSave.quota_refresh_error_code,
         revision: computeAccountRevision(toSave),
         quota_last_updated: toSave.quota?.last_updated ?? 0,
       };

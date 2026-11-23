@@ -45,6 +45,7 @@ import {
 } from './ssh-context.js';
 import { SshRemoteRpcClient, type RemoteRpcClientLike } from './ssh-remote-rpc.js';
 import { buildRemoteEnvironmentId } from './remote-usage-sync.js';
+import { mergeLiveQuotaWithSaved } from './ipc-projections.js';
 import type { LiveLanguageServerStatus, QuotaData } from './accounts.js';
 
 export type RemoteSessionConnectionState = 'connected' | 'disconnected' | 'auth_expired' | 'unverified';
@@ -1423,7 +1424,7 @@ export class Controller {
               current.name = res.data.name ?? null;
               current.tier = res.data.tier || '';
               current.accountType = res.data.accountType ?? 'unknown';
-              current.quota = res.data.quota ?? null;
+              current.quota = mergeLiveQuotaWithSaved(current.quota, res.data.quota, probeNowMs) ?? res.data.quota ?? null;
               current.observedAt = probeNowMs;
               current.lastIdentityVerifiedAt = probeNowMs;
               current.needsIdentityVerify = false;

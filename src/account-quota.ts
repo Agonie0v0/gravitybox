@@ -236,6 +236,7 @@ export interface QuotaRefreshState {
   providerOrigin?: string;
   providerUserAgent?: string;
   requestScope?: 'account';
+  projectId?: string;
 }
 
 export interface QuotaData {
@@ -414,6 +415,9 @@ export type AccountErrorCode =
   | 'oauth_verify_failed'
   | 'oauth_unverified_email'
   | 'oauth_network'
+  | 'oauth_rate_limited'
+  | 'oauth_server_error'
+  | 'oauth_client_error'
   | 'missing_refresh_token'
   | 'missing_oauth_client'
   | 'refresh_failed'
@@ -438,7 +442,8 @@ export type AccountErrorCode =
 
 const ACCOUNT_ERROR_CODES = new Set<string>([
   'oauth_incomplete', 'oauth_no_credentials', 'oauth_verify_failed', 'oauth_unverified_email',
-  'oauth_network', 'missing_refresh_token', 'missing_oauth_client', 'refresh_failed',
+  'oauth_network', 'oauth_rate_limited', 'oauth_server_error', 'oauth_client_error',
+  'missing_refresh_token', 'missing_oauth_client', 'refresh_failed',
   'no_access_token', 'token_invalid', 'token_no_access', 'token_network', 'invalid_id',
   'corrupt_file', 'conflict_modified', 'credentials_updated', 'deleted_stop_refresh',
   'removed_stop_refresh', 'not_found', 'invalid_refresh_token', 'missing_email',
@@ -464,7 +469,10 @@ export function accountErrorCode(error: unknown): AccountErrorCode | null {
 }
 
 const AUTH_REQUIRED_CODES = new Set<AccountErrorCode>(['refresh_failed', 'missing_refresh_token', 'token_invalid']);
-const NON_AUTH_ERROR_CODES = new Set<AccountErrorCode>(['network', 'oauth_network', 'token_network', 'http_3501', 'missing_oauth_client']);
+const NON_AUTH_ERROR_CODES = new Set<AccountErrorCode>([
+  'network', 'oauth_network', 'token_network', 'http_3501', 'missing_oauth_client',
+  'oauth_rate_limited', 'oauth_server_error', 'oauth_client_error',
+]);
 
 const MISSING_OAUTH_CLIENT_STANDBY_BODY =
   'Google OAuth credentials are not configured, so standby accounts cannot refresh tokens in the background \\(optional credentials can be set in \\.env\\)'
@@ -514,6 +522,9 @@ const STORED_QUOTA_ERROR_PATTERNS: Array<[RegExp, string]> = [
   [MISSING_OAUTH_CLIENT_ACTIVE_LIVE_PATTERN, 'account_cloud.err.missing_oauth_client_active_live'],
   [MISSING_OAUTH_CLIENT_STANDBY_PATTERN, 'account_cloud.err.missing_oauth_client'],
   [/^(?:Unable to refresh login credentials; please add this account again|登录凭据无法刷新，请重新添加此账号)$/, 'account_cloud.err.refresh_failed'],
+  [/^(?:Token refresh rate limited; temporarily retaining last quota|Token 刷新触发限流，已暂留上次配额)$/, 'account_cloud.err.oauth_rate_limited'],
+  [/^(?:Sign-in service temporarily unavailable; temporarily retaining last quota|登录服务暂不可用，已暂留上次配额)$/, 'account_cloud.err.oauth_server_error'],
+  [/^(?:OAuth client configuration error; check client settings|OAuth 客户端配置有误，请核对客户端设置)$/, 'account_cloud.err.oauth_client_error'],
   [/^(?:Sign-in service did not return valid credentials|登录服务未返回有效凭据)$/, 'account_cloud.err.no_access_token'],
   [/^(?:Unable to reach the sign-in service; check your network and try again|无法连接登录服务，请检查网络后重试)$/, 'account_cloud.err.network'],
   [/^(?:Login credentials are invalid or expired; please obtain new ones|登录凭据无效或已失效，请重新获取)$/, 'accounts.err.token_invalid'],

@@ -399,3 +399,48 @@ test('(e) UsageStatsManager purges pre-existing cloned BTW events from ledger + 
     );
   });
 });
+
+test('P1-10: 扫描期间 WAL 文件增长时触发有界重扫，且绝不将旧事件绑定到新 WAL 指纹', async t => {
+  await withFixture(t, async ({ root }) => {
+    const dbPath = join(root, 'wal-race.db');
+    const walPath = `${dbPath}-wal`;
+    await writeFile(dbPath, 'sqlite-header-v1');
+    await writeFile(walPath, 'wal-initial');
+
+    let scanCalls = 0;
+    const tsSec = Math.floor(Date.now() / 1000) - 10;
+    const genRow1 = { idx: 0, data_blob: makeGenBlob({ model: 'gemini-3.8-flash', input: 100, output: 20, timestampSec: tsSec, stepIndices: [0], execution: 'wal-exec-1' }) };
+    const genRow2 = { idx: 1, data_blob: makeGenBlob({ model: 'gemini-3.8-flash', input: 250, output: 20, timestampSec: tsSec + 1, stepIndices: [1], execution: 'wal-exec-2' }) };
+
+    const fileCache = new Map();
+    const ctx = {
+      fileCache,
+      discoveredStats: new Map(),
+      loadUsageLedger: async () => {},
+      upsertLedger: () => {},
+      getLedgerEvent: (_k) => ({}),
+      lookupObservedContext: () => null,
+      setFileCacheEntry: (p, entry) => fileCache.set(p, entry),
+      markFileCacheDirty: () => {},
+      scanDbWorker: async () => {
+        scanCalls++;
+        if (scanCalls === 1) {
+          // 模拟首次扫描完成到落缓存前，宿主向 WAL 追加了新记录
+          await writeFile(walPath, 'wal-initial-plus-tail-append-bytes');
+          return { ok: true, genRows: [genRow1], stepSchemaOk: true, stepRows: [], trajectoryType: 2 };
+        }
+        return { ok: true, genRows: [genRow1, genRow2], stepSchemaOk: true, stepRows: [], trajectoryType: 2 };
+      },
+    };
+
+    const res1 = await scanDatabaseEvents(ctx, dbPath, false);
+    assert.equal(scanCalls, 2, '检测到扫描期间 WAL 变更必须执行一次有界重扫');
+    assert.equal(res1.events.length, 2, '重扫后必须立即包含尾部新增用量');
+
+    // 再无任何写入的后续普通刷新，直接命中已更新的缓存且事件完整
+    const res2 = await scanDatabaseEvents(ctx, dbPath, false);
+    assert.equal(scanCalls, 2, '稳定后后续刷新命中最新缓存');
+    assert.equal(res2.cacheHit, true);
+    assert.equal(res2.events.length, 2);
+  });
+});

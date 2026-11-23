@@ -19,11 +19,24 @@ export type RemoteRpcFailureReason =
   | 'http_error'
   | 'rpc_error';
 
+export type RemoteRpcPartialReason =
+  | 'http_error'
+  | 'timeout'
+  | 'rpc_error'
+  | 'auth_expired'
+  | 'page_limit'
+  | 'duplicate_page';
+
 export type RemoteRpcCallResult<T> =
   | {
       ok: true;
       data: T;
       latencyMs: number;
+      complete?: boolean;
+      nextOffset?: number;
+      partialReason?: RemoteRpcPartialReason;
+      status?: number;
+      authExpired?: boolean;
     }
   | {
       ok: false;
@@ -973,23 +986,40 @@ export class SshRemoteRpcClient implements RemoteRpcClientLike {
         cascadeModelConfigData: us.cascadeModelConfigData,
         g1Tier: us.g1Tier,
         g1_tier: us.g1_tier,
+        cloudaicompanionProject: us.cloudaicompanionProject,
+        projectId: us.projectId,
       };
       const quotaPayload = quotaRes.ok && quotaRes.data ? (quotaRes.data.response || quotaRes.data) : null;
+      const quotaSummaryError = !quotaRes.ok ? (quotaRes.reason || (quotaRes.status ? 'HTTP ' + quotaRes.status : 'rpc_error')) : undefined;
       return {
         ok: true,
         latencyMs: Date.now() - startedAt,
-        data: { userStatusData: { userStatus: trimmedUserStatus }, quotaSummaryData: quotaPayload },
+        data: { userStatusData: { userStatus: trimmedUserStatus }, quotaSummaryData: quotaPayload, quotaSummaryError },
       };
     `;
-    const res = await this.evaluateInWorld<{ userStatusData: any; quotaSummaryData: any }>(
+    const res = await this.evaluateInWorld<{ userStatusData: any; quotaSummaryData: any; quotaSummaryError?: string }>(
       this.buildInPageFetchExpression(script)
     );
     if (!res.ok) return res;
+    const rawUserStatus = res.data.userStatusData?.userStatus ?? {};
+    const projectObj = rawUserStatus.cloudaicompanionProject;
+    const remoteProjectId =
+      typeof rawUserStatus.projectId === 'string' && rawUserStatus.projectId.trim()
+        ? rawUserStatus.projectId.trim()
+        : typeof projectObj === 'string' && projectObj.trim()
+        ? projectObj.trim()
+        : typeof projectObj?.id === 'string' && projectObj.id.trim()
+        ? projectObj.id.trim()
+        : null;
     const probe = buildLiveProbeResultFromRpc(
       res.data.userStatusData,
       res.data.quotaSummaryData,
       undefined,
-      { sourcePrefix: 'remote_rpc' }
+      {
+        sourcePrefix: 'remote_rpc',
+        quotaSummaryError: res.data.quotaSummaryError,
+        projectId: remoteProjectId,
+      }
     );
     if (!probe) {
       return { ok: false, reason: 'rpc_error', authExpired: false, error: 'missing_user_email', latencyMs: res.latencyMs };
@@ -1218,6 +1248,10 @@ export class SshRemoteRpcClient implements RemoteRpcClientLike {
       const MAX_PAGES = 40;
       const PAGE_THRESHOLD = 50;
       let prevPageSig = '';
+      let complete = true;
+      let partialReason = undefined;
+      let partialStatus = undefined;
+      let partialAuthExpired = false;
       for (let page = 0; page < MAX_PAGES; page++) {
         const res = await invoke('GetCascadeTrajectoryGeneratorMetadata', {
           cascadeId: ${cidJson},
@@ -1228,6 +1262,10 @@ export class SshRemoteRpcClient implements RemoteRpcClientLike {
           if (page === 0) {
             return { ok: false, reason: res.reason, authExpired: Boolean(res.authExpired), status: res.status, latencyMs: Date.now() - startedAt };
           }
+          complete = false;
+          partialReason = res.authExpired ? 'auth_expired' : (res.reason || 'rpc_error');
+          partialStatus = res.status;
+          partialAuthExpired = Boolean(res.authExpired);
           break;
         }
         const list = Array.isArray(res.data && res.data.generatorMetadata) ? res.data.generatorMetadata : [];
@@ -1304,7 +1342,11 @@ export class SshRemoteRpcClient implements RemoteRpcClientLike {
         const first = pageMapped[0];
         const last = pageMapped[pageMapped.length - 1];
         const pageSig = JSON.stringify([pageMapped.length, first && first.executionId, first && first.stepIndices, last && last.executionId, last && last.stepIndices]);
-        if (page > 0 && pageSig === prevPageSig) break;
+        if (page > 0 && pageSig === prevPageSig) {
+          complete = false;
+          partialReason = 'duplicate_page';
+          break;
+        }
         prevPageSig = pageSig;
         for (const row of pageMapped) allOut.push(row);
         const nextOffset = typeof (res.data && res.data.nextOffset) === 'number' && res.data.nextOffset > curOffset
@@ -1312,10 +1354,29 @@ export class SshRemoteRpcClient implements RemoteRpcClientLike {
           : curOffset + list.length;
         const totalCount = Number(res.data && (res.data.totalCount ?? res.data.totalGeneratorMetadata ?? 0)) || 0;
         const hasMore = Boolean(res.data && res.data.hasMore === true) || (totalCount > 0 && nextOffset < totalCount) || list.length >= PAGE_THRESHOLD;
-        if (!hasMore || nextOffset <= curOffset) break;
+        if (nextOffset <= curOffset) {
+          complete = false;
+          partialReason = 'duplicate_page';
+          break;
+        }
         curOffset = nextOffset;
+        if (!hasMore) break;
+        if (page + 1 >= MAX_PAGES) {
+          complete = false;
+          partialReason = 'page_limit';
+          break;
+        }
       }
-      return { ok: true, data: allOut, latencyMs: Date.now() - startedAt };
+      return {
+        ok: true,
+        data: allOut,
+        complete,
+        nextOffset: curOffset,
+        ...(partialReason ? { partialReason } : {}),
+        ...(partialStatus !== undefined ? { status: partialStatus } : {}),
+        ...(partialAuthExpired ? { authExpired: true } : {}),
+        latencyMs: Date.now() - startedAt,
+      };
     `;
     return this.evaluateInWorld<RemoteGenMetadataRecord[]>(this.buildInPageFetchExpression(script));
   }
@@ -1421,6 +1482,10 @@ export class SshRemoteRpcClient implements RemoteRpcClientLike {
       const expectedTotal = ${safeExpectedTotal};
       const MAX_PAGES = 40;
       const PAGE_THRESHOLD = 100;
+      let complete = true;
+      let partialReason = undefined;
+      let partialStatus = undefined;
+      let partialAuthExpired = false;
       for (let page = 0; page < MAX_PAGES; page++) {
         const res = await invoke('GetCascadeTrajectorySteps', {
           cascadeId: ${cidJson},
@@ -1431,6 +1496,10 @@ export class SshRemoteRpcClient implements RemoteRpcClientLike {
           if (page === 0) {
             return { ok: false, reason: res.reason, authExpired: Boolean(res.authExpired), status: res.status, latencyMs: Date.now() - startedAt };
           }
+          complete = false;
+          partialReason = res.authExpired ? 'auth_expired' : (res.reason || 'rpc_error');
+          partialStatus = res.status;
+          partialAuthExpired = Boolean(res.authExpired);
           break;
         }
         const list = Array.isArray(res.data && res.data.steps) ? res.data.steps : [];
@@ -1484,16 +1553,39 @@ export class SshRemoteRpcClient implements RemoteRpcClientLike {
             ...(childConversationIds.length > 0 ? { childConversationIds } : {}),
           });
         }
-        if (added === 0) break;
+        if (added === 0) {
+          complete = false;
+          partialReason = 'duplicate_page';
+          break;
+        }
         const nextOffset = typeof (res.data && res.data.nextStepOffset) === 'number' && res.data.nextStepOffset > curOffset
           ? res.data.nextStepOffset
           : curOffset + list.length;
         const totalSteps = Number(res.data && (res.data.totalSteps ?? res.data.stepCount ?? 0)) || expectedTotal;
         const hasMore = Boolean(res.data && res.data.hasMore === true) || (totalSteps > 0 && nextOffset < totalSteps) || list.length >= PAGE_THRESHOLD;
-        if (!hasMore || nextOffset <= curOffset) break;
+        if (nextOffset <= curOffset) {
+          complete = false;
+          partialReason = 'duplicate_page';
+          break;
+        }
         curOffset = nextOffset;
+        if (!hasMore) break;
+        if (page + 1 >= MAX_PAGES) {
+          complete = false;
+          partialReason = 'page_limit';
+          break;
+        }
       }
-      return { ok: true, data: allOut, latencyMs: Date.now() - startedAt };
+      return {
+        ok: true,
+        data: allOut,
+        complete,
+        nextOffset: curOffset,
+        ...(partialReason ? { partialReason } : {}),
+        ...(partialStatus !== undefined ? { status: partialStatus } : {}),
+        ...(partialAuthExpired ? { authExpired: true } : {}),
+        latencyMs: Date.now() - startedAt,
+      };
     `;
     return this.evaluateInWorld<RemoteStepRecord[]>(this.buildInPageFetchExpression(script));
   }

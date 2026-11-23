@@ -1050,3 +1050,84 @@ test('在线 SSH 已登录备用账号支持随时刷新并安全回写本地配
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('P1-12: SSH 部分配额（RetrieveUserQuotaSummary 超时/失败）保留本地双桶并标陈旧、不清除刷新告警，完整刷新后再更新', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gb-remote-partial-quota-'));
+  try {
+    const accountsManager = new AccountsManager(dir);
+    await accountsManager.init();
+    const nowSec = Math.floor(Date.now() / 1000);
+    const future5h = new Date((nowSec + 3600) * 1000).toISOString();
+    const futureWeek = new Date((nowSec + 5 * 86400) * 1000).toISOString();
+    const acc = await accountsManager.upsertAccount({
+      email: 'partial-ssh@example.invalid',
+      name: 'Partial SSH',
+      refresh_token: '1//partial-refresh',
+      access_token: 'ya29.partial',
+      expires_in: 3600,
+    });
+    const fullLocalQuota = {
+      models: [{ name: 'gemini-3.8-flash', percentage: 60, percentage_known: true, reset_time: future5h }],
+      quota_groups: [{
+        display_name: 'Gemini',
+        family: 'gemini',
+        observed_at: nowSec - 600,
+        buckets: [
+          { bucket_id: 'g5', window: '5h', remaining_fraction: 0.6, remaining_fraction_known: true, reset_time: future5h, observed_at: nowSec - 600 },
+          { bucket_id: 'gw', window: 'weekly', remaining_fraction: 0.85, remaining_fraction_known: true, reset_time: futureWeek, observed_at: nowSec - 600 },
+        ],
+      }],
+      last_updated: nowSec - 600,
+      is_forbidden: false,
+      subscription_tier: 'PRO',
+      model_forwarding_rules: {},
+      refresh_state: { complete: true, endpointsAttempted: ['live:GetUserStatus', 'live:RetrieveUserQuotaSummary'], endpointsSucceeded: ['live:GetUserStatus', 'live:RetrieveUserQuotaSummary'], missingFamilies: [], missingWindows: [], carriedGroups: 0, refreshedAt: nowSec - 600 },
+    };
+    await accountsManager.syncRemoteObservedQuota(acc.id, fullLocalQuota, 'PRO');
+    await accountsManager.updateAccount(acc.id, cur => {
+      cur.quota_refresh_error = '上次刷新提示：部分超时';
+      cur.quota_refresh_error_code = 'network';
+    });
+
+    // 1. SSH 仅 GetUserStatus 成功、RetrieveUserQuotaSummary 失败（quota_groups 为空且 complete=false）
+    const partialRemoteQuota = {
+      models: [{ name: 'gemini-3.8-flash', percentage: 60, percentage_known: true, reset_time: future5h }],
+      quota_groups: [],
+      last_updated: nowSec,
+      is_forbidden: false,
+      subscription_tier: 'PRO',
+      model_forwarding_rules: {},
+      refresh_state: { complete: false, endpointsAttempted: ['remote_rpc:GetUserStatus', 'remote_rpc:RetrieveUserQuotaSummary'], endpointsSucceeded: ['remote_rpc:GetUserStatus'], missingFamilies: ['gemini'], missingWindows: [], carriedGroups: 0, refreshedAt: nowSec, error: 'timeout' },
+    };
+    const afterPartial = await accountsManager.syncRemoteObservedQuota(acc.id, partialRemoteQuota, 'PRO');
+    assert.ok(afterPartial);
+    const geminiGroup = afterPartial.quota.quota_groups.find(g => g.family === 'gemini');
+    assert.ok(geminiGroup && geminiGroup.buckets.length === 2, '部分失败绝不可将双桶归零');
+    assert.equal(geminiGroup.buckets.every(b => b.stale === true), true, '沿用的双桶必须标 stale');
+    assert.equal(afterPartial.quota_refresh_error, '上次刷新提示：部分超时', '部分成功绝不可清除已有刷新告警');
+
+    // 2. 随后完整刷新成功，恢复新鲜双桶并清除告警
+    const completeRemoteQuota = {
+      ...partialRemoteQuota,
+      last_updated: nowSec + 5,
+      quota_groups: [{
+        display_name: 'Gemini',
+        family: 'gemini',
+        observed_at: nowSec + 5,
+        buckets: [
+          { bucket_id: 'g5', window: '5h', remaining_fraction: 0.92, remaining_fraction_known: true, reset_time: future5h, observed_at: nowSec + 5 },
+          { bucket_id: 'gw', window: 'weekly', remaining_fraction: 0.84, remaining_fraction_known: true, reset_time: futureWeek, observed_at: nowSec + 5 },
+        ],
+      }],
+      refresh_state: { complete: true, endpointsAttempted: ['remote_rpc:GetUserStatus', 'remote_rpc:RetrieveUserQuotaSummary'], endpointsSucceeded: ['remote_rpc:GetUserStatus', 'remote_rpc:RetrieveUserQuotaSummary'], missingFamilies: [], missingWindows: [], carriedGroups: 0, refreshedAt: nowSec + 5 },
+    };
+    const afterFull = await accountsManager.syncRemoteObservedQuota(acc.id, completeRemoteQuota, 'PRO');
+    assert.equal(afterFull?.quota_refresh_error, null);
+    assert.equal(afterFull?.quota?.refresh_state?.complete, true);
+    const freshGemini = afterFull.quota.quota_groups.find(g => g.family === 'gemini');
+    assert.equal(freshGemini.buckets[0].remaining_fraction, 0.92);
+    assert.equal(freshGemini.buckets.some(b => b.stale === true), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

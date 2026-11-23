@@ -56,6 +56,7 @@ export interface RemoteUsageSyncReceipt {
   last_modified_sec: number;
   step_count: number;
   committed_at: number;
+  incomplete?: boolean;
 }
 
 export interface RemoteGenerationEvent {
@@ -904,7 +905,7 @@ function shouldSyncTrajectory(
   stepCount: number,
   force: boolean
 ): boolean {
-  if (force || !prevReceipt) return true;
+  if (force || !prevReceipt || prevReceipt.incomplete === true) return true;
   if (lastModifiedSec > 0 && lastModifiedSec > prevReceipt.last_modified_sec) return true;
   if (lastModifiedSec > 0 && prevReceipt.last_modified_sec === 0) return true;
   if (stepCount !== prevReceipt.step_count) return true;
@@ -1166,8 +1167,13 @@ export async function syncRemoteSessionUsage(
     }
 
     const genRecords = Array.isArray(genRes.data) ? genRes.data : [];
+    const genComplete = genRes.complete !== false;
+    if (genRes.authExpired) {
+      authExpired = true;
+      firstError = firstError ?? 'auth_expired';
+    }
     recordCascadeExecutionIds(cascadeIdLower, genRecords, !sideQuestion);
-    if (genFetchOffset === 0 && cascadeIdLower) {
+    if (genFetchOffset === 0 && genComplete && cascadeIdLower) {
       scannedFullFromZeroCascadeIds.add(cascadeIdLower);
     }
 
@@ -1201,6 +1207,7 @@ export async function syncRemoteSessionUsage(
         ? Math.max(0, minReferencedStepIdx)
         : Math.max(0, prevStepOffset - 1);
 
+    let stepsComplete = true;
     if (hasIncludedGenRecords) {
       if (authExpired || abortedByBudget || options.signal?.aborted || Date.now() >= deadlineAt) {
         if (Date.now() >= deadlineAt) abortedByBudget = true;
@@ -1217,6 +1224,13 @@ export async function syncRemoteSessionUsage(
           firstError = firstError ?? stepsRes.reason;
         }
         return;
+      }
+      if (stepsRes.authExpired) {
+        authExpired = true;
+        firstError = firstError ?? 'auth_expired';
+      }
+      if (stepsRes.complete === false) {
+        stepsComplete = false;
       }
       steps = Array.isArray(stepsRes.data) ? stepsRes.data : [];
     }
@@ -1326,17 +1340,36 @@ export async function syncRemoteSessionUsage(
 
     if (finalized || abortedByBudget || options.signal?.aborted) return;
 
-    const nextCursorOffset = Math.max(prevCursor, genFetchOffset + genRecords.length);
-    const nextStepOffset = Math.max(prevStepOffset, stepCount, maxFetchedStepOffset);
+    const isComplete = genComplete && stepsComplete && !genRes.authExpired;
+    const confirmedGenEnd =
+      typeof genRes.nextOffset === 'number' && Number.isSafeInteger(genRes.nextOffset) && genRes.nextOffset >= genFetchOffset
+        ? genRes.nextOffset
+        : genFetchOffset + genRecords.length;
+    const nextCursorOffset = Math.max(prevCursor, confirmedGenEnd);
+    const nextStepOffset = isComplete
+      ? Math.max(prevStepOffset, stepCount, maxFetchedStepOffset)
+      : Math.max(prevStepOffset, maxFetchedStepOffset);
     const nextReceipt: RemoteUsageSyncReceipt = {
       source_id: remoteSourceId,
       environment_id: environmentId,
       cursor_offset: nextCursorOffset,
       step_offset: nextStepOffset,
-      last_modified_sec: Math.max(prevReceipt?.last_modified_sec ?? 0, lastModifiedSec),
-      step_count: Math.max(prevReceipt?.step_count ?? 0, stepCount),
+      last_modified_sec: isComplete
+        ? Math.max(prevReceipt?.last_modified_sec ?? 0, lastModifiedSec)
+        : (prevReceipt?.last_modified_sec ?? 0),
+      step_count: isComplete
+        ? Math.max(prevReceipt?.step_count ?? 0, stepCount)
+        : (prevReceipt?.step_count ?? 0),
       committed_at: nowSec,
+      ...(isComplete ? {} : { incomplete: true }),
     };
+
+    if (!isComplete) {
+      trajectoriesFailed++;
+      firstError = firstError ?? genRes.partialReason ?? 'incomplete_pagination';
+    } else {
+      trajectoriesScanned++;
+    }
 
     scannedBatches.push({
       isSideQuestion: sideQuestion,
@@ -1345,7 +1378,6 @@ export async function syncRemoteSessionUsage(
       events: localEvents,
     });
     nextReceipts.push(nextReceipt);
-    trajectoriesScanned++;
   };
 
   const runWorkers = async (): Promise<void> => {

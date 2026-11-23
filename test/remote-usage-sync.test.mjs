@@ -1701,3 +1701,139 @@ test('P2-4 & P2-7: listEnvironments 冷启动自动 ensureLoaded；远端同步�
   assert.equal(res.events[0].model, 'gemini-5-xenon');
   assert.equal(res.events[1].model, 'gemini-5-xenon', '透传 siblingModelIds 后 Orchestrator (Xenon) 应自动归并至 gemini-5-xenon');
 });
+
+test('P0-04: SSH 长会话在第二页 403/503、重复页及超过 40 页中断后绝不标记已完成，恢复后补齐且不重复入账', async () => {
+  const { SshRemoteRpcClient } = await import('../dist/ssh-remote-rpc.js');
+  const vm = await import('node:vm');
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  // 1) SshRemoteRpcClient 分页协议：第二页 503 / 403 / 重复页 / 超 40 页
+  for (const mode of ['http_503', 'http_403', 'duplicate_page', 'over_40_pages']) {
+    let pageCalls = 0;
+    const fakeWindow = {
+      localStorage: { getItem: () => 'csrf-tok' },
+      fetch: async (_url, init) => {
+        const body = JSON.parse(init.body);
+        const off = body.generatorMetadataOffset ?? 0;
+        pageCalls++;
+        if (mode === 'http_503' && off > 0) return { ok: false, status: 503, async json() { return {}; } };
+        if (mode === 'http_403' && off > 0) return { ok: false, status: 403, async json() { return {}; } };
+        if (mode === 'duplicate_page' && off > 0) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                generatorMetadata: [{ stepIndices: [0], executionId: 'e0', usage: { inputTokens: '10', outputTokens: '5' } }],
+                hasMore: true,
+              };
+            },
+          };
+        }
+        if (mode === 'over_40_pages') {
+          const rows = Array.from({ length: 50 }, (_, i) => ({
+            stepIndices: [off + i],
+            executionId: `e-${off + i}`,
+            usage: { inputTokens: '1', outputTokens: '1' },
+          }));
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return { generatorMetadata: rows, nextOffset: off + 50, hasMore: off + 50 < 2100 };
+            },
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              generatorMetadata: [{ stepIndices: [0], executionId: 'e0', usage: { inputTokens: '10', outputTokens: '5' } }],
+              nextOffset: 1,
+              hasMore: true,
+            };
+          },
+        };
+      },
+      AbortController, Date, Object, Array, Number, String, Boolean, JSON, Math, setTimeout, clearTimeout,
+    };
+    const client = new SshRemoteRpcClient({
+      cdp: { evaluate: async (expr) => vm.runInNewContext(expr, fakeWindow) },
+      getContextId: () => 1,
+    });
+    const res = await client.getGeneratorMetadata('conv-long', 0);
+    assert.equal(res.ok, true);
+    assert.equal(res.complete, false, `${mode}: 分页未完成时 complete 必须为 false`);
+    if (mode === 'http_403') assert.equal(res.authExpired, true);
+    if (mode === 'over_40_pages') {
+      assert.equal(res.partialReason, 'page_limit');
+      assert.equal(res.data.length, 2000);
+      assert.equal(res.nextOffset, 2000);
+    }
+    assert.ok(pageCalls >= 2);
+  }
+
+  // 2) syncRemoteSessionUsage: 第二页 503 中断 -> 账本保留已确认游标且标 incomplete -> 恢复后重扫补齐，最终等于完整输入且再刷不重复
+  let failSecondPage = true;
+  const fullRecords = Array.from({ length: 12 }, (_, i) => ({
+    stepIndices: [i],
+    executionId: `exec-p04-${i}`,
+    responseModel: 'gemini-3.8-flash',
+    createdAt: new Date((nowSec - 100 + i) * 1000).toISOString(),
+    usage: { inputTokens: '100', outputTokens: '25' },
+  }));
+
+  const makeTarget = () => ({
+    remoteKey: 'rk-p04',
+    hostLabel: 'host-p04',
+    email: 'p04@example.invalid',
+    accountType: 'consumer',
+    lastIdentityVerifiedAt: nowSec * 1000,
+    rpcClient: {
+      async getAllCascadeTrajectories() {
+        return {
+          ok: true,
+          data: [{ cascadeId: 'conv-p04', trajectoryId: 'traj-p04', stepCount: 12, lastModifiedTime: new Date(nowSec * 1000).toISOString() }],
+        };
+      },
+      async getGeneratorMetadata(_cid, offset = 0) {
+        if (failSecondPage && offset === 0) {
+          return { ok: true, data: fullRecords.slice(0, 5), complete: false, nextOffset: 5, partialReason: 'http_error', status: 503 };
+        }
+        return { ok: true, data: fullRecords.slice(offset), complete: true, nextOffset: fullRecords.length };
+      },
+      async getTrajectorySteps() { return { ok: true, data: [], complete: true }; },
+    },
+  });
+
+  const firstRun = await syncRemoteSessionUsage({ target: makeTarget(), receipts: {}, nowMs: nowSec * 1000 });
+  assert.equal(firstRun.events.length, 5);
+  assert.equal(firstRun.trajectoriesFailed, 1);
+  assert.equal(firstRun.receipts.length, 1);
+  assert.equal(firstRun.receipts[0].incomplete, true, '部分分页不得提交为已完成');
+  assert.equal(firstRun.receipts[0].cursor_offset, 5);
+
+  // 恢复网络，轨迹本身 lastModifiedTime/stepCount 未变，但因 incomplete=true 仍必须续扫补齐剩余记录
+  failSecondPage = false;
+  const ledgerMap = new Map(firstRun.events.map(e => [e.event_key, e]));
+  const receiptMap = { [firstRun.receipts[0].source_id]: firstRun.receipts[0] };
+
+  const secondRun = await syncRemoteSessionUsage({ target: makeTarget(), receipts: receiptMap, nowMs: (nowSec + 10) * 1000 });
+  assert.equal(secondRun.trajectoriesFailed, 0);
+  assert.equal(secondRun.receipts[0].incomplete, undefined);
+  assert.equal(secondRun.receipts[0].cursor_offset, 12);
+  for (const ev of secondRun.events) ledgerMap.set(ev.event_key, ev);
+  assert.equal(ledgerMap.size, 12, '恢复后最终事件数必须等于完整输入 12 条');
+
+  const totalTokens = [...ledgerMap.values()].reduce((sum, e) => sum + e.total_tokens, 0);
+  assert.equal(totalTokens, 12 * 125, '总 Token 必须严格等于完整输入，无漏记无重复');
+
+  // 第三次普通刷新不再重扫
+  const thirdRun = await syncRemoteSessionUsage({
+    target: makeTarget(),
+    receipts: { [secondRun.receipts[0].source_id]: secondRun.receipts[0] },
+    nowMs: (nowSec + 20) * 1000,
+  });
+  assert.equal(thirdRun.events.length, 0);
+});
