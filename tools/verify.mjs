@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
-import { sourceDigest, collectReleaseArtifacts, checkReleaseConsistency, renderReleaseConsistency } from './release-integrity.mjs';
+import { sourceDigest, vendorEvidence, collectReleaseArtifacts, checkReleaseConsistency, renderReleaseConsistency } from './release-integrity.mjs';
 import { describeValidationScope, parseTargetAppVersionArg, recordedScopeFields, resolveValidationScope, VALIDATION_SCOPE_TARGETED } from './release-scope.mjs';
 import { computeSwiftInputsDigest, nativeBuildArgs } from './native-build.mjs';
 
@@ -330,6 +330,7 @@ async function main() {
   await mkdir(join(root, '.cache'), { recursive: true });
   await writeFile(join(root, '.cache/verified-release.json'), JSON.stringify({
     digest,
+    vendorEvidence: await vendorEvidence(root),
     artifacts: await collectReleaseArtifacts(root),
     nativeBinarySha256: createHash('sha256').update(await readFile(join(root, '.cache/GravityBox-native-verified'))).digest('hex'),
     at: new Date().toISOString(),

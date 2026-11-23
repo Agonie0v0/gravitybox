@@ -126,7 +126,16 @@ export async function checkDocs({
         verify('error', 'SUMMARY_DMG_MISMATCH', summaryFile, null, `dmgSHA256 ${shorten(summary.dmgSHA256)} ≠ 实际 ${shorten(actual)}`, summary.dmgSHA256.toLowerCase() === actual);
       }
       if (facts.installedFiles !== null && typeof summary.installedFilesVerified === 'number') verify('error', 'SUMMARY_INSTALLED_FILES_MISMATCH', summaryFile, null, `installedFilesVerified ${summary.installedFilesVerified} ≠ 实机 ${facts.installedFiles}`, summary.installedFilesVerified === facts.installedFiles);
-      if (facts.unit?.tests != null && summary.automated?.unitIntegrationPassed != null) verify('error', 'SUMMARY_UNIT_COUNT_MISMATCH', summaryFile, null, `automated.unitIntegrationPassed ${summary.automated.unitIntegrationPassed} ≠ 日志 ${facts.unit.tests}`, summary.automated.unitIntegrationPassed === facts.unit.tests);
+      const expectedPassed = facts.unit?.pass ?? facts.unit?.tests ?? null;
+      if (expectedPassed != null && summary.automated?.unitIntegrationPassed != null) verify('error', 'SUMMARY_UNIT_COUNT_MISMATCH', summaryFile, null, `automated.unitIntegrationPassed ${summary.automated.unitIntegrationPassed} ≠ 通过数 ${expectedPassed}`, summary.automated.unitIntegrationPassed === expectedPassed);
+      if (facts.unit?.tests != null && summary.automated?.unitIntegrationTotal != null) verify('error', 'SUMMARY_UNIT_TOTAL_MISMATCH', summaryFile, null, `automated.unitIntegrationTotal ${summary.automated.unitIntegrationTotal} ≠ 总数 ${facts.unit.tests}`, summary.automated.unitIntegrationTotal === facts.unit.tests);
+      if (facts.unit?.skipped != null && summary.automated?.unitIntegrationSkipped != null) verify('error', 'SUMMARY_UNIT_SKIPPED_MISMATCH', summaryFile, null, `automated.unitIntegrationSkipped ${summary.automated.unitIntegrationSkipped} ≠ 跳过数 ${facts.unit.skipped}`, summary.automated.unitIntegrationSkipped === facts.unit.skipped);
+      if ((facts.unit?.fail ?? 0) > 0 || (summary.automated?.unitIntegrationFailed ?? 0) > 0) {
+        verify('error', 'SUMMARY_UNIT_FAILED', summaryFile, null, `单元与集成存在失败用例（fail=${facts.unit?.fail ?? summary.automated?.unitIntegrationFailed}）`, false);
+      }
+      if (summary.manualAcceptanceStatus === 'stale' || (summary.manualAcceptanceDmgSHA256 && summary.dmgSHA256 && String(summary.manualAcceptanceDmgSHA256).toLowerCase() !== String(summary.dmgSHA256).toLowerCase())) {
+        verify('error', 'SUMMARY_MANUAL_ACCEPTANCE_STALE', summaryFile, null, `人工验收记录绑定的 DMG 哈希与当前成品不一致（status=${summary.manualAcceptanceStatus ?? 'mismatch'}），需重新实机验收`, false);
+      }
       if (facts.browser?.passed != null && summary.automated?.browserPassed != null) verify('error', 'SUMMARY_BROWSER_COUNT_MISMATCH', summaryFile, null, `automated.browserPassed ${summary.automated.browserPassed} ≠ 日志 ${facts.browser.passed}`, summary.automated.browserPassed === facts.browser.passed);
       if (Array.isArray(summary.automated?.dictionaryGates) && facts.gates.length) {
         const actual = facts.gates.filter(gate => gate.pass === true).map(gate => gate.version).sort().join(',');
@@ -155,9 +164,11 @@ export async function checkDocs({
     if (!sourceOnly) {
       // 测试数（只看最近一次声明，兼容历史段落）
       const unitClaim = lastClaim(text, /(\d+)\/(\d+)\s*单元与集成/g);
-      if (unitClaim && facts.unit?.tests != null) {
+      if (unitClaim && (facts.unit?.pass != null || facts.unit?.tests != null)) {
         const claimed = Number(unitClaim.groups[0]);
-        verify('error', 'DOC_UNIT_COUNT_STALE', file, unitClaim.line, `最近声明 ${unitClaim.text.trim()} ≠ 日志 ${facts.unit.tests}`, claimed === facts.unit.tests && Number(unitClaim.groups[1]) === facts.unit.tests);
+        const expectedPass = facts.unit.pass ?? facts.unit.tests;
+        const expectedTotal = facts.unit.tests ?? expectedPass;
+        verify('error', 'DOC_UNIT_COUNT_STALE', file, unitClaim.line, `最近声明 ${unitClaim.text.trim()} ≠ 日志 ${expectedPass}/${expectedTotal}`, claimed === expectedPass && Number(unitClaim.groups[1]) === expectedTotal);
       }
       const browserClaim = lastClaim(text, /(\d+)\/(\d+)\s*(?:独立)?浏览器/g);
       if (browserClaim && facts.browser?.passed != null) {

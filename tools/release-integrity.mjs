@@ -34,7 +34,6 @@ export async function sourceDigest(root) {
     }
   }
   for (const directory of ['src','runtime','native','tools','test','dict','ui-strings','assets','licenses']) await walk(directory);
-  if (await exists(join(root, 'vendor'))) await walk('vendor');
   files.push('package.json','package-lock.json','tsconfig.json','README.md','THIRD_PARTY_NOTICES.md');
   for (const doc of [
     'LICENSE',
@@ -52,6 +51,53 @@ export async function sourceDigest(root) {
   }
   const uniqueFiles = [...new Set(files)].sort();
   const hash = createHash('sha256'); for (const file of uniqueFiles) hash.update(file).update('\0').update(await readFile(join(root,file))).update('\0'); return hash.digest('hex');
+}
+
+/**
+ * 本地官方包证据指纹（与源码发布摘要 sourceDigest 解耦）：
+ * 仅在本地存在 `vendor/` 时汇总其确定性 SHA-256 与分版本文件校验和，记录到 `.cache/verified-release.json`。
+ */
+export async function vendorEvidence(root) {
+  if (!(await exists(join(root, 'vendor')))) {
+    return { present: false, digest: null, versions: {} };
+  }
+  const files = [];
+  async function walkVendor(relative) {
+    for (const entry of await readdir(join(root, relative), { withFileTypes: true })) {
+      const path = join(relative, entry.name);
+      if (entry.name === '.DS_Store') continue;
+      if (entry.isDirectory()) await walkVendor(path);
+      else if (entry.isFile()) files.push(path.replaceAll('\\', '/'));
+    }
+  }
+  await walkVendor('vendor');
+  const uniqueFiles = [...new Set(files)].sort();
+  if (uniqueFiles.length === 0) {
+    return { present: false, digest: null, versions: {} };
+  }
+  const overallHash = createHash('sha256');
+  const perVersion = new Map();
+  for (const file of uniqueFiles) {
+    const content = await readFile(join(root, file));
+    overallHash.update(file).update('\0').update(content).update('\0');
+    const verMatch = /^vendor\/antigravity\/([^/]+)\//.exec(file);
+    if (verMatch) {
+      const ver = verMatch[1];
+      let bucket = perVersion.get(ver);
+      if (!bucket) {
+        bucket = { count: 0, hash: createHash('sha256') };
+        perVersion.set(ver, bucket);
+      }
+      bucket.count += 1;
+      bucket.hash.update(file).update('\0').update(content).update('\0');
+    }
+  }
+  const versions = {};
+  for (const ver of [...perVersion.keys()].sort()) {
+    const bucket = perVersion.get(ver);
+    versions[ver] = { files: bucket.count, sha256: bucket.hash.digest('hex') };
+  }
+  return { present: true, digest: overallHash.digest('hex'), versions };
 }
 
 async function exists(path) { try { await stat(path); return true; } catch (error) { if (error?.code === 'ENOENT') return false; throw error; } }
