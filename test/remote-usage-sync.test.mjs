@@ -814,7 +814,13 @@ test('资源预算门禁：单轮最多 20 条变更轨迹、并发上限 3、12
   assert.equal(coordinator.isSyncing(), false);
 });
 
-test('Controller.getConnectedRemoteRpcTargets 只读导出目标并驱动 Coordinator 完成远端同步', async () => {
+test('Controller.getConnectedRemoteRpcTargets 只读导出目标并驱动 Coordinator 完成远端同步', async (t) => {
+  const fakeAppRoot = await mkdtemp(join(tmpdir(), 'gb-remote-usage-app-'));
+  const fakeAppPath = join(fakeAppRoot, 'Antigravity.app');
+  await mkdir(join(fakeAppPath, 'Contents/Resources'), { recursive: true });
+  await writeFile(join(fakeAppPath, 'Contents/Resources/app.asar'), 'mock-asar');
+  t.after(() => rm(fakeAppRoot, { recursive: true, force: true }));
+
   const dict = dictionaryFromEntries({});
   const cdpServer = await startRemoteMockCdpServer({
     dictVersion: dict.version,
@@ -877,14 +883,9 @@ test('Controller.getConnectedRemoteRpcTargets 只读导出目标并驱动 Coordi
     { id: 'remote-usage-1', type: 'page', url: 'https://127.0.0.1:44139/', browserContextId: 'ctx-remote-usage' },
   ]);
 
-  const fakeRoot = await mkdtemp(join(tmpdir(), 'gb-remote-ctrl-app-'));
-  const fakeAppPath = join(fakeRoot, 'Antigravity.app');
-  await mkdir(join(fakeAppPath, 'Contents', 'Resources'), { recursive: true });
-  await writeFile(join(fakeAppPath, 'Contents', 'Resources', 'app.asar'), 'mock-asar');
-
   const controller = new Controller({
     appPath: fakeAppPath,
-    profile: join(fakeRoot, 'profile'),
+    profile: join(fakeAppRoot, 'profile'),
     dictionary: dict,
     hudEnabled: false,
     discoverEndpoint: async () => ({
@@ -959,7 +960,6 @@ test('Controller.getConnectedRemoteRpcTargets 只读导出目标并驱动 Coordi
   } finally {
     await controller.stop();
     await cdpServer.stop();
-    await rm(fakeRoot, { recursive: true, force: true });
   }
 });
 

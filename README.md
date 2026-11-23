@@ -79,14 +79,14 @@
    ```bash
    xattr -cr /Applications/GravityBox.app
    ```
-2. **Launch & Connect**: Open **GravityBox** and start official **Antigravity** from the sidebar/menu bar (`Open Antigravity`). If Antigravity `2.33.0+` was opened externally without a remote debugging port, GravityBox surfaces a banner—click **Safe Relaunch to Connect** for a clean restart without force-killing active work.
+2. **Launch & Connect**: Open **GravityBox** and start official **Antigravity** from the sidebar/menu bar (`Open Antigravity`), or enable **Settings → Auto-Open Antigravity on Launch** so GravityBox stays in the menu bar and automatically launches Antigravity with debugging enabled. If Antigravity `2.33.0+` was opened externally without a remote debugging port, GravityBox surfaces a banner—click **Safe Relaunch to Connect** for a clean restart without force-killing active work.
 3. **Use Across Three Surfaces**: Glance at the **HUD** below the composer while coding, click the **Menu Bar Panel** (`⌘1` / `⌘2` / `⌘3`) for instant checks across full-screen Spaces, or open the **Main Console** (`Overview · Accounts · Usage · Settings · About`).
 
 ---
 
 ## In-IDE Telemetry HUD
 
-The HUD embeds cleanly beneath every Antigravity composer without overlapping controls or taking keyboard focus.
+The HUD embeds cleanly beneath every Antigravity composer—including isolated **BTW** side-question panes on `2.34.0+` (with cloned-prefix usage deduplicated)—without overlapping controls or taking keyboard focus.
 
 <div align="center">
   <picture>
@@ -236,8 +236,10 @@ Hover over or click any capsule to inspect its breakdown (`Esc` or click outside
 
 ### Key Behaviors in v1.2.0
 
+- **Auto-Open Antigravity on Launch**: Replaces legacy lifecycle sync (since newer Antigravity builds disable the debugging port by default and GravityBox never patches the official bundle). When enabled in **Settings**, opening GravityBox silently stays in the menu bar and automatically launches Antigravity with `--remote-debugging-port=0`.
 - **Zero-SSH Remote Windows & Multi-Host UI**: Adapts Antigravity `2.33.0+` SSH remote windows over local CDP without spawning external `ssh` processes—delivering full bilingual UI, live Telemetry HUD, isolated read-only `Local / SSH: <host>` dual-window quota views (never cross-contaminating local accounts), active-SSH safety reminders during switching/relaunch/maintenance, plus companion SSH host lists in **Overview** and an expandable scope selector in the **Menu Bar Panel**.
 - **Unified Local + SSH Usage Ledger**: Incrementally syncs remote session usage into the local SQLite ledger (deduplicated by remote trajectory ID with timeline-based account attribution), surfacing a merged total, `Local % · SSH %` split bar, orthogonal `Environment × Account` filters, and offline SSH history badges.
+- **BTW Side-Question Isolation & `2.34.0` Catalog**: Tracks `2.34.0` BTW side-question panes in their own isolated HUD instance and deduplicates cloned prefix generations in usage accounting, alongside verified `2.34.0` dictionaries and `>200K` tiered pricing for `gemini-2.5-pro`.
 - **HTTP / HTTPS Proxy Support**: Choose **Off**, **Follow macOS System Proxy**, or **Manual** `http://` / `https://` proxy in **Settings** (PAC and SOCKS5 are not supported). GravityBox injects `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` when launching Antigravity, reuses the configured proxy for its own outbound requests, and inspects running Antigravity processes for proxy mismatches or shell overrides.
 - **Standby Account Quotas on Antigravity `2.34.0+`**: The active account refreshes passwordlessly via local process environment probing. Because `2.34.0` restricts local quota RPC to the active keychain session and GravityBox stays local-only without bundling official OAuth client secrets or relay servers, inactive standby accounts stop background cloud refreshes once their token expires (~1 hour). GravityBox refreshes right before expiry, skips expired polls silently without errors, marks passed reset timestamps as **Est. Reset**, factors likely-reset candidates into **Standby Advisor**, and syncs live balances as soon as you switch.
 - **JSON Account Management & `agy` CLI Sync**: Save the live account, batch-import JSON files or directories (deduplicated by email), or export backups (`0600` after confirmation). Switching and rollback also sync existing same-origin CLI token files (`antigravity-oauth-token` and `jetski-standalone-oauth-token`) without touching `@google/gemini-cli` credentials.

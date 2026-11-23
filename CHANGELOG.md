@@ -6,16 +6,21 @@
 
 ## [Unreleased]
 
-## [1.2.0] - 2026-11-22
+## [1.2.0] - 2026-11-23
 
 ### Added
-- **Antigravity `2.33.0+` SSH Remote Window Zero-SSH Adaptation (`Milestone 1`)**：新增零外部 `ssh` 的 SSH 远程窗口准入与隔离（`src/ssh-context.ts` / `src/ssh-remote-rpc.ts`），基于 `browserContextId`、Main World `window.sshRemote` 与本机官方 `ssh -D` 子进程完成三联验真并解除 `connectOnce()` 冷启动单窗阻塞；通过 CDP Isolated World 同源 Connect JSON RPC 就地裁剪转发遥测，实现 SSH 窗口完整双语热适配（含打开 SSH 弹窗、路径 `(default)` 白名单、动态进度与多行错误拆译）、完整实时 HUD（及 `remote_unbridged` / `remote_stale` 平滑降级）与 `本机 / SSH: <host>` 上下文只读双周期配额查看（严防本机/远端串号，并在切号/安全重启/维护时展示活跃 SSH 保护提醒）。
-- **Unified Multi-Environment Ledger & Hybrid Account Attribution (`Milestone 2`)**：保持 `PRAGMA user_version = 2` 与 `1.1.3` 本地历史事件位级兼容，增量引入 `sync_receipts` 单事务原子写入（`events + event_revisions + rate_locks + sync_receipts`）与 `src/remote-usage-sync.ts` 同源 RPC 增量同步（按远端 `trajectoryId` 去重防同机多别名双计，独立 `usage-remote-observations.json` 时间线判定 `observed` / `inferred` / `unknown` 置信度）；在原生用量页、明细弹窗及事件卡片上线默认合并总览、`本机 % · SSH %` 占比、`environmentId × accountId` 正交筛选与离线 SSH 历史徽标（纯本机无 SSH 历史时自动隐藏筛选栏），并扩展 `tools/check-privacy.mjs` 拦截 SSH 公钥/敏感配置及非保留私网 IPv4。
-- **网络代理支持（HTTP / HTTPS）**：支持关闭、自动跟随 macOS 系统 HTTP/HTTPS 代理或手动指定 `http://` / `https://` 代理地址（不支持 PAC 与 SOCKS5），自动为 Antigravity 进程注入 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 环境、使 GravityBox 后台外联请求复用同一代理通道，并检测运行中进程的实际代理生效与 Shell 覆盖状态（`src/proxy.ts` / `native/SystemProxy.swift` / `native/AssistantProcessLifecycle.swift` / `native/Preferences.swift`）。
-- **Antigravity `2.34.0` 正式包收录与词典补全**：登记并验证 Google Antigravity `2.34.0` 官方正式包指纹与界面串提取快照（`ui-strings/2.34.0.json` / `assets/ui-extraction-manifest.json`），补全 `2.34.0` 新增词条至 `dict/base.json`，并修复 Tailwind 修饰符噪声过滤规则与保持跨端 ReDoS 安全正则一致性校验。
+- **SSH 远程窗口零外部 `ssh` 适配**：通过本机 CDP 通道适配 Antigravity `2.33.0+` SSH 远程窗口（不拉起外部 `ssh` 进程），提供完整双语热适配、实时 HUD（含降级状态）、与本机隔离的 `本机 / SSH: <host>` 只读配额查看及活跃 SSH 保护提醒（`src/ssh-context.ts` / `src/ssh-remote-rpc.ts`）。
+- **本机 + SSH 统一多环境用量账本**：保持 `PRAGMA user_version = 2` 兼容，新增 `sync_receipts` 原子提交与同源 RPC 增量同步（按 `trajectoryId` 去重并基于时间线判定账号归属），上线合并总览、`本机 % · SSH %` 占比与 `environmentId × accountId` 筛选（`src/remote-usage-sync.ts` / `src/usage-ledger.ts`）。
+- **HTTP / HTTPS 网络代理支持**：支持关闭、跟随 macOS 系统代理或手动配置 `http(s)://` 代理，为 Antigravity 注入环境变量并检测运行中进程的代理生效与 Shell 覆盖状态（`src/proxy.ts` / `native/SystemProxy.swift`）。
+- **Antigravity `2.34.0` 收录、BTW 分栏与目录更新**：收录 `2.34.0` 官方指纹与词典（`ui-strings/2.34.0.json`），支持 BTW 侧边提问分栏 HUD 观测与克隆前缀去重计费；为 `gemini-2.5-pro` 补全 `> 200K` 上下文阶梯定价、移除 `gpt-oss-120b`，并放宽未来模型前缀识别与过滤非商业订阅等级标签（`src/pricing.ts` / `assets/model-catalog.json`）。
 
 ### Changed
-- **SSH 多主机 UI 优化**：总览页底部新增伴生 SSH 主机列表与下钻顶栏、菜单栏顶栏支持可展开范围胶囊（`MenuTopScopeExpanderView`）、用量页内嵌环境占比胶囊条与账号页新增远端只读卡片，全面优化多主机跨端视图切换与只读状态呈现（`native/Pages.swift` / `native/MenuPanelController.swift` / `native/MenuPanelComponents.swift` / `native/Usage.swift` / `native/Accounts.swift` / `native/SshEnvironment.swift`）。
+- **启动方式重构为「启动时自动打开 Antigravity」**：因新版 Antigravity 官方应用默认不再开启调试端口（且本工具坚持不修改官方安装包），原「跟随 Antigravity 启停」已替换为 **「启动时自动打开 Antigravity」**（打开 GravityBox 时自动驻留菜单栏并拉起带调试端口的 Antigravity），同时将安全重启等待放宽至 15 秒并防止重复触发（`native/Configuration.swift` / `native/AssistantProcessLifecycle.swift` / `native/Preferences.swift`）。
+- **SSH 多主机 UI 与用量展示统一**：总览页新增伴生 SSH 主机列表与下钻顶栏、菜单栏支持可展开范围切换胶囊、用量页内嵌环境占比条、账号页新增远端只读卡片，并统一主界面与菜单栏的「部分计价 / 未计价」及「缓存命中率」展示口径（`native/Presentation.swift`）。
+
+### Fixed
+- **`sqlite-worker` 稳定性修复（`#26`，致谢 `@Agonie0v0`）**：修复无活跃事务关闭连接时的句柄泄漏，并优化中等 BLOB 的单次切片读取（`src/sqlite-worker.ts`）。
+- **原生交互与本地化/安全加固**：完善 `firstMouse` 首次点击响应、`NSMenu` 弹窗锚定与收起行为；隔离 IDE 内联/非内联翻译模板并新增组合式回退，同时加固切号回滚与维护进程守卫（进程探测为 `unknown` 时拒绝清理）。
 
 ## [1.1.3] - 2026-11-21
 

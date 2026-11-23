@@ -55,7 +55,6 @@ export async function sourceDigest(root) {
     'README_EN.md',
     'CHANGELOG.md',
     'PROJECT.md',
-    '.env.example',
   ]) {
     if (await exists(join(root, doc))) files.push(doc);
   }
