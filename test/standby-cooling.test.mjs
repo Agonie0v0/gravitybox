@@ -147,27 +147,28 @@ async function createStateVscdb(vscdbPath, { accessToken, refreshToken, expirySe
     'CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value TEXT);',
     ...rows.map(r => `INSERT OR REPLACE INTO ItemTable(key, value) VALUES('${r.key}', '${r.value}');`),
   ].join('\n');
-  const { execFile } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  await promisify(execFile)('/usr/bin/sqlite3', [vscdbPath, sql]);
+  const { DatabaseSync } = await import('node:sqlite');
+  const conn = new DatabaseSync(vscdbPath);
+  try { conn.exec(sql); } finally { conn.close(); }
 }
 
 const pause = ms => new Promise(r => setTimeout(r, ms));
 async function stopChild(child) {
-  if (!child || child.exitCode !== null) return;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
   child.kill('SIGTERM');
   await Promise.race([once(child, 'exit'), pause(3000)]);
-  if (child.exitCode === null) {
+  if (child.exitCode === null && child.signalCode === null) {
     child.kill('SIGKILL');
     await once(child, 'exit');
   }
 }
+const { resolveIpcEndpoint } = await import('../dist/platform/index.js');
 async function waitReady(dir) {
+  const endpoint = resolveIpcEndpoint(dir);
   for (let i = 0; i < 300; i++) {
     try {
-      await access(join(dir, 'control.sock'));
       await new Promise((res, rej) => {
-        const s = createConnection(join(dir, 'control.sock'));
+        const s = createConnection(endpoint);
         s.once('connect', () => { s.destroy(); res(); });
         s.once('error', rej);
       });
@@ -178,7 +179,7 @@ async function waitReady(dir) {
   throw new Error('backend socket not ready');
 }
 const rpc = (dir, payload) => new Promise((resolve, reject) => {
-  const s = createConnection(join(dir, 'control.sock'));
+  const s = createConnection(resolveIpcEndpoint(dir));
   let buf = '';
   s.on('error', reject);
   s.on('connect', () => s.write(JSON.stringify(payload) + '\n'));
@@ -790,7 +791,7 @@ AccountsManager.prototype.probeLiveLanguageServer = async () => ({
   const child = spawn(
     process.execPath,
     [
-      '--import', preload,
+      '--import', pathToFileURL(preload).href,
       fileURLToPath(new URL('../dist/main.js', import.meta.url)),
       '--state-dir', dir,
       '--app', '/nonexistent',
@@ -942,7 +943,7 @@ AccountsManager.prototype.refreshQuota = async function(id) {
   const child = spawn(
     process.execPath,
     [
-      '--import', preload,
+      '--import', pathToFileURL(preload).href,
       fileURLToPath(new URL('../dist/main.js', import.meta.url)),
       '--state-dir', dir,
       '--app', '/nonexistent',

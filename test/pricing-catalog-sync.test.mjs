@@ -31,12 +31,13 @@ import {
   readValidLiveIdeModelsSnapshot,
   sanitizeLiveIdeModelsSnapshot,
 } from '../dist/main.js';
+import { resolveIpcEndpoint } from '../dist/platform/index.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function rpc(directory, payload, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
-    const socket = createConnection(join(directory, 'control.sock'));
+    const socket = createConnection(resolveIpcEndpoint(directory));
     let value = '';
     const timer = setTimeout(() => {
       socket.destroy();

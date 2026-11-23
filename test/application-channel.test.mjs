@@ -15,8 +15,10 @@ import {
   detectInstalledChannels,
   matchingTargetForLanguageServerCommand,
   probeBundleCapabilities,
+  resolveBundleLayout,
   targetForApp,
 } from '../dist/application-target.js';
+import { defaultAntigravityProfileDir, resolveIpcEndpoint } from '../dist/platform/index.js';
 import { compareLayers } from '../dist/dictionary.js';
 import { UsageStatsManager } from '../dist/usage.js';
 import { AccountsManager, MockKeychainAdapter, cloudProviderContextFromCommand, validCachedCloudProviderContext } from '../dist/accounts.js';
@@ -45,7 +47,7 @@ test('仅正式版可作为运行目标，旧持久配置可迁移而显式 Insi
   assert.throws(() => applicationTarget('stable', undefined, { profile: '/tmp/Antigravity - Insiders' }), /仅支持/);
   const stable = applicationTarget('stable', '/synthetic-home');
   assert.equal(stable.bundleId, 'com.google.antigravity');
-  assert.equal(stable.profile, '/synthetic-home/Library/Application Support/Antigravity');
+  assert.equal(stable.profile, defaultAntigravityProfileDir('/synthetic-home', {}, process.platform));
   assert.equal(channelStateDirectory('/state', 'stable'), '/state');
   assert.equal(allApplicationTargets().length, 1);
 });
@@ -106,7 +108,11 @@ test('仅统计正式版会话库，排除 Insiders、备份、IDE 和符号链�
     await writeFile(join(root, name, 'conversations', 'same.db'), 'synthetic');
     await writeFile(join(root, name, 'token_usage_archive.db'), 'synthetic');
   }
-  await symlink(join(root, 'antigravity-backup', 'conversations', 'same.db'), join(root, 'antigravity-insiders', 'conversations', 'linked.db'));
+  try {
+    await symlink(join(root, 'antigravity-backup', 'conversations', 'same.db'), join(root, 'antigravity-insiders', 'conversations', 'linked.db'));
+  } catch (err) {
+    if (process.platform !== 'win32' || err?.code !== 'EPERM') throw err;
+  }
 
   // Default discovery must never count Insiders data.
   const unifiedManager = new UsageStatsManager({ geminiDir: root, stateDir: root });
@@ -190,13 +196,15 @@ test('旧共享恢复记录原样保留，不能被正式版自动回滚', async
 test('语言服务只匹配正式版并保留 WCV hub 身份，拒绝 Insiders 进程', () => {
   const target = applicationTarget('stable');
   const version = '2.29.0';
-  const command = target.appPath + '/Contents/Resources/bin/language_server --cloud_code_endpoint https://daily-cloudcode-pa.googleapis.com --subclient_type hub --override_ide_version ' + version;
+  const lsBin = resolveBundleLayout(target.appPath).languageServerPath;
+  const quotedLsBin = /\s/.test(lsBin) ? `"${lsBin}"` : lsBin;
+  const command = quotedLsBin + ' --cloud_code_endpoint https://daily-cloudcode-pa.googleapis.com --subclient_type hub --override_ide_version ' + version;
   assert.equal(matchingTargetForLanguageServerCommand(command)?.channel, 'stable');
   const context = cloudProviderContextFromCommand(command, version, target);
   assert.equal(cloudProviderContextFromCommand(command + ' --app_data_dir antigravity-insiders', version, target), null);
   assert.equal(context.userAgent, 'antigravity/hub/' + version);
   assert.equal(validCachedCloudProviderContext(context, version, target), true);
-  const unsupported = command.replace('Antigravity.app', 'Antigravity - Insiders.app');
+  const unsupported = command.replace(/Antigravity(?:\.app)?/i, process.platform === 'win32' ? 'Antigravity - Insiders' : 'Antigravity - Insiders.app');
   assert.equal(matchingTargetForLanguageServerCommand(unsupported), null);
   assert.equal(cloudProviderContextFromCommand(unsupported, version), null);
 });
@@ -233,7 +241,7 @@ test('IPC 将旧 Insiders 配置备份后迁移到正式版，拒绝通道切换
     { env: { ...process.env, GRAVITYBOX_PROBE_LS: 'false' }, stdio: 'ignore' },
   );
   t.after(async () => { if (child.exitCode === null) { child.kill('SIGTERM'); await once(child, 'exit'); } });
-  const socket = join(state, 'control.sock');
+  const socket = resolveIpcEndpoint(state);
   let ready = false;
   for (let i = 0; i < 100; i++) {
     try { await request(socket, { command: 'ping' }); ready = true; break; } catch {}

@@ -74,6 +74,32 @@ export interface HudWorkerScanResult {
 }
 
 const TERMINAL_STEP_STATUSES = new Set([3, 5]);
+// SQLite 的 substr(blob, start, len) 每次调用都会经由 OP_Column 物化整列 BLOB；
+// 对含大量重复分块的中等 BLOB（<=64MB），在连续 chunk 读取超过阈值后只物化一次并用 subarray 零拷贝切片，
+// 避免 Windows 下百次 VirtualAlloc/页错误触发 4s 时间预算，同时保持超大 BLOB（>64MB）的内存有界性。
+const MAX_MATERIALIZED_BLOB_BYTES = 64 * 1024 * 1024;
+const SUBSTR_FALLBACK_CALL_THRESHOLD = 3;
+
+function createSqlBlobChunkReader(
+  size: number,
+  key: number | string,
+  getSubstrStmt: () => ReturnType<DatabaseSync['prepare']>,
+  getFullStmt: () => ReturnType<DatabaseSync['prepare']>
+): (offset: number, length: number) => Uint8Array {
+  let calls = 0;
+  let fullBlob: Uint8Array | null | undefined;
+  return (offset: number, length: number): Uint8Array => {
+    calls += 1;
+    if (fullBlob === undefined && calls > SUBSTR_FALLBACK_CALL_THRESHOLD && size <= MAX_MATERIALIZED_BLOB_BYTES) {
+      const row = getFullStmt().get(key) as { data?: Uint8Array | null } | undefined;
+      fullBlob = row?.data instanceof Uint8Array ? row.data : null;
+    }
+    if (fullBlob) {
+      return fullBlob.subarray(offset, offset + length);
+    }
+    return ((getSubstrStmt().get(offset + 1, length, key) as { chunk?: Uint8Array } | undefined)?.chunk) ?? new Uint8Array(0);
+  };
+}
 
 function hashRawStepRow(hash: Hash, r: any): void {
   hash.update(`${r.idx}:${r.step_type}:${r.status}:${r.metadata_len ?? 0}:`);
@@ -228,18 +254,19 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
             parentMetaUnchanged = true;
           } else {
             let chunkStmt: ReturnType<DatabaseSync['prepare']> | undefined;
+            let fullStmt: ReturnType<DatabaseSync['prepare']> | undefined;
             for (const r of tmbRows) {
               const sz = Number(r.size ?? 0);
               const inlineBuf = r.inlineData && sz <= inlineLimit ? r.inlineData : null;
-              const projected = projectProtobuf(
-                sz,
-                (offset, length) => {
-                  if (inlineBuf) return inlineBuf.subarray(offset, offset + length);
-                  chunkStmt ??= db.prepare('SELECT substr(data, ?, ?) AS chunk FROM trajectory_metadata_blob WHERE id = ?');
-                  return (chunkStmt.get(offset + 1, length, r.id) as { chunk?: Uint8Array } | undefined)?.chunk ?? new Uint8Array(0);
-                },
-                { 5: true, 6: true }
-              );
+              const readChunk = inlineBuf
+                ? (offset: number, length: number) => inlineBuf.subarray(offset, offset + length)
+                : createSqlBlobChunkReader(
+                    sz,
+                    r.id,
+                    () => (chunkStmt ??= db.prepare('SELECT substr(data, ?, ?) AS chunk FROM trajectory_metadata_blob WHERE id = ?')),
+                    () => (fullStmt ??= db.prepare('SELECT data AS data FROM trajectory_metadata_blob WHERE id = ?'))
+                  );
+              const projected = projectProtobuf(sz, readChunk, { 5: true, 6: true });
               const slice = detachBuf(projected.data);
               if (slice) metaBlobProjectedSlices.push(slice);
             }
@@ -269,7 +296,9 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
 
     const stepColumnsSql = buildStepSelectColumns();
     let projectStepMetaStmt: ReturnType<DatabaseSync['prepare']> | undefined;
+    let projectStepMetaFullStmt: ReturnType<DatabaseSync['prepare']> | undefined;
     let projectRenderInfoStmt: ReturnType<DatabaseSync['prepare']> | undefined;
+    let projectRenderInfoFullStmt: ReturnType<DatabaseSync['prepare']> | undefined;
     const canIncludeStepInPrefix = (row: any): boolean => {
       const st = Number(row.status);
       return TERMINAL_STEP_STATUSES.has(st);
@@ -279,9 +308,12 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
       const metadataLen = Number(row.metadata_len ?? 0);
       let effectiveMeta: Uint8Array | null = row.metadata && row.metadata.byteLength > 0 ? detachBuf(row.metadata) : null;
       if (!effectiveMeta && Number.isSafeInteger(metadataLen) && metadataLen > inlineLimit) {
-        projectStepMetaStmt ??= db.prepare('SELECT substr(metadata, ?, ?) AS chunk FROM steps WHERE idx = ?');
-        const readMetaChunk = (offset: number, length: number) =>
-          (projectStepMetaStmt!.get(offset + 1, length, idx) as { chunk?: Uint8Array } | undefined)?.chunk ?? new Uint8Array(0);
+        const readMetaChunk = createSqlBlobChunkReader(
+          metadataLen,
+          idx,
+          () => (projectStepMetaStmt ??= db.prepare('SELECT substr(metadata, ?, ?) AS chunk FROM steps WHERE idx = ?')),
+          () => (projectStepMetaFullStmt ??= db.prepare('SELECT metadata AS data FROM steps WHERE idx = ?'))
+        );
         try {
           const projected = projectProtobuf(
             metadataLen,
@@ -310,11 +342,14 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
         row.render_info && row.render_info.byteLength > 0 ? detachBuf(row.render_info) : null;
       if (!effectiveRenderInfo && Number.isSafeInteger(renderInfoLen) && renderInfoLen > inlineLimit) {
         try {
-          projectRenderInfoStmt ??= db.prepare('SELECT substr(render_info, ?, ?) AS chunk FROM steps WHERE idx = ?');
           const projectedRenderInfo = projectProtobuf(
             renderInfoLen,
-            (offset, length) =>
-              (projectRenderInfoStmt!.get(offset + 1, length, idx) as { chunk?: Uint8Array } | undefined)?.chunk ?? new Uint8Array(0),
+            createSqlBlobChunkReader(
+              renderInfoLen,
+              idx,
+              () => (projectRenderInfoStmt ??= db.prepare('SELECT substr(render_info, ?, ?) AS chunk FROM steps WHERE idx = ?')),
+              () => (projectRenderInfoFullStmt ??= db.prepare('SELECT render_info AS data FROM steps WHERE idx = ?'))
+            ),
             HUD_STEP_RENDER_INFO_PROJECTION,
             { skipOversizedLeafFields: true }
           );
@@ -445,16 +480,17 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
           } else {
             const inlineBuf = execRow.inlineData && execLen <= inlineLimit ? execRow.inlineData : null;
             let execChunkStmt: ReturnType<DatabaseSync['prepare']> | undefined;
+            let execFullStmt: ReturnType<DatabaseSync['prepare']> | undefined;
             const projected = projectProtobuf(
               execLen,
-              (offset, length) => {
-                if (inlineBuf) return inlineBuf.subarray(offset, offset + length);
-                execChunkStmt ??= db.prepare('SELECT substr(data, ?, ?) AS chunk FROM executor_metadata WHERE idx = ?');
-                return (
-                  (execChunkStmt.get(offset + 1, length, execIdx) as { chunk?: Uint8Array } | undefined)?.chunk ??
-                  new Uint8Array(0)
-                );
-              },
+              inlineBuf
+                ? (offset, length) => inlineBuf.subarray(offset, offset + length)
+                : createSqlBlobChunkReader(
+                    execLen,
+                    execIdx,
+                    () => (execChunkStmt ??= db.prepare('SELECT substr(data, ?, ?) AS chunk FROM executor_metadata WHERE idx = ?')),
+                    () => (execFullStmt ??= db.prepare('SELECT data AS data FROM executor_metadata WHERE idx = ?'))
+                  ),
               HUD_EXECUTOR_METADATA_PROJECTION,
               HUD_GEN_PROTO_LIMITS
             );
@@ -475,6 +511,7 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
 
     if (hasGenTable) {
       let chunkStmt: ReturnType<DatabaseSync['prepare']> | undefined;
+      let fullGenStmt: ReturnType<DatabaseSync['prepare']> | undefined;
       const resolveRawGenBlob = (
         idx: number,
         dataLen: number,
@@ -494,10 +531,14 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
         const cached = getCachedProjectedGenBlob(cacheKey);
         if (cached !== undefined) return cached;
         try {
-          chunkStmt ??= db.prepare('SELECT substr(data, ?, ?) AS chunk FROM gen_metadata WHERE idx = ?');
           const projected = projectProtobuf(
             dataLen,
-            (offset, length) => (chunkStmt!.get(offset + 1, length, idx) as { chunk?: Uint8Array } | undefined)?.chunk ?? new Uint8Array(0),
+            createSqlBlobChunkReader(
+              dataLen,
+              idx,
+              () => (chunkStmt ??= db.prepare('SELECT substr(data, ?, ?) AS chunk FROM gen_metadata WHERE idx = ?')),
+              () => (fullGenStmt ??= db.prepare('SELECT data AS data FROM gen_metadata WHERE idx = ?'))
+            ),
             HUD_GEN_METADATA_PROJECTION,
             HUD_GEN_PROTO_LIMITS
           );
@@ -664,9 +705,7 @@ let sessionError: string | undefined;
 let sessionDataVersion = 0;
 
 function openSession(path: string) {
-  try { database?.exec('ROLLBACK;'); database?.close(); } catch {}
-  database = undefined;
-  sessionError = undefined;
+  closeSession();
   try {
     database = new DatabaseSync(path, { readOnly: true });
     database.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=250;');
@@ -677,7 +716,10 @@ function openSession(path: string) {
 }
 
 function closeSession() {
-  try { database?.exec('ROLLBACK;'); database?.close(); } catch {}
+  if (database) {
+    try { database.exec('ROLLBACK;'); } catch {}
+    try { database.close(); } catch {}
+  }
   database = undefined;
   sessionError = undefined;
 }
@@ -1026,11 +1068,14 @@ function executeUsageScan(req: UsageWorkerScanRequest): { result: UsageWorkerSca
         continue;
       }
       try {
-        chunkStmt ??= db.prepare('SELECT substr(data, ?, ?) AS chunk FROM gen_metadata WHERE idx = ?');
         const projected = projectProtobuf(
           size,
-          (offset, length) =>
-            ((chunkStmt!.get(offset + 1, length, idx) as { chunk?: Uint8Array } | undefined)?.chunk) ?? new Uint8Array(0),
+          createSqlBlobChunkReader(
+            size,
+            idx,
+            () => (chunkStmt ??= db.prepare('SELECT substr(data, ?, ?) AS chunk FROM gen_metadata WHERE idx = ?')),
+            () => (fullRowStmt ??= db.prepare('SELECT data AS data FROM gen_metadata WHERE idx = ?'))
+          ),
           GENERATION_PROJECTION,
           USAGE_PROTO_LIMITS
         );
@@ -1041,9 +1086,9 @@ function executeUsageScan(req: UsageWorkerScanRequest): { result: UsageWorkerSca
         genRows.push({ idx, size, data_blob: detached, projected: true });
       } catch {
         if (size <= maxDirectBlob) {
-          fullRowStmt ??= db.prepare('SELECT data AS data_blob FROM gen_metadata WHERE idx = ?');
-          const full = fullRowStmt.get(idx) as { data_blob?: Uint8Array } | undefined;
-          const detached = detachBuf(full?.data_blob);
+          fullRowStmt ??= db.prepare('SELECT data AS data FROM gen_metadata WHERE idx = ?');
+          const full = fullRowStmt.get(idx) as { data?: Uint8Array } | undefined;
+          const detached = detachBuf(full?.data);
           if (!detached || !hasInlineGenerationTimestamp(detached)) {
             mayNeedSteps = true;
           }
@@ -1083,20 +1128,23 @@ function executeUsageScan(req: UsageWorkerScanRequest): { result: UsageWorkerSca
               continue;
             }
             try {
-              stepChunkStmt ??= db.prepare('SELECT substr(metadata, ?, ?) AS chunk FROM steps WHERE idx = ?');
               const projected = projectProtobuf(
                 size,
-                (offset, length) =>
-                  ((stepChunkStmt!.get(offset + 1, length, idx) as { chunk?: Uint8Array } | undefined)?.chunk) ?? new Uint8Array(0),
+                createSqlBlobChunkReader(
+                  size,
+                  idx,
+                  () => (stepChunkStmt ??= db.prepare('SELECT substr(metadata, ?, ?) AS chunk FROM steps WHERE idx = ?')),
+                  () => (stepFullStmt ??= db.prepare('SELECT metadata AS data FROM steps WHERE idx = ?'))
+                ),
                 STEP_PROJECTION,
                 USAGE_PROTO_LIMITS
               );
               stepRows.push({ idx, size, data_blob: detachBuf(projected.data), projected: true });
             } catch {
               if (size <= maxDirectBlob) {
-                stepFullStmt ??= db.prepare('SELECT metadata AS data_blob FROM steps WHERE idx = ?');
-                const full = stepFullStmt.get(idx) as { data_blob?: Uint8Array } | undefined;
-                stepRows.push({ idx, size, data_blob: detachBuf(full?.data_blob) });
+                stepFullStmt ??= db.prepare('SELECT metadata AS data FROM steps WHERE idx = ?');
+                const full = stepFullStmt.get(idx) as { data?: Uint8Array } | undefined;
+                stepRows.push({ idx, size, data_blob: detachBuf(full?.data) });
               } else {
                 stepRows.push({ idx, size, data_blob: null });
               }
@@ -1204,7 +1252,19 @@ parentPort?.on('message', (request: { id: string; locale?: string; open?: string
       const sizes=database.prepare(`SELECT length(${column}) AS size FROM ${table} WHERE idx=?`).all(idx);
       if(sizes.length!==1)throw Error(bt('sqlite.err.projection_index_missing'));
       const statement=database.prepare(`SELECT substr(${column},?,?) AS chunk FROM ${table} WHERE idx=?`);
-      const projected=projectProtobuf(Number(sizes[0]!.size),(offset,length)=>statement.get(offset+1,length,idx)!.chunk as Uint8Array,table==='gen_metadata'?GENERATION_PROJECTION:STEP_PROJECTION,USAGE_PROTO_LIMITS);
+      let fullStatement: ReturnType<DatabaseSync['prepare']> | undefined;
+      const blobSize = Number(sizes[0]!.size);
+      const projected=projectProtobuf(
+        blobSize,
+        createSqlBlobChunkReader(
+          blobSize,
+          idx,
+          () => statement,
+          () => (fullStatement ??= database!.prepare(`SELECT ${column} AS data FROM ${table} WHERE idx=?`))
+        ),
+        table==='gen_metadata'?GENERATION_PROJECTION:STEP_PROJECTION,
+        USAGE_PROTO_LIMITS
+      );
       // Small Buffers may share Node's non-transferable slab. Give IPC its own ArrayBuffer.
       rows=[{idx,size:sizes[0]!.size,data_blob:Uint8Array.from(projected.data),projected:true,projectionBytesRead:projected.bytesRead}];
       } finally { database.exec('ROLLBACK;'); }

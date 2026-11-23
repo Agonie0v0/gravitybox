@@ -81,7 +81,11 @@ async function accountFile(dir, id) {
 
 // ---------- D02 删除复活 ----------
 
-test('D02: 账号删除受阻保留原文件与恢复日志，权限恢复后完整对账', async () => {
+test('D02: 账号删除受阻保留原文件与恢复日志，权限恢复后完整对账', async t => {
+  if (process.platform === 'win32') {
+    t.skip('Windows NTFS ignores POSIX chmod(0o500) directory unlink blocking');
+    return;
+  }
   const dir = await sandbox('gb-p2-delete-fail-');
   const accountsDir = join(dir, 'accounts');
   try {
@@ -950,15 +954,22 @@ test('v1.1.3 Issue #20: JSON 批量导入、嵌套 token 解析、过期时间�
     current_account_id: 'idx-1',
   }));
 
-  // 3. 构造符号链接（必须被安全护栏跳过）
+  // 3. 构造符号链接（必须被安全护栏跳过；Windows 非提权无法创建文件 symlink 时不中断后续闭环验证）
   const symlinkPath = join(srcDir, 'symlink-account.json');
-  await fs.promises.symlink(externalCollisionFile, symlinkPath);
+  let createdSymlink = false;
+  try {
+    await fs.promises.symlink(externalCollisionFile, symlinkPath);
+    createdSymlink = true;
+  } catch (err) {
+    if (process.platform !== 'win32' || err?.code !== 'EPERM') throw err;
+  }
 
-  const importRes = await mgr.importAccountsFromJson([externalCollisionFile, batchFolder, symlinkPath]);
+  const importTargets = createdSymlink ? [externalCollisionFile, batchFolder, symlinkPath] : [externalCollisionFile, batchFolder];
+  const importRes = await mgr.importAccountsFromJson(importTargets);
   assert.equal(importRes.imported, 2, '应成功导入 2 个新账号');
   assert.equal(importRes.updated, 0, '外部 ID 碰撞不得覆盖已有不同邮箱账号');
   assert.equal(importRes.expiredWithoutRefreshConfig, 1, '应准确统计已过期且未配置后台刷新凭据的账号数量');
-  assert.ok(importRes.skipped.length >= 3, '损坏文件、缺 refresh_token 记录与符号链接均应计入 skipped');
+  assert.ok(importRes.skipped.length >= (createdSymlink ? 3 : 2), '损坏文件、缺 refresh_token 记录与符号链接均应计入 skipped');
   const importResText = JSON.stringify(importRes);
   assert.ok(!importResText.includes('1//refresh-'), '导入汇总结果严禁包含任何 refresh_token');
   assert.ok(!importResText.includes('ya29.'), '导入汇总结果严禁包含任何 access_token');
@@ -1001,7 +1012,9 @@ test('v1.1.3 Issue #20: JSON 批量导入、嵌套 token 解析、过期时间�
   assert.ok(!JSON.stringify(exportRes).includes('1//refresh-'), '导出 IPC 返回值不得包含凭据');
 
   const st = await fs.promises.lstat(backupPath);
-  assert.equal(st.mode & 0o777, 0o600, '导出的备份文件权限必须严格为 0600');
+  if (process.platform !== 'win32') {
+    assert.equal(st.mode & 0o777, 0o600, '导出的备份文件权限必须严格为 0600');
+  }
   const rawBackup = JSON.parse(await readFile(backupPath, 'utf8'));
   assert.equal(rawBackup.schema, 'gravitybox.accounts.backup');
   assert.equal(rawBackup.version, '1.0');

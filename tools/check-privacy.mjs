@@ -60,10 +60,11 @@ const BINARY_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.icns', '.ico',
   '.dmg', '.zip', '.tar', '.gz', '.pdf', '.woff', '.woff2',
   '.ttf', '.otf', '.node', '.sqlite', '.db', '.bin',
+  '.exe', '.dll', '.pdb', '.rlib', '.rmeta', '.lib',
 ]);
 
 const SKIPPED_DIRS = new Set([
-  '.git', '.agents', 'node_modules', 'dist', 'build', '.cache',
+  '.git', '.agents', 'node_modules', 'dist', 'build', 'target', '.cache',
   'vendor', '质检报告', '成品', 'reports', 'artifacts',
 ]);
 

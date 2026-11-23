@@ -1,6 +1,7 @@
 import test from "node:test";
 import { describe as describeContractGroup } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, writeFile, readFile, rm, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import { BundleCache } from "../dist/bundle-cache.js";
 import { Controller } from "../dist/controller.js";
 import { dictionaryFromEntries } from "../dist/dictionary.js";
 import { isApplicationRunning } from "../dist/discovery.js";
+import { antigravityLayout, resolveIpcEndpoint } from "../dist/platform/index.js";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
 import { createHash } from "node:crypto";
@@ -22,14 +24,15 @@ const execFileAsync = promisify(execFile);
 describeContractGroup("连接与控制 · evolution", { concurrency: false }, async () => {
 test('连接缓存不保留源字符串，同实例复用；文件、进程、版本或来源变化重新计算',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'gravity-cache-'));try{
-    await mkdir(join(dir,'Contents/Resources'),{recursive:true});await writeFile(join(dir,'Contents/Resources/app.asar'),'first');
+    const layout=antigravityLayout(dir);
+    await mkdir(layout.resourcesDir,{recursive:true});await writeFile(layout.asarPath,'first');
     let reads=0;const fetcher=async()=>{await new Promise(r=>setTimeout(r,10));return {hash:`hash-${++reads}`,source:'example',bytes:7};};const cache=new BundleCache();
     const first=await Promise.all([cache.read(dir,1,'2.23.1','http://127.0.0.1:1',fetcher),cache.read(dir,1,'2.23.1','http://127.0.0.1:1',fetcher)]);assert.equal(first.filter(r=>!r.cacheHit).length,1);assert.equal(reads,1);
     const hit=await cache.read(dir,1,'2.23.1','http://127.0.0.1:1',fetcher);assert.equal(hit.source,undefined);assert.equal(reads,1);
     await cache.read(dir,2,'2.23.1','http://127.0.0.1:1',fetcher);assert.equal(reads,2);
     await cache.read(dir,2,'2.24.0','http://127.0.0.1:1',fetcher);assert.equal(reads,3);
     await cache.read(dir,2,'2.24.0','http://127.0.0.1:2',fetcher);assert.equal(reads,4);
-    await writeFile(join(dir,'Contents/Resources/app.asar'),'changed size');await cache.read(dir,2,'2.24.0','http://127.0.0.1:2',fetcher);assert.equal(reads,5);
+    await writeFile(layout.asarPath,'changed size');await cache.read(dir,2,'2.24.0','http://127.0.0.1:2',fetcher);assert.equal(reads,5);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
 test('未知指纹仅使用保守页面策略，受验证版本保留完整规则',()=>{
@@ -44,9 +47,9 @@ describeContractGroup("连接与控制 · optimization-20261022", { concurrency:
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 const fixture=async fn=>{const dir=await mkdtemp(join(tmpdir(),'gb-opt-'));try{return await fn(dir);}finally{await rm(dir,{recursive:true,force:true,maxRetries:10,retryDelay:50});}};
 
-async function stop(child){if(!child||child.exitCode!==null)return;child.kill('SIGTERM');await Promise.race([once(child,'exit'),pause(3000)]);if(child.exitCode===null){child.kill('SIGKILL');await once(child,'exit');}}
-const rpc=(dir,p)=>new Promise((resolve,reject)=>{const s=createConnection(join(dir,'control.sock'));let b='';s.on('error',reject);s.on('connect',()=>s.write(JSON.stringify(p)+'\n'));s.setTimeout(10000,()=>{s.destroy();reject(new Error('timeout'));});s.on('data',c=>{b+=c;if(b.includes('\n')){s.end();resolve(JSON.parse(b.split('\n')[0]));}});});
-async function ready(dir){for(let i=0;i<300;i++){try{await access(join(dir,'control.sock'));await new Promise((res,rej)=>{const s=createConnection(join(dir,'control.sock'));s.once('connect',()=>{s.destroy();res();});s.once('error',rej);});return;}catch{}await pause(20);}throw Error('backend not ready');}
+async function stop(child){if(!child||child.exitCode!==null||child.signalCode!==null)return;child.kill('SIGTERM');await Promise.race([once(child,'exit'),pause(3000)]);if(child.exitCode===null&&child.signalCode===null){child.kill('SIGKILL');await once(child,'exit');}}
+const rpc=(dir,p)=>new Promise((resolve,reject)=>{const s=createConnection(resolveIpcEndpoint(dir));let b='';s.on('error',reject);s.on('connect',()=>s.write(JSON.stringify(p)+'\n'));s.setTimeout(10000,()=>{s.destroy();reject(new Error('timeout'));});s.on('data',c=>{b+=c;if(b.includes('\n')){s.end();resolve(JSON.parse(b.split('\n')[0]));}});});
+async function ready(dir){for(let i=0;i<300;i++){try{await new Promise((res,rej)=>{const s=createConnection(resolveIpcEndpoint(dir));s.once('connect',()=>{s.destroy();res();});s.once('error',rej);});return;}catch{}await pause(20);}throw Error('backend not ready');}
 
 test('已暂停的汉化在重新启动时保持暂停，不为更新自动注入目标应用',()=>fixture(async dir=>{
  await writeFile(join(dir,'runtime-preferences.json'),JSON.stringify({translationEnabled:false,hudEnabled:false}));
@@ -227,7 +230,10 @@ describeContractGroup("连接与控制 · debug-port-missing", { concurrency: fa
     await writeFile(join(fakeAppDir, 'Contents/Resources/app.asar'), 'mock-asar');
     const keyPath = join(profileDir, 'mock-key.pem');
     const certPath = join(profileDir, 'mock-cert.pem');
-    await execFileAsync('/usr/bin/openssl', [
+    const opensslBin = process.platform === 'win32'
+      ? (process.env.OPENSSL_BIN || (existsSync('C:\\Program Files\\Git\\usr\\bin\\openssl.exe') ? 'C:\\Program Files\\Git\\usr\\bin\\openssl.exe' : 'openssl'))
+      : '/usr/bin/openssl';
+    await execFileAsync(opensslBin, [
       'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
       '-keyout', keyPath, '-out', certPath, '-days', '1', '-subj', '/CN=127.0.0.1',
     ]);

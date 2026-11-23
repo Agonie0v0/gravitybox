@@ -1,9 +1,15 @@
 import { lstat, readdir, mkdir, readFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { ReentrantMutex } from './mutex.js';
 import { executeMoves, reconcileMoves, readMaintenanceManifest, type JournalMove } from './maintenance-journal.js';
+import {
+  defaultGravityBoxCacheDir,
+  defaultTrashDir,
+  isWindows,
+  moveToSystemTrash,
+  pathsEqual,
+} from './platform/index.js';
 import {
   ALL_ALLOWED_CACHE_NAMES,
   CACHE_NAMES,
@@ -76,12 +82,17 @@ export class CacheMaintenance {
     fingerprints: string[];
   };
 
+  private readonly trash: string;
+  private readonly useSystemTrash: boolean;
+
   constructor(
     private profile: string,
-    private trash = join(homedir(), '.Trash'),
+    trash?: string,
     private running = antigravityRunning,
     private options: CacheMaintenanceOptions = {},
   ) {
+    this.useSystemTrash = trash === undefined && isWindows();
+    this.trash = trash ?? defaultTrashDir();
     if (running === antigravityRunning) this.running = () => antigravityRunning(this.options.appPath);
   }
 
@@ -104,7 +115,7 @@ export class CacheMaintenance {
     if (this.options.stateDir) {
       return join(resolve(this.options.stateDir), 'maintenance-trash');
     }
-    return join(homedir(), 'Library', 'Caches', 'GravityBox', 'maintenance-trash');
+    return join(defaultGravityBoxCacheDir(), 'maintenance-trash');
   }
 
   private candidateTrashDirs(): string[] {
@@ -203,10 +214,10 @@ export class CacheMaintenance {
   private async inspectProcessState(): Promise<{ running: boolean; browserBusy: boolean }> {
     const agentDir = this.officialAgentDir();
     const browserProfileDir = agentDir ? join(agentDir, 'browser_profile') : '';
-    if (this.options.browserRunning) {
+    if (this.options.browserRunning || isWindows()) {
       const [running, browserBusy] = await Promise.all([
         this.running(),
-        this.options.browserRunning(),
+        this.isBrowserProfileBusy(),
       ]);
       return { running, browserBusy };
     }
@@ -734,16 +745,18 @@ export class CacheMaintenance {
     const stamp = Date.now();
     const snapshotFolderName = `GravityBox-缓存-${stamp}`;
     const primaryRoot = resolve(this.trash);
-    let vaultRoot = primaryRoot;
-    let primaryUsable = true;
-    try {
-      await mkdir(primaryRoot, { recursive: true });
-      await readdir(primaryRoot);
-    } catch (error) {
-      if (isTrashPermissionError(error)) {
-        primaryUsable = false;
-      } else {
-        throw error;
+    let vaultRoot = this.useSystemTrash ? this.fallbackTrashDir() : primaryRoot;
+    let primaryUsable = !this.useSystemTrash;
+    if (primaryUsable) {
+      try {
+        await mkdir(primaryRoot, { recursive: true });
+        await readdir(primaryRoot);
+      } catch (error) {
+        if (isTrashPermissionError(error)) {
+          primaryUsable = false;
+        } else {
+          throw error;
+        }
       }
     }
     let target = join(vaultRoot, snapshotFolderName);
@@ -815,7 +828,23 @@ export class CacheMaintenance {
       await this.options.onMutated();
     }
 
-    const usingFallbackTrash = vaultRoot !== primaryRoot;
+    let movedToSystemTrash = false;
+    if (this.useSystemTrash) {
+      const trashMover = this.options.moveToSystemTrash ?? moveToSystemTrash;
+      try {
+        const res = await trashMover([target]);
+        if (res.moved.length > 0) {
+          movedToSystemTrash = true;
+        }
+      } catch {
+        // System Recycle Bin unavailable: gracefully keep restorable snapshot in fallbackTrashDir
+        movedToSystemTrash = false;
+      }
+    }
+
+    const usingFallbackTrash = this.useSystemTrash
+      ? !movedToSystemTrash
+      : !pathsEqual(vaultRoot, primaryRoot);
     const supersededSnapshotPaths = usingFallbackTrash
       ? await this.collectSupersededFallbackSnapshots(snapshotFolderName, options.keepLocalSnapshots)
       : [];
@@ -836,9 +865,11 @@ export class CacheMaintenance {
       clearedBytes,
       clearedFiles,
       snapshotId: snapshotFolderName,
-      restorePath: target,
-      trashDir: vaultRoot,
+      restorePath: movedToSystemTrash ? '' : target,
+      trashDir: movedToSystemTrash ? 'Recycle Bin' : vaultRoot,
       usingFallbackTrash,
+      movedToSystemTrash,
+      restorableInApp: !movedToSystemTrash,
       supersededSnapshotPaths,
     };
   }
@@ -1076,7 +1107,7 @@ export class CacheMaintenance {
           seenToPaths.add(name);
           const expectedTo = join(dir, name);
           const expectedFrom = join(this.profile, name);
-          if (toPath !== expectedTo) throw Error(bt('maintenance.err.snapshot_path_invalid'));
+          if (!pathsEqual(toPath, expectedTo)) throw Error(bt('maintenance.err.snapshot_path_invalid'));
           plans.push({
             label: name,
             entryName: name,
