@@ -42,5 +42,10 @@
 /AGENTS.md
 /.agents/
 
-# Windows helper build output
+# Windows helper & desktop app build outputs
 /windows/win-helper/target/
+/windows/app/node_modules/
+/windows/app/dist/
+/windows/app/.vite/
+/windows/app/src-tauri/target/
+/windows/app/src-tauri/gen/

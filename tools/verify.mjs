@@ -368,7 +368,7 @@ async function main() {
           await step('Windows桌面端-前端构建', npmBuild.binary, npmBuild.args, { cwd: winAppDir });
         }
         if (existsSync(winAppCargo)) {
-          await step('Windows桌面端-Cargo检查', 'cargo', ['check', '--manifest-path', winAppCargo]);
+          await step('Windows桌面端-Cargo测试', 'cargo', ['test', '--manifest-path', winAppCargo]);
         }
       })();
       parallelChecks.push(winNativeChecks);
