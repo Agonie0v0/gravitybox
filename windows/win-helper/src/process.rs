@@ -108,7 +108,7 @@ pub struct AppProcessesResponse {
 #[derive(Debug, Clone, Copy)]
 pub struct GracefulCloseOptions {
     pub timeout_ms: u64,
-    pub terminate_background: bool,
+    pub confirm_background_exit: bool,
     pub grace_ms: u64,
 }
 
@@ -116,7 +116,7 @@ impl Default for GracefulCloseOptions {
     fn default() -> Self {
         Self {
             timeout_ms: 8000,
-            terminate_background: false,
+            confirm_background_exit: false,
             grace_ms: 2500,
         }
     }
@@ -803,6 +803,7 @@ fn terminate_matching_pid(pid: u32, prefixes: &[String]) {
 fn wait_without_force_kill(
     prefixes: &[String],
     deadline: Instant,
+    non_visible_reason: &str,
 ) -> Result<GracefulCloseResponse, HelperError> {
     loop {
         let matched = find_matching_processes(prefixes)?;
@@ -820,7 +821,7 @@ fn wait_without_force_kill(
             let reason = if windows.has_visible() {
                 "visible_window_open"
             } else {
-                "timeout"
+                non_visible_reason
             };
             return Ok(GracefulCloseResponse {
                 ok: true,
@@ -839,7 +840,9 @@ fn wait_without_force_kill(
 ///   modal dialog is open). NEVER force-kills while any visible top-level window remains open.
 /// - Stage 2: Once 0 visible top-level windows are continuously confirmed for 1200ms, send
 ///   `WM_CLOSE` to hidden/tray top-level windows and wait `opts.grace_ms`.
-/// - Stage 3 (only when `opts.terminate_background == true` AND 0 visible top-level windows are
+///   In default mode (`opts.confirm_background_exit == false`), `TerminateProcess` is NEVER called;
+///   any remaining windowless/tray processes are reported as `closed: false, reason: "background_resident"`.
+/// - Stage 3 (only when `opts.confirm_background_exit == true` AND 0 visible top-level windows are
 ///   re-confirmed): terminate root matching processes first (wait up to 2000ms), then terminate
 ///   any remaining windowless matching processes (wait up to 3000ms).
 pub fn app_graceful_close(
@@ -927,11 +930,17 @@ pub fn app_graceful_close(
                 break;
             }
             if now >= stage1_deadline {
+                let reason = if opts.confirm_background_exit {
+                    "timeout"
+                } else {
+                    post_wm_close_all(windows.hidden_close_targets());
+                    "background_resident"
+                };
                 return Ok(GracefulCloseResponse {
                     ok: true,
                     closed: false,
                     remaining_pids: sorted_pids(&matched),
-                    reason: Some("timeout".to_string()),
+                    reason: Some(reason.to_string()),
                 });
             }
             let until_stable = ZERO_VISIBLE_STABLE_DURATION.saturating_sub(stable_elapsed);
@@ -956,12 +965,17 @@ pub fn app_graceful_close(
     }
     let stage2_windows = collect_windows_for_pids(&pid_set(&stage2_matched));
     if stage2_windows.has_visible() {
-        return wait_without_force_kill(prefixes, stage1_deadline);
+        let non_visible = if opts.confirm_background_exit {
+            "timeout"
+        } else {
+            "background_resident"
+        };
+        return wait_without_force_kill(prefixes, stage1_deadline, non_visible);
     }
     post_wm_close_all(stage2_windows.hidden_close_targets());
 
     let raw_stage2_deadline = Instant::now() + Duration::from_millis(opts.grace_ms);
-    let stage2_deadline = if opts.terminate_background {
+    let stage2_deadline = if opts.confirm_background_exit {
         raw_stage2_deadline
     } else {
         raw_stage2_deadline.min(stage1_deadline)
@@ -980,7 +994,12 @@ pub fn app_graceful_close(
         let windows = collect_windows_for_pids(&pid_set(&matched));
         if windows.has_visible() {
             // A visible window appeared (e.g. confirmation dialog) -> never force-kill.
-            return wait_without_force_kill(prefixes, stage1_deadline);
+            let non_visible = if opts.confirm_background_exit {
+                "timeout"
+            } else {
+                "background_resident"
+            };
+            return wait_without_force_kill(prefixes, stage1_deadline, non_visible);
         }
         let now = Instant::now();
         if now >= stage2_deadline {
@@ -992,8 +1011,30 @@ pub fn app_graceful_close(
         }
     }
 
-    if !opts.terminate_background {
-        return wait_without_force_kill(prefixes, stage1_deadline);
+    // Default mode hard guard: NEVER call TerminateProcess without explicit user confirmation.
+    // Report remaining windowless/tray processes as `background_resident` so the caller/UI can prompt.
+    if !opts.confirm_background_exit {
+        let matched = find_matching_processes(prefixes)?;
+        if matched.is_empty() {
+            return Ok(GracefulCloseResponse {
+                ok: true,
+                closed: true,
+                remaining_pids: Vec::new(),
+                reason: Some("clean_exit".to_string()),
+            });
+        }
+        let windows = collect_windows_for_pids(&pid_set(&matched));
+        let reason = if windows.has_visible() {
+            "visible_window_open"
+        } else {
+            "background_resident"
+        };
+        return Ok(GracefulCloseResponse {
+            ok: true,
+            closed: false,
+            remaining_pids: sorted_pids(&matched),
+            reason: Some(reason.to_string()),
+        });
     }
 
     // Stage 3a: Re-confirm 0 visible top-level windows, then terminate root processes first.
@@ -1238,7 +1279,7 @@ mod tests {
             &[r"C:\__gravitybox_nonexistent_app_dir__".to_string()],
             GracefulCloseOptions {
                 timeout_ms: 200,
-                terminate_background: false,
+                confirm_background_exit: false,
                 grace_ms: 100,
             },
         )
@@ -1314,15 +1355,15 @@ mod tests {
     }
 
     #[test]
-    fn app_graceful_close_default_mode_does_not_terminate_background_process() {
+    fn app_graceful_close_default_mode_reports_background_resident_and_never_kills() {
         let mut harness = TempDummyHarness::new("default");
         let pid = harness.spawn_dummy("dummy_bg.exe", "30");
 
         let res = app_graceful_close(
             &[harness.dir_str()],
             GracefulCloseOptions {
-                timeout_ms: 400,
-                terminate_background: false,
+                timeout_ms: 5000,
+                confirm_background_exit: false,
                 grace_ms: 200,
             },
         )
@@ -1330,7 +1371,7 @@ mod tests {
 
         assert!(res.ok);
         assert!(!res.closed);
-        assert_eq!(res.reason.as_deref(), Some("timeout"));
+        assert_eq!(res.reason.as_deref(), Some("background_resident"));
         assert!(res.remaining_pids.contains(&pid));
         assert!(
             harness.children[0].try_wait().unwrap().is_none(),
@@ -1339,8 +1380,8 @@ mod tests {
     }
 
     #[test]
-    fn app_graceful_close_terminate_background_cleans_up_windowless_processes() {
-        let mut harness = TempDummyHarness::new("term-bg");
+    fn app_graceful_close_confirm_background_exit_cleans_up_windowless_processes() {
+        let mut harness = TempDummyHarness::new("confirm-bg");
         let _pid1 = harness.spawn_dummy("dummy_main.exe", "30");
         let _pid2 = harness.spawn_dummy("dummy_sidecar.exe", "30");
 
@@ -1348,11 +1389,11 @@ mod tests {
             &[harness.dir_str()],
             GracefulCloseOptions {
                 timeout_ms: 5000,
-                terminate_background: true,
+                confirm_background_exit: true,
                 grace_ms: 250,
             },
         )
-        .expect("app_graceful_close terminate_background");
+        .expect("app_graceful_close confirm_background_exit");
 
         assert!(res.ok);
         assert!(res.closed);
@@ -1374,7 +1415,7 @@ mod tests {
             &[harness.dir_str()],
             GracefulCloseOptions {
                 timeout_ms: 5000,
-                terminate_background: true,
+                confirm_background_exit: true,
                 grace_ms: 800,
             },
         )

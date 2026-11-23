@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { openAsarArchive, parseAsarHeaderPrefix, resolveAsarEntryRange, type AsarFileEntry } from './asar.js';
 import { resolveBundleLayout } from './application-target.js';
+import { openAsarArchive, parseAsarHeaderPrefix, resolveAsarEntryRange, type AsarFileEntry } from './asar.js';
 import { extractUiStrings, extractedKind, fetchBuffer, foldDictionaryKey, isEnglishSource, normalizeText as normalize } from './bundle.js';
 import { decodeScopedKey } from './candidates.js';
 import type { Dictionary } from './dictionary.js';

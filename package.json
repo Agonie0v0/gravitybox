@@ -1,6 +1,6 @@
 {
   "name": "gravitybox",
-  "version": "1.1.3",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "description": "GravityBox: Native macOS Antigravity Companion · 原生 macOS Antigravity 全功能增强伴侣",
@@ -30,7 +30,7 @@
     "build:win-helper": "cargo build --release --manifest-path windows/win-helper/Cargo.toml",
     "build:win-app": "npm --prefix windows/app run build && cargo build --release --manifest-path windows/app/src-tauri/Cargo.toml",
     "test:win-helper": "cargo test --manifest-path windows/win-helper/Cargo.toml",
-    "test:win": "npm run build && node tools/run-tests.mjs --fast && cargo test --manifest-path windows/win-helper/Cargo.toml",
+    "test:win": "npm run build && node tools/run-tests.mjs --fast && cargo test --manifest-path windows/win-helper/Cargo.toml && cargo test --manifest-path windows/app/src-tauri/Cargo.toml",
     "verify": "node tools/verify.mjs",
     "verify:strict": "node tools/verify.mjs --strict",
     "package:mac": "npm run verify && node tools/package-mac.mjs",

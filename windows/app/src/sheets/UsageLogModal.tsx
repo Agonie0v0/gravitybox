@@ -11,6 +11,7 @@ import {
   localizedModelLabel,
 } from '../lib/format';
 import { backendRequest, pickSaveJsonPath, saveJsonFile } from '../lib/tauri';
+import { cleanSshHostLabel, normalizeSshEnvironment } from '../lib/ssh';
 import type { UsageEventRow, UsageEventsReply, UsagePeriodKey } from '../lib/types';
 
 const PERIODS: UsagePeriodKey[] = ['today', '7d', '30d', 'all'];
@@ -19,14 +20,17 @@ const PAGE_SIZE = 200;
 export function UsageLogModal({
   open,
   initialPeriod,
+  initialEnvironmentId = 'all',
   onClose,
 }: {
   open: boolean;
   initialPeriod: UsagePeriodKey;
+  initialEnvironmentId?: string;
   onClose: () => void;
 }) {
-  const { t, locale, isDark, showToast } = useApp();
+  const { t, locale, isDark, sshEnvironments, showToast } = useApp();
   const [period, setPeriod] = useState<UsagePeriodKey>(initialPeriod);
+  const [environmentId, setEnvironmentId] = useState<string>(initialEnvironmentId);
   const [query, setQuery] = useState('');
   const [offset, setOffset] = useState(0);
   const [rows, setRows] = useState<UsageEventRow[]>([]);
@@ -38,6 +42,10 @@ export function UsageLogModal({
   const snapshotIdRef = useRef<string | null>(null);
   const debounceRef = useRef<number | null>(null);
 
+  const normalizedSshHosts = sshEnvironments.map((env) =>
+    normalizeSshEnvironment(env, t('ssh.remote_fallback')),
+  );
+
   const releaseSnapshot = useCallback(() => {
     const id = snapshotIdRef.current;
     snapshotIdRef.current = null;
@@ -47,7 +55,13 @@ export function UsageLogModal({
   }, []);
 
   const fetchRows = useCallback(
-    async (opts: { period: UsagePeriodKey; query: string; offset: number; force?: boolean }) => {
+    async (opts: {
+      period: UsagePeriodKey;
+      environmentId: string;
+      query: string;
+      offset: number;
+      force?: boolean;
+    }) => {
       setLoading(true);
       setError('');
       try {
@@ -58,6 +72,9 @@ export function UsageLogModal({
           offset: opts.offset,
           limit: PAGE_SIZE,
         };
+        if (opts.environmentId && opts.environmentId !== 'all') {
+          payload.environmentId = opts.environmentId;
+        }
         if (opts.force) {
           payload.force = true;
           payload.pinSnapshot = true;
@@ -85,16 +102,23 @@ export function UsageLogModal({
   useEffect(() => {
     if (open) {
       setPeriod(initialPeriod);
+      setEnvironmentId(initialEnvironmentId);
       setQuery('');
       setOffset(0);
-      void fetchRows({ period: initialPeriod, query: '', offset: 0, force: false });
+      void fetchRows({
+        period: initialPeriod,
+        environmentId: initialEnvironmentId,
+        query: '',
+        offset: 0,
+        force: false,
+      });
     } else {
       releaseSnapshot();
     }
     return () => {
       if (debounceRef.current) window.clearTimeout(debounceRef.current);
     };
-  }, [open, initialPeriod, fetchRows, releaseSnapshot]);
+  }, [open, initialPeriod, initialEnvironmentId, fetchRows, releaseSnapshot]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
@@ -104,14 +128,21 @@ export function UsageLogModal({
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
     debounceRef.current = window.setTimeout(() => {
       setOffset(0);
-      void fetchRows({ period, query: val, offset: 0 });
+      void fetchRows({ period, environmentId, query: val, offset: 0 });
     }, 180);
   };
 
   const handlePeriodChange = (next: UsagePeriodKey) => {
     setPeriod(next);
     setOffset(0);
-    void fetchRows({ period: next, query, offset: 0 });
+    void fetchRows({ period: next, environmentId, query, offset: 0 });
+  };
+
+  const handleEnvironmentChange = (nextEnv: string) => {
+    releaseSnapshot();
+    setEnvironmentId(nextEnv);
+    setOffset(0);
+    void fetchRows({ period, environmentId: nextEnv, query, offset: 0, force: true });
   };
 
   const handleJumpPage = () => {
@@ -122,7 +153,7 @@ export function UsageLogModal({
     }
     const nextOffset = (n - 1) * PAGE_SIZE;
     setOffset(nextOffset);
-    void fetchRows({ period, query, offset: nextOffset });
+    void fetchRows({ period, environmentId, query, offset: nextOffset });
   };
 
   const handleExport = async () => {
@@ -159,7 +190,7 @@ export function UsageLogModal({
               onClick={() => {
                 releaseSnapshot();
                 setOffset(0);
-                void fetchRows({ period, query, offset: 0, force: true });
+                void fetchRows({ period, environmentId, query, offset: 0, force: true });
               }}
             >
               <RotateCw size={12} className={loading ? 'gb-spin' : undefined} />
@@ -177,9 +208,9 @@ export function UsageLogModal({
           </div>
         </div>
 
-        {/* Search + Period filter */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{ position: 'relative', flex: 1 }}>
+        {/* Search + Environment + Period filter */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <div style={{ position: 'relative', flex: 1, minWidth: 160 }}>
             <Search
               size={13}
               style={{
@@ -200,6 +231,23 @@ export function UsageLogModal({
               onChange={(e) => handleQueryChange(e.target.value)}
             />
           </div>
+          {normalizedSshHosts.length > 0 && (
+            <select
+              className="gb-select"
+              style={{ height: 30, fontSize: 12, maxWidth: 160 }}
+              aria-label={t('usage_log.env.a11y')}
+              value={environmentId}
+              onChange={(e) => handleEnvironmentChange(e.target.value)}
+            >
+              <option value="all">{t('usage_log.env.all')}</option>
+              <option value="local">{t('usage_log.env.local_label')}</option>
+              {normalizedSshHosts.map((host) => (
+                <option key={host.id || host.hostLabel} value={host.id}>
+                  {t('usage_log.env.ssh_label', { host: host.hostLabel })}
+                </option>
+              ))}
+            </select>
+          )}
           <div className="gb-segmented">
             {PERIODS.map((p) => (
               <button
@@ -287,6 +335,21 @@ export function UsageLogModal({
                       >
                         {model}
                       </span>
+                      {(() => {
+                        const rowEnvId = row.environmentId || row.environment_id || '';
+                        const isRemote =
+                          (rowEnvId && rowEnvId !== 'local') || row.environmentKind === 'ssh';
+                        if (!isRemote) return null;
+                        const label = cleanSshHostLabel(
+                          row.hostLabel || row.host_label || row.environmentLabel || rowEnvId,
+                          t('ssh.remote_fallback'),
+                        );
+                        return (
+                          <span className="gb-pill gb-pill-neutral" style={{ flexShrink: 0 }}>
+                            {t('usage_log.env.ssh_label', { host: label })}
+                          </span>
+                        );
+                      })()}
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
                       <span className="tabular" style={{ fontSize: 12, fontWeight: 600 }}>
@@ -345,7 +408,7 @@ export function UsageLogModal({
               onClick={() => {
                 const next = Math.max(0, offset - PAGE_SIZE);
                 setOffset(next);
-                void fetchRows({ period, query, offset: next });
+                void fetchRows({ period, environmentId, query, offset: next });
               }}
             >
               {t('usage_log.prev_page')}
@@ -357,7 +420,7 @@ export function UsageLogModal({
               onClick={() => {
                 const next = offset + PAGE_SIZE;
                 setOffset(next);
-                void fetchRows({ period, query, offset: next });
+                void fetchRows({ period, environmentId, query, offset: next });
               }}
             >
               {t('usage_log.next_page')}

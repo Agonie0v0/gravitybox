@@ -2,6 +2,7 @@ mod cred;
 mod error;
 mod network;
 mod pe;
+mod pipe;
 mod process;
 mod trash;
 mod util;
@@ -56,7 +57,7 @@ fn parse_flag_value(
 fn dispatch(mut args: Vec<String>) -> Result<(), HelperError> {
     if args.len() < 2 {
         return Err(HelperError::invalid_args(
-            "missing subcommand (expected one of: cred-read, cred-write, cred-delete, ls-inspect, port-owner, app-processes, app-graceful-close, trash-move, pe-version)",
+            "missing subcommand (expected one of: cred-read, cred-write, cred-delete, ls-inspect, port-owner, app-processes, app-graceful-close, trash-move, pe-version, verify-pipe-server)",
         ));
     }
 
@@ -167,7 +168,7 @@ fn dispatch(mut args: Vec<String>) -> Result<(), HelperError> {
         "app-graceful-close" => {
             let mut prefixes: Vec<String> = Vec::new();
             let mut timeout_ms: u64 = 8000;
-            let mut terminate_background = false;
+            let mut confirm_background_exit = false;
             let mut grace_ms: u64 = 2500;
             while let Some(arg) = iter.next() {
                 if let Some(v) = parse_flag_value("--prefix", &arg, &mut iter)? {
@@ -180,10 +181,16 @@ fn dispatch(mut args: Vec<String>) -> Result<(), HelperError> {
                     grace_ms = v.parse().map_err(|_| {
                         HelperError::invalid_args("invalid --grace-ms (expected integer >= 0)")
                     })?;
-                } else if arg == "--terminate-background" || arg == "--terminate-background=true" {
-                    terminate_background = true;
-                } else if arg == "--terminate-background=false" {
-                    terminate_background = false;
+                } else if arg == "--confirm-background-exit"
+                    || arg == "--confirm-background-exit=true"
+                    || arg == "--terminate-background"
+                    || arg == "--terminate-background=true"
+                {
+                    confirm_background_exit = true;
+                } else if arg == "--confirm-background-exit=false"
+                    || arg == "--terminate-background=false"
+                {
+                    confirm_background_exit = false;
                 } else {
                     return Err(HelperError::invalid_args(
                         "unknown argument for app-graceful-close",
@@ -195,10 +202,40 @@ fn dispatch(mut args: Vec<String>) -> Result<(), HelperError> {
             }
             let opts = process::GracefulCloseOptions {
                 timeout_ms,
-                terminate_background,
+                confirm_background_exit,
                 grace_ms,
             };
             let resp = process::app_graceful_close(&prefixes, opts)?;
+            emit_json(&resp);
+            Ok(())
+        }
+
+        "verify-pipe-server" => {
+            let mut pipe_name: Option<String> = None;
+            let mut expected_pid: Option<u32> = None;
+            let mut expected_exe: Option<String> = None;
+            while let Some(arg) = iter.next() {
+                if let Some(v) = parse_flag_value("--pipe", &arg, &mut iter)? {
+                    pipe_name = Some(v);
+                } else if let Some(v) = parse_flag_value("--expected-pid", &arg, &mut iter)? {
+                    let pid: u32 = v.parse().map_err(|_| {
+                        HelperError::invalid_args("invalid --expected-pid (expected integer > 0)")
+                    })?;
+                    expected_pid = Some(pid);
+                } else if let Some(v) = parse_flag_value("--expected-exe", &arg, &mut iter)? {
+                    expected_exe = Some(v);
+                } else {
+                    return Err(HelperError::invalid_args(
+                        "unknown argument for verify-pipe-server",
+                    ));
+                }
+            }
+            let pipe_name = pipe_name.ok_or_else(|| HelperError::invalid_args("missing --pipe"))?;
+            let resp = pipe::verify_pipe_server(
+                &pipe_name,
+                expected_pid,
+                expected_exe.as_deref(),
+            )?;
             emit_json(&resp);
             Ok(())
         }

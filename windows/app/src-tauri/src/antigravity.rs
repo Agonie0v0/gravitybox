@@ -1,6 +1,8 @@
+use crate::config::load_config;
 use crate::ipc_pipe::strip_verbatim_prefix;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -28,6 +30,8 @@ pub struct AntigravityInfo {
 pub struct SafeRelaunchResult {
     pub ok: bool,
     pub debug_port_ready: bool,
+    pub needs_background_exit_confirmation: bool,
+    pub reason: String,
     pub message: String,
 }
 
@@ -271,7 +275,210 @@ pub fn get_antigravity_info(resource_dir: Option<&Path>) -> AntigravityInfo {
     }
 }
 
-pub fn launch_antigravity() -> Result<(), String> {
+#[cfg(windows)]
+fn read_windows_system_proxy_env() -> Option<(String, String, String)> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE,
+        REG_DWORD, REG_SZ,
+    };
+
+    struct RegGuard(HKEY);
+    impl Drop for RegGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    RegCloseKey(self.0);
+                }
+            }
+        }
+    }
+
+    let subkey: Vec<u16> = OsStr::new(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let mut hkey: HKEY = null_mut();
+    let open_res = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            KEY_QUERY_VALUE,
+            &mut hkey,
+        )
+    };
+    if open_res != ERROR_SUCCESS || hkey.is_null() {
+        return None;
+    }
+    let guard = RegGuard(hkey);
+
+    let read_dword = |name: &str| -> Option<u32> {
+        let wn: Vec<u16> = OsStr::new(name).encode_wide().chain(Some(0)).collect();
+        let mut reg_type: u32 = 0;
+        let mut val: u32 = 0;
+        let mut len: u32 = std::mem::size_of::<u32>() as u32;
+        let res = unsafe {
+            RegQueryValueExW(
+                guard.0,
+                wn.as_ptr(),
+                null_mut(),
+                &mut reg_type,
+                &mut val as *mut u32 as *mut u8,
+                &mut len,
+            )
+        };
+        if res == ERROR_SUCCESS && reg_type == REG_DWORD {
+            Some(val)
+        } else {
+            None
+        }
+    };
+
+    let read_sz = |name: &str| -> Option<String> {
+        let wn: Vec<u16> = OsStr::new(name).encode_wide().chain(Some(0)).collect();
+        let mut reg_type: u32 = 0;
+        let mut len: u32 = 0;
+        let probe = unsafe {
+            RegQueryValueExW(
+                guard.0,
+                wn.as_ptr(),
+                null_mut(),
+                &mut reg_type,
+                null_mut(),
+                &mut len,
+            )
+        };
+        if probe != ERROR_SUCCESS || reg_type != REG_SZ || len < 2 || len > 32_768 {
+            return None;
+        }
+        let mut buf = vec![0u16; (len as usize).div_ceil(2)];
+        let res = unsafe {
+            RegQueryValueExW(
+                guard.0,
+                wn.as_ptr(),
+                null_mut(),
+                &mut reg_type,
+                buf.as_mut_ptr() as *mut u8,
+                &mut len,
+            )
+        };
+        if res != ERROR_SUCCESS {
+            return None;
+        }
+        let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Some(String::from_utf16_lossy(&buf[..end]).trim().to_string())
+    };
+
+    if read_dword("ProxyEnable").unwrap_or(0) != 1 {
+        return None;
+    }
+    let raw_server = read_sz("ProxyServer").unwrap_or_default();
+    if raw_server.is_empty() {
+        return None;
+    }
+
+    let format_http_endpoint = |raw: &str| -> Option<String> {
+        let t = raw.trim();
+        if t.is_empty() || t.to_ascii_lowercase().starts_with("socks") {
+            return None;
+        }
+        if t.starts_with("http://") || t.starts_with("https://") {
+            Some(t.trim_end_matches('/').to_string())
+        } else {
+            Some(format!("http://{}", t.trim_end_matches('/')))
+        }
+    };
+
+    let mut http_url: Option<String> = None;
+    let mut https_url: Option<String> = None;
+    if raw_server.contains('=') {
+        for part in raw_server.split(';') {
+            if let Some((proto, target)) = part.split_once('=') {
+                let p = proto.trim().to_ascii_lowercase();
+                if p == "http" {
+                    http_url = format_http_endpoint(target);
+                } else if p == "https" {
+                    https_url = format_http_endpoint(target);
+                }
+            }
+        }
+    } else if let Some(ep) = format_http_endpoint(&raw_server) {
+        http_url = Some(ep.clone());
+        https_url = Some(ep);
+    }
+
+    let final_http = http_url.clone().or_else(|| https_url.clone())?;
+    let final_https = https_url.or_else(|| http_url)?;
+
+    let raw_override = read_sz("ProxyOverride").unwrap_or_default();
+    let mut no_proxy_entries: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for entry in ["127.0.0.1", "localhost", "::1"]
+        .into_iter()
+        .chain(raw_override.split(';').map(str::trim))
+    {
+        if entry.is_empty() || entry.eq_ignore_ascii_case("<local>") {
+            continue;
+        }
+        let key = entry.to_ascii_lowercase();
+        if seen.insert(key) {
+            no_proxy_entries.push(entry.to_string());
+        }
+    }
+    Some((final_http, final_https, no_proxy_entries.join(",")))
+}
+
+#[cfg(not(windows))]
+fn read_windows_system_proxy_env() -> Option<(String, String, String)> {
+    None
+}
+
+fn resolve_launch_proxy_env(state_dir: Option<&Path>) -> Vec<(&'static str, String)> {
+    let Some(dir) = state_dir else {
+        return Vec::new();
+    };
+    let cfg = load_config(dir);
+    let resolved = match cfg.antigravity_proxy_mode.as_str() {
+        "manual" => {
+            let trimmed = cfg.antigravity_proxy_manual_url.trim();
+            if trimmed.is_empty() || trimmed.contains('\0') || trimmed.contains('\r') || trimmed.contains('\n') {
+                None
+            } else {
+                let normalized = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                    trimmed.trim_end_matches('/').to_string()
+                } else {
+                    format!("http://{}", trimmed.trim_end_matches('/'))
+                };
+                Some((
+                    normalized.clone(),
+                    normalized,
+                    "127.0.0.1,localhost,::1".to_string(),
+                ))
+            }
+        }
+        "system" => read_windows_system_proxy_env(),
+        _ => None,
+    };
+
+    let Some((http_url, https_url, no_proxy)) = resolved else {
+        return Vec::new();
+    };
+    vec![
+        ("HTTP_PROXY", http_url.clone()),
+        ("http_proxy", http_url),
+        ("HTTPS_PROXY", https_url.clone()),
+        ("https_proxy", https_url),
+        ("NO_PROXY", no_proxy.clone()),
+        ("no_proxy", no_proxy),
+        ("NODE_USE_ENV_PROXY", "1".to_string()),
+    ]
+}
+
+pub fn launch_antigravity(state_dir: Option<&Path>) -> Result<(), String> {
     let exe = resolve_antigravity_exe();
     if !exe.is_file() {
         return Err(format!(
@@ -284,6 +491,9 @@ pub fn launch_antigravity() -> Result<(), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    for (k, v) in resolve_launch_proxy_env(state_dir) {
+        cmd.env(k, v);
+    }
     cmd.spawn()
         .map_err(|e| format!("无法启动 Antigravity：{}", e))?;
     Ok(())
@@ -294,28 +504,42 @@ const SAFE_CLOSE_GRACE_MS: u64 = 2_500;
 const POST_CLOSE_SETTLE_MS: u64 = 400;
 const DEVTOOLS_READY_TIMEOUT_SECS: u64 = 15;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GracefulCloseOutcome {
     pub closed: bool,
     pub reason: String,
 }
 
-fn build_graceful_close_args(prefix: &str, timeout_ms: u64, grace_ms: u64) -> Vec<String> {
-    vec![
+/// Build CLI arguments for `gravitybox-win-helper.exe app-graceful-close`.
+/// Default (`confirm_background_exit = false`) NEVER passes `--confirm-background-exit`
+/// or `--terminate-background` — strictly pure graceful WM_CLOSE only.
+fn build_graceful_close_args(
+    prefix: &str,
+    timeout_ms: u64,
+    grace_ms: u64,
+    confirm_background_exit: bool,
+) -> Vec<String> {
+    let mut args = vec![
         "app-graceful-close".to_string(),
         "--prefix".to_string(),
         prefix.to_string(),
         "--timeout-ms".to_string(),
         timeout_ms.to_string(),
-        "--terminate-background".to_string(),
         "--grace-ms".to_string(),
         grace_ms.to_string(),
-    ]
+    ];
+    if confirm_background_exit {
+        args.push("--confirm-background-exit".to_string());
+    }
+    args
 }
 
 fn format_close_failure_message(reason: &str, timeout_ms: u64) -> String {
     if reason == "visible_window_open" {
         "检测到 Antigravity 仍有未关闭的可见窗口（例如未保存更改确认框），已停止关闭且未强制终止。请先在 Antigravity 中完成保存或确认关闭，再重试安全重启。".to_string()
+    } else if reason == "background_resident" {
+        "Antigravity 的可见窗口已全部关闭，但仍有无界面后台/托盘进程驻留。是否确认结束这些无界面后台进程并带调试端口重启？（也可点「取消」自行从系统托盘退出）".to_string()
     } else {
         let secs = (timeout_ms / 1000).max(1);
         format!(
@@ -338,12 +562,14 @@ fn remove_stale_devtools_active_port(path: &Path) {
 pub fn quit_antigravity_detailed(
     resource_dir: Option<&Path>,
     timeout_ms: u64,
+    confirm_background_exit: bool,
 ) -> Result<GracefulCloseOutcome, String> {
     let install_dir = resolve_antigravity_dir();
     let prefix = install_dir.to_string_lossy().to_string();
     let helper = resolve_win_helper_exe(resource_dir)
         .ok_or_else(|| "未找到 gravitybox-win-helper.exe，无法安全关闭 Antigravity".to_string())?;
-    let owned_args = build_graceful_close_args(&prefix, timeout_ms, SAFE_CLOSE_GRACE_MS);
+    let owned_args =
+        build_graceful_close_args(&prefix, timeout_ms, SAFE_CLOSE_GRACE_MS, confirm_background_exit);
     let arg_refs: Vec<&str> = owned_args.iter().map(String::as_str).collect();
     let val = run_win_helper(&helper, &arg_refs)?;
     let closed = val.get("closed").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -358,21 +584,38 @@ pub fn quit_antigravity_detailed(
     Ok(GracefulCloseOutcome { closed, reason })
 }
 
-pub fn quit_antigravity_and_wait(resource_dir: Option<&Path>, timeout_ms: u64) -> Result<bool, String> {
-    Ok(quit_antigravity_detailed(resource_dir, timeout_ms)?.closed)
-}
-
-/// Safe relaunch matching macOS `AssistantProcessLifecycle.swift`:
-/// 1. Gracefully close running Antigravity via `gravitybox-win-helper.exe app-graceful-close --terminate-background --grace-ms 2500`
-///    (never force-kills while any visible window remains open!)
-/// 2. Wait 400ms after all processes exit and remove any stale `%APPDATA%\Antigravity\DevToolsActivePort`
-/// 3. Relaunch `Antigravity.exe --remote-debugging-port=0`
-/// 4. Poll `%APPDATA%\Antigravity\DevToolsActivePort` and probe TCP loopback for up to 15s until ready
-pub fn safe_relaunch_antigravity(resource_dir: Option<&Path>) -> Result<SafeRelaunchResult, String> {
+/// Safe relaunch strictly enforcing zero silent background force-kill:
+/// 1. When `confirm_background_exit == false` (default), calls `app-graceful-close` WITHOUT
+///    `--confirm-background-exit`. If only windowless background/tray processes remain
+///    (`reason == "background_resident"`), returns `needs_background_exit_confirmation: true`
+///    so the UI asks for explicit user confirmation first.
+/// 2. If any visible window remains open (`reason == "visible_window_open"`), NEVER offers
+///    force-kill and returns an actionable error telling the user to save/close open windows.
+/// 3. Once all processes exit, waits 400ms, removes stale regular-file `DevToolsActivePort`,
+///    relaunches `Antigravity.exe --remote-debugging-port=0` (injecting configured proxy env if enabled),
+///    and polls for up to 15s until the debugging port is ready.
+pub fn safe_relaunch_antigravity(
+    resource_dir: Option<&Path>,
+    state_dir: Option<&Path>,
+    confirm_background_exit: bool,
+) -> Result<SafeRelaunchResult, String> {
     if is_antigravity_running(resource_dir) {
-        let outcome = quit_antigravity_detailed(resource_dir, SAFE_CLOSE_TIMEOUT_MS)?;
+        let outcome =
+            quit_antigravity_detailed(resource_dir, SAFE_CLOSE_TIMEOUT_MS, confirm_background_exit)?;
         if !outcome.closed {
-            return Err(format_close_failure_message(&outcome.reason, SAFE_CLOSE_TIMEOUT_MS));
+            if outcome.reason == "background_resident" && !confirm_background_exit {
+                return Ok(SafeRelaunchResult {
+                    ok: false,
+                    debug_port_ready: false,
+                    needs_background_exit_confirmation: true,
+                    reason: "background_resident".to_string(),
+                    message: format_close_failure_message("background_resident", SAFE_CLOSE_TIMEOUT_MS),
+                });
+            }
+            return Err(format_close_failure_message(
+                &outcome.reason,
+                SAFE_CLOSE_TIMEOUT_MS,
+            ));
         }
     }
 
@@ -384,7 +627,7 @@ pub fn safe_relaunch_antigravity(resource_dir: Option<&Path>) -> Result<SafeRela
         if attempt > 0 {
             std::thread::sleep(Duration::from_millis(450));
         }
-        if let Err(e) = launch_antigravity() {
+        if let Err(e) = launch_antigravity(state_dir) {
             last_err = Some(e);
             continue;
         }
@@ -394,6 +637,8 @@ pub fn safe_relaunch_antigravity(resource_dir: Option<&Path>) -> Result<SafeRela
                 return Ok(SafeRelaunchResult {
                     ok: true,
                     debug_port_ready: true,
+                    needs_background_exit_confirmation: false,
+                    reason: "ready".to_string(),
                     message: "Antigravity 已带调试端口重启并就绪".to_string(),
                 });
             }
@@ -403,6 +648,8 @@ pub fn safe_relaunch_antigravity(resource_dir: Option<&Path>) -> Result<SafeRela
             return Ok(SafeRelaunchResult {
                 ok: true,
                 debug_port_ready: has_live_devtools_port(),
+                needs_background_exit_confirmation: false,
+                reason: "launched".to_string(),
                 message: "Antigravity 已重新启动，等待调试连接就绪".to_string(),
             });
         }
@@ -416,28 +663,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn graceful_close_args_and_messages_match_contract() {
-        let args = build_graceful_close_args(
+    fn graceful_close_args_never_force_kill_by_default_and_require_explicit_confirm() {
+        let default_args = build_graceful_close_args(
             r"C:\Program Files\Antigravity",
             SAFE_CLOSE_TIMEOUT_MS,
             SAFE_CLOSE_GRACE_MS,
+            false,
         );
         assert_eq!(
-            args,
+            default_args,
             vec![
                 "app-graceful-close",
                 "--prefix",
                 r"C:\Program Files\Antigravity",
                 "--timeout-ms",
                 "18000",
-                "--terminate-background",
                 "--grace-ms",
                 "2500",
             ]
         );
+        assert!(!default_args.iter().any(|a| a.contains("confirm-background-exit") || a.contains("terminate-background")));
+
+        let confirmed_args = build_graceful_close_args(
+            r"C:\Program Files\Antigravity",
+            SAFE_CLOSE_TIMEOUT_MS,
+            SAFE_CLOSE_GRACE_MS,
+            true,
+        );
+        assert!(confirmed_args.contains(&"--confirm-background-exit".to_string()));
+        assert!(!confirmed_args.contains(&"--terminate-background".to_string()));
 
         let visible_msg = format_close_failure_message("visible_window_open", SAFE_CLOSE_TIMEOUT_MS);
         assert!(visible_msg.contains("可见窗口") && visible_msg.contains("保存"));
+
+        let resident_msg = format_close_failure_message("background_resident", SAFE_CLOSE_TIMEOUT_MS);
+        assert!(resident_msg.contains("后台") && resident_msg.contains("确认"));
 
         let timeout_msg = format_close_failure_message("timeout", SAFE_CLOSE_TIMEOUT_MS);
         assert!(timeout_msg.contains("18 秒"));

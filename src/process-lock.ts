@@ -38,15 +38,15 @@ export async function acquireProcessLease(path: string, timeoutMs = 15000, busyM
       }
       if ((!Number.isSafeInteger(pid)||pid<=0) && Date.now()-info.mtimeMs>15000) {
         if (isWindows()) {
-          // On Windows, avoid /usr/sbin/lsof: reclaim stale half-created locks atomically;
-          // if another process still holds an open handle, rename fails and we wait/retry safely.
+          // Windows 下不使用 /usr/sbin/lsof：对超过宽限期且无有效 PID 的残损锁直接尝试原子移走；
+          // 若仍有句柄占用，Windows 会以 EBUSY/EPERM 拒绝重命名，自然保护活跃锁。
           const check = await lstat(path).catch(() => null);
           if (check?.ino === info.ino && check.dev === info.dev && await readFile(path, 'utf8').catch(() => null) === text) {
             try {
-              await atomicRenameWithRetry(path, path + '.orphan-' + Date.now() + '-' + nonce, { maxRetries: 1 });
+              await atomicRenameWithRetry(path, path + '.orphan-' + Date.now() + '-' + nonce, { maxRetries: 1, baseDelayMs: 15 });
               continue;
             } catch {
-              // Still locked or already moved by another contender
+              // 仍被占用或已被其它进程回收，按正常退避重试
             }
           }
         } else {

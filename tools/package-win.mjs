@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import {
   sourceDigest,
+  windowsSourceDigest,
   includeDictionaryPath,
   assertReleaseArtifacts,
   listCompiledScripts,
@@ -190,6 +191,7 @@ async function main() {
   const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   const version = pkg.version;
   const currentDigest = await sourceDigest(root);
+  const currentWindowsDigest = await windowsSourceDigest(root);
   const { SUPPORTED_BUNDLES } = await import(pathToFileURL(join(root, 'dist', 'bundle.js')).href);
   const supportedVersions = [...SUPPORTED_BUNDLES.keys()];
 
@@ -199,6 +201,7 @@ async function main() {
     process.stdout.write('[package-win] 警告：已启用 --skip-verify-stamp，仅限本地开发冒烟打包，不可用于正式发布\n');
     verification = {
       digest: currentDigest,
+      windowsDigest: currentWindowsDigest,
       version,
       at: new Date().toISOString(),
       artifacts: null,
@@ -214,7 +217,11 @@ async function main() {
       throw new Error('未找到 .cache/verified-release.json，请先运行 npm run verify');
     }
     verification = JSON.parse(await readFile(verifiedPath, 'utf8'));
-    if (verification.digest !== currentDigest || verification.version !== version) {
+    if (
+      verification.digest !== currentDigest ||
+      verification.windowsDigest !== currentWindowsDigest ||
+      verification.version !== version
+    ) {
       throw new Error('源码已变化或未通过检查，请先运行 npm run verify');
     }
     await assertReleaseArtifacts(root, verification.artifacts);
@@ -316,6 +323,7 @@ async function main() {
   ]);
   const buildInfo = {
     ...buildInfoPayload({ version, build, verification, scope, node: process.versions.node }),
+    windowsSourceDigest: currentWindowsDigest,
     platform: 'win32',
     arch: process.arch,
     verified: !skipVerifyStamp,

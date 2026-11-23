@@ -58,6 +58,11 @@ for (const [, supportedVersion] of bundleBlock.matchAll(/\['(\d+\.\d+\.\d+)'\s*,
   }
 }
 
+const hasWinRustProjects = isWin && (
+  existsSync(join(root, 'windows', 'win-helper', 'Cargo.toml')) ||
+  existsSync(join(root, 'windows', 'app', 'src-tauri', 'Cargo.toml'))
+);
+
 if (!skipNative) {
   if (isMac) {
     try {
@@ -66,7 +71,7 @@ if (!skipNative) {
       ready = false;
       process.stderr.write('缺少 Apple 命令行开发工具。\n');
     }
-  } else if (isWin) {
+  } else if (isWin && hasWinRustProjects) {
     for (const tool of ['rustc', 'cargo']) {
       try {
         execFileSync(tool, ['--version'], { stdio: 'pipe', windowsHide: true });
@@ -118,8 +123,8 @@ const winHelperPresent = isWin && (
   existsSync(join(root, 'windows', 'win-helper', 'target', 'release', 'gravitybox-win-helper.exe')) ||
   existsSync(join(root, 'windows', 'win-helper', 'target', 'debug', 'gravitybox-win-helper.exe'))
 );
-const extraInfo = isWin
-  ? (winHelperPresent ? '；win-helper 二进制已就绪' : '；提示：运行 npm run build:win-helper 构建 Win32 Helper')
+const extraInfo = isWin && hasWinRustProjects
+  ? (winHelperPresent ? '；win-helper 二进制已就绪' : '；提示：运行 cargo build --release --manifest-path windows/win-helper/Cargo.toml 构建 Win32 Helper')
   : '';
 
 process.stdout.write(

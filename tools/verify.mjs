@@ -6,7 +6,15 @@ import { existsSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
-import { sourceDigest, collectReleaseArtifacts, checkReleaseConsistency, renderReleaseConsistency, fileSha256 } from './release-integrity.mjs';
+import {
+  sourceDigest,
+  windowsSourceDigest,
+  vendorEvidence,
+  collectReleaseArtifacts,
+  checkReleaseConsistency,
+  renderReleaseConsistency,
+  fileSha256,
+} from './release-integrity.mjs';
 import { describeValidationScope, parseTargetAppVersionArg, recordedScopeFields, resolveValidationScope, VALIDATION_SCOPE_TARGETED } from './release-scope.mjs';
 import { computeSwiftInputsDigest, nativeBuildArgs } from './native-build.mjs';
 
@@ -108,7 +116,7 @@ async function reportSuccessToStepSummary({ version, scope, digest, steps }) {
     `| **门禁范围** | ${describeValidationScope(scope)} |`,
     `| **源码指纹** | \`${digest.slice(0, 16)}...\` |`,
     `| **运行环境** | ${platformLabel} (${process.arch}) / Node ${process.version} |`,
-    `| **原生 UI 夹具** | ${isWin ? '已检查 Windows Rust/Tauri 与前端构建；桌面端交互由人工/自动化验收' : '默认不运行；按需执行 `npm run test:native-ui`，安装后另行人工验收'} |`,
+    `| **原生 UI 夹具** | ${isWin ? '已按存在情况检查 Windows Rust/Tauri 与前端构建；桌面端交互另行验收' : '默认不运行；按需执行 `npm run test:native-ui`，安装后另行人工验收'} |`,
     '',
     '### 已通过的校验步骤',
     '',
@@ -136,13 +144,14 @@ async function main() {
   const dictOnly = argv.includes('--dict-only');
   if (argv.includes('--auto-extract')) throw Error('验证不修改适配输入；请先显式运行 i18n:extract -- --register-bundle，审阅后再验证');
   const initialDigest = await sourceDigest(root);
+  const initialWinDigest = isWin ? await windowsSourceDigest(root) : null;
   const version = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version;
   const out = join(root, '质检报告', `${version}-改造验收`); await mkdir(out, { recursive: true });
   const completedSteps = [];
   const timings = [];
   if (!dictOnly) {
     if (isWin) {
-      process.stdout.write('[verify] Windows 环境自动跳过 macOS Swift 检查，执行 Node 测试 + Rust/Tauri 原生检查\n');
+      process.stdout.write('[verify] Windows 环境自动跳过 macOS Swift 检查，执行 Node 测试与按需 Rust/Tauri 原生检查\n');
     } else {
       process.stdout.write('[verify] 原生 UI 夹具不纳入默认门禁；按需运行 npm run test:native-ui，安装后另行人工验收\n');
     }
@@ -250,9 +259,10 @@ async function main() {
   async function runNoVendorGatesBatch(tasks) {
     if (!tasks.length) return;
     const { loadDictLayers, properNounViolations, runCoverageReport } = await import(pathToFileURL(join(root, 'tools/coverage-report.mjs')).href);
+    const { inlineSlotViolations } = await import(pathToFileURL(join(root, 'tools/extract-inline-groups-ast.mjs')).href);
     const dictDir = join(root, 'dict');
     const dictLoaded = await loadDictLayers(dictDir);
-    const preloadedDict = { ...dictLoaded, violations: properNounViolations(dictLoaded.entries) };
+    const preloadedDict = { ...dictLoaded, violations: properNounViolations(dictLoaded.entries), slotViolations: inlineSlotViolations(dictLoaded.entries) };
     for (const task of tasks) {
       const name = `词典门禁-${task.targetVersion}`;
       process.stdout.write(`检查：${name}\n`);
@@ -352,13 +362,13 @@ async function main() {
         }
         if (existsSync(join(winAppDir, 'package.json'))) {
           if (!existsSync(join(winAppDir, 'node_modules'))) {
-            throw new Error('Windows桌面端缺少 node_modules，请先在 windows/app 执行 npm ci（或运行 npm run dev:win 自动安装）');
+            throw new Error('Windows桌面端缺少 node_modules，请先在 windows/app 执行 npm ci');
           }
           const npmBuild = npmStepCommand(['run', 'build']);
           await step('Windows桌面端-前端构建', npmBuild.binary, npmBuild.args, { cwd: winAppDir });
         }
         if (existsSync(winAppCargo)) {
-          await step('Windows桌面端-Cargo检查', 'cargo', ['check', '--manifest-path', winAppCargo]);
+          await step('Windows桌面端-Cargo测试', 'cargo', ['test', '--manifest-path', winAppCargo]);
         }
       })();
       parallelChecks.push(winNativeChecks);
@@ -385,7 +395,11 @@ async function main() {
     process.stdout.write(`[verify] 词典门禁-${historical}：本轮未验证（定向发布 ${scope.targetAppVersions.join('、')}），不视为通过\n`);
   }
 
-  const digest = await sourceDigest(root); if (digest !== initialDigest) throw new Error('验证期间源码发生变化，请重新检查');
+  const digest = await sourceDigest(root);
+  if (digest !== initialDigest) throw new Error('验证期间源码发生变化，请重新检查');
+  const winDigest = isWin ? await windowsSourceDigest(root) : null;
+  if (isWin && winDigest !== initialWinDigest) throw new Error('验证期间 Windows 源码发生变化，请重新检查');
+
   if (dictOnly) {
     await reportSuccessToStepSummary({ version, scope, digest, steps: completedSteps });
     await writeFile(join(out, 'gate-timings.json'), JSON.stringify({ totalMs: performance.now() - startedAt, steps: timings }, null, 2) + '\n');
@@ -401,6 +415,8 @@ async function main() {
       platform: 'win32',
       arch: process.arch,
       digest,
+      windowsDigest: winDigest,
+      vendorEvidence: await vendorEvidence(root),
       artifacts: await collectReleaseArtifacts(root),
       winHelperSha256: existsSync(winHelperBin) ? await fileSha256(winHelperBin) : null,
       desktopBinarySha256: existsSync(winDesktopBin) ? await fileSha256(winDesktopBin) : null,
@@ -411,6 +427,7 @@ async function main() {
   } else {
     await writeFile(join(root, '.cache/verified-release.json'), JSON.stringify({
       digest,
+      vendorEvidence: await vendorEvidence(root),
       artifacts: await collectReleaseArtifacts(root),
       nativeBinarySha256: createHash('sha256').update(await readFile(join(root, '.cache/GravityBox-native-verified'))).digest('hex'),
       at: new Date().toISOString(),
@@ -420,14 +437,14 @@ async function main() {
     }));
   }
 
-  /* 发布一致性：macOS 核对 DMG / sidecar / 已安装应用；Windows 在 package-win 阶段核对 ZIP / sidecar。 */
+  /* 发布一致性：macOS 核对 DMG / sidecar / 已安装应用；Windows 跳过 macOS DMG 一致性检查。 */
   const strict = argv.includes('--strict');
   if (isMac) {
     const release = await checkReleaseConsistency({ root, digest, strict });
     for (const line of renderReleaseConsistency(release)) process.stdout.write(line + '\n');
     if (strict && release.warnings.length) throw new Error(`发布一致性检查未通过（--strict，${release.warnings.length} 项警告），见上方明细`);
   } else if (isWin) {
-    process.stdout.write('[verify] Windows 平台跳过 macOS DMG 发布一致性检查（使用 npm run package:win 生成并校核 Windows 发行包）\n');
+    process.stdout.write('[verify] Windows 平台跳过 macOS DMG 发布一致性检查\n');
   }
   if (scope.mode === VALIDATION_SCOPE_TARGETED) process.stdout.write(`[verify] 发布通过仅覆盖 ${scope.targetAppVersions.join('、')}；${scope.historicalUnverified.join('、') || '无历史版本'} 本轮未验证，不得宣称通过。\n`);
   await reportSuccessToStepSummary({ version, scope, digest, steps: completedSteps });

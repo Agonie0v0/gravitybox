@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
@@ -10,6 +10,7 @@ import {
   RefreshCw,
   RotateCcw,
   RotateCw,
+  Server,
   SlidersHorizontal,
   Trash2,
   UserPlus,
@@ -28,6 +29,12 @@ import {
   monitoredModelDisplayName,
   parseQuotaContract,
 } from '../lib/quota';
+import {
+  normalizeSshEnvironment,
+  sshStateI18nKey,
+  sshStatePillClass,
+  sshStateSortOrder,
+} from '../lib/ssh';
 import { backendRequest } from '../lib/tauri';
 import type { AccountRecord } from '../lib/types';
 import { AccountPolicyModal } from '../sheets/AccountPolicyModal';
@@ -50,10 +57,13 @@ export function AccountsPage() {
     quotaRefreshing,
     refreshingAccountIds,
     switchingAccount,
+    sshEnvironments,
+    remoteSyncing,
     fetchAccounts,
     fetchAutoSwitch,
     refreshAllQuotas,
     refreshSingleAccountQuota,
+    refreshRemoteEnvironments,
     interactiveSwitchAccount,
     showToast,
     askConfirm,
@@ -201,6 +211,13 @@ export function AccountsPage() {
 
   const monitoredLabel = monitoredModelDisplayName(autoSwitchConfig.monitored_model, locale);
 
+  const normalizedSshHosts = useMemo(() => {
+    const fallback = t('ssh.remote_fallback');
+    return sshEnvironments
+      .map((env) => normalizeSshEnvironment(env, fallback))
+      .sort((a, b) => sshStateSortOrder(b.state) - sshStateSortOrder(a.state) || a.hostLabel.localeCompare(b.hostLabel));
+  }, [sshEnvironments, t]);
+
   return (
     <div className="gb-page-inner gb-fade-in">
       {/* Page Header */}
@@ -330,6 +347,24 @@ export function AccountsPage() {
           </>
         )}
       </div>
+
+      {/* SSH Local-Only Scope Notice (v1.2.0) */}
+      {normalizedSshHosts.length > 0 && (
+        <div
+          className="gb-subcard"
+          style={{
+            padding: '8px 12px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            fontSize: 11.5,
+            color: 'var(--text-secondary)',
+          }}
+        >
+          <Server size={13} style={{ color: 'var(--blue)', flexShrink: 0 }} />
+          <span>{t('accounts.ssh.local_only_banner')}</span>
+        </div>
+      )}
 
       {/* Accounts List */}
       {accounts.length === 0 ? (
@@ -593,6 +628,105 @@ export function AccountsPage() {
                       </div>
                     )}
                   </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Remote SSH Active Accounts (Read-Only, v1.2.0) */}
+      {normalizedSshHosts.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 4 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                <span style={{ fontSize: 13.5, fontWeight: 700 }}>{t('accounts.ssh.remote_section_title')}</span>
+                <span className="gb-pill gb-pill-neutral">
+                  {t('accounts.ssh.remote_section_count', { count: normalizedSshHosts.length })}
+                </span>
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
+                {t('accounts.ssh.remote_section_subtitle')}
+              </div>
+            </div>
+            <button
+              type="button"
+              className="gb-btn gb-btn-sm"
+              disabled={!reachable || remoteSyncing}
+              onClick={() => void refreshRemoteEnvironments()}
+            >
+              <RotateCw size={12} className={remoteSyncing ? 'gb-spin' : undefined} />
+              <span>{t('common.refresh')}</span>
+            </button>
+          </div>
+
+          {normalizedSshHosts.map((host) => {
+            const remoteContract = parseQuotaContract(host.raw as Record<string, unknown>, locale, { compact: true });
+            const remoteTier = normalizeTier(host.tier, locale);
+            return (
+              <div
+                key={host.id || host.hostLabel}
+                className="gb-card"
+                style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 9 }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: 14, fontWeight: 700 }}>
+                        {host.email
+                          ? accountDisplayName(host.name, host.email, locale)
+                          : host.hostLabel}
+                      </span>
+                      {host.tier && <TierBadge tier={remoteTier} />}
+                      <span className={`gb-pill ${sshStatePillClass(host.state)}`}>
+                        {t('accounts.ssh.used_on_host', { host: host.hostLabel })} · {t(sshStateI18nKey(host.state))}
+                      </span>
+                      <span className="gb-pill gb-pill-neutral">{t('accounts.ssh.remote_section_readonly_note')}</span>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginTop: 2 }}>
+                      {[
+                        host.email,
+                        host.windowCount > 0 ? t('accounts.ssh.remote_window_count', { count: host.windowCount }) : '',
+                        t('accounts.ssh.remote_readonly_hint'),
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="gb-btn gb-btn-sm"
+                    disabled={!reachable || remoteSyncing}
+                    onClick={() => void refreshRemoteEnvironments(host.id)}
+                  >
+                    <RotateCw size={11.5} className={remoteSyncing ? 'gb-spin' : undefined} />
+                    <span>{t('common.refresh')}</span>
+                  </button>
+                </div>
+
+                {remoteContract.displayGroups.length > 0 && (
+                  <>
+                    <div className="gb-divider" />
+                    <QuotaGroupsGrid
+                      coreGroups={remoteContract.coreGroups}
+                      standaloneGroups={remoteContract.standaloneGroups}
+                      locale={locale}
+                      isDark={isDark}
+                      compact
+                    />
+                  </>
+                )}
+
+                {host.lastError && (
+                  <div style={{ fontSize: 11, color: 'var(--warning)' }}>{host.lastError}</div>
+                )}
+
+                {host.quotaLastUpdated > 0 && (
+                  <div className="tabular" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                    {t('accounts.ssh.quota_from_remote', { host: host.hostLabel })} ·{' '}
+                    {t('accounts.updated_at', { time: formatShortDateTime(host.quotaLastUpdated) })}
+                  </div>
                 )}
               </div>
             );

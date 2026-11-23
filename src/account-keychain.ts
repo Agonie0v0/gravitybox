@@ -100,7 +100,7 @@ export class SystemKeychainAdapter implements KeychainAdapter {
     return new Promise((resolve, reject) => {
       const q = (val: string) => `"${String(val).replace(/[\\"\r\n]/g, m => (m === '\r' || m === '\n' ? '' : `\\${m}`))}"`;
       // 通过 security -i 批处理从 stdin 传入完整命令与密码，既不在 argv 暴露凭据，也不触发 /dev/tty getpass() 阻塞
-      const child = spawn('/usr/bin/security', ['-i'], { stdio: ['pipe', 'pipe', 'pipe'] });
+      const child = spawn('/usr/bin/security', ['-i'], { stdio: ['pipe', 'ignore', 'pipe'] });
       let settled = false;
       const finish = (err?: Error) => {
         if (settled) return;
@@ -174,7 +174,7 @@ export interface KeychainSyncAccount {
 }
 
 /**
- * 构造官方 Go 端 (Keychain / Credential Manager & agy CLI) 通用 oauth2.Token JSON 载荷
+ * 构造官方 Go 端 (macOS Keychain & agy CLI) 通用 oauth2.Token JSON 载荷
  */
 export function buildGoOauthPayload(acc: KeychainSyncAccount): string {
   // 官方 Go 端按 oauth2.Token 解析：缺少 `expiry` 会被视为永不过期，从而永不刷新（约 1 小时后 401 并跳登录页）。

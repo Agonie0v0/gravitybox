@@ -9,7 +9,7 @@ const RELEASES_URL = 'https://github.com/Enzoo404/gravitybox/releases';
 export function AboutPage() {
   const { t, locale, config, updateConfig, appInfo, status, showToast } = useApp();
 
-  const version = appInfo?.version ?? '1.1.3';
+  const version = appInfo?.version ?? '1.2.0';
   const agVersion = appInfo?.antigravity?.version || (status.appVersion && status.appVersion !== 'fixture' ? status.appVersion : '');
   const targetAppDisplay = agVersion ? `Antigravity ${agVersion}` : t('about.antigravity_stable');
   const stateDir = appInfo?.stateDir ?? '';

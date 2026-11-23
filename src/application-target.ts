@@ -36,10 +36,13 @@ export interface BundleCapabilities {
 
 const capabilityCache = new Map<string, { value: BundleCapabilities; expiresAt: number }>();
 
-/** Resolve bundle layout; honours explicit macOS `.app` bundle paths even when tested on Windows. */
+/** Resolve bundle layout; honours explicit macOS `.app` or Windows drive paths regardless of host OS. */
 export function resolveBundleLayout(appPath: string): AntigravityLayout {
   if (appPath.toLowerCase().endsWith('.app')) {
     return antigravityLayout(appPath, 'darwin');
+  }
+  if (/^[a-zA-Z]:[\\/]/.test(appPath)) {
+    return antigravityLayout(appPath, 'win32');
   }
   return antigravityLayout(appPath);
 }
@@ -129,8 +132,8 @@ function isInsidersDirectoryName(name: string): boolean {
 
 function assertStablePaths(appPath: string, profile?: string): void {
   if (
-    isInsidersDirectoryName(basename(appPath)) ||
-    (profile && isInsidersDirectoryName(basename(profile)))
+    isInsidersDirectoryName(basename(appPath.replaceAll('\\', '/'))) ||
+    (profile && isInsidersDirectoryName(basename(profile.replaceAll('\\', '/'))))
   ) {
     throw new Error(bt('app_target.stable_only'));
   }
@@ -242,7 +245,7 @@ function commandStartsWithExecutable(command: string, expectedExecutable: string
 /** Check whether a language_server command line belongs to the given application target. */
 export function isLanguageServerCommandForTarget(command: string, target: ApplicationTarget): boolean {
   const layout = resolveBundleLayout(target.appPath);
-  const winMode = !target.appPath.toLowerCase().endsWith('.app') && isWindows();
+  const winMode = !target.appPath.toLowerCase().endsWith('.app') && (isWindows() || /^[a-zA-Z]:[\\/]/.test(target.appPath));
   if (!commandStartsWithExecutable(command, layout.languageServerPath, winMode)) {
     return false;
   }

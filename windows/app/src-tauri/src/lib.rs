@@ -11,8 +11,8 @@ use config::load_config;
 use std::sync::Arc;
 use tauri::{Manager, RunEvent, WindowEvent};
 use tray::{
-    hide_tray_window, mark_tray_hidden_now, setup_tray, show_main_window_and_focus,
-    show_tray_popover,
+    hide_tray_window, is_within_tray_show_grace, mark_tray_hidden_now, setup_tray,
+    show_main_window_and_focus, show_tray_popover,
 };
 
 #[cfg(windows)]
@@ -97,12 +97,22 @@ pub fn run() {
             app.manage(Arc::clone(&backend));
 
             if let Some(main_win) = app.get_webview_window("main") {
-                if !start_minimized && !start_tray {
+                let quiet_launch = !is_isolated && initial_cfg.launch_antigravity_on_start;
+                if !start_minimized && !start_tray && !quiet_launch {
                     let _ = main_win.show();
                     let _ = main_win.set_focus();
                     if let Some(ref page) = start_page {
                         let _ = tauri::Emitter::emit(app.handle(), "navigate-page", page.as_str());
                     }
+                }
+                if quiet_launch {
+                    let res_dir = backend.resource_dir().map(|p| p.to_path_buf());
+                    let state_dir = backend.state_dir.clone();
+                    std::thread::spawn(move || {
+                        if !antigravity::is_antigravity_running(res_dir.as_deref()) {
+                            let _ = antigravity::launch_antigravity(Some(state_dir.as_path()));
+                        }
+                    });
                 }
                 let handle = app.handle().clone();
                 main_win.on_window_event(move |event| {
@@ -123,13 +133,22 @@ pub fn run() {
                 let handle = app.handle().clone();
                 tray_win.on_window_event(move |event| {
                     if let WindowEvent::Focused(false) = event {
-                        hide_tray_window(&handle);
-                        mark_tray_hidden_now();
+                        if !is_within_tray_show_grace() {
+                            hide_tray_window(&handle);
+                            mark_tray_hidden_now();
+                        }
                     }
                 });
 
                 if start_tray {
-                    show_tray_popover(app.handle(), true);
+                    let handle_tray = app.handle().clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(600));
+                        let h_inner = handle_tray.clone();
+                        let _ = handle_tray.run_on_main_thread(move || {
+                            show_tray_popover(&h_inner, true);
+                        });
+                    });
                 }
             }
 

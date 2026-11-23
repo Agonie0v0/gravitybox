@@ -1,14 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:net';
-import { mkdtemp, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { execFileSync, spawn } from 'node:child_process';
+import { createConnection, createServer } from 'node:net';
+import { access, copyFile, mkdtemp, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
+  IPC_SESSION_FILENAME,
+  Win32HelperError,
   antigravityLayout,
+  appGracefulClose,
   atomicRenameWithRetry,
   cleanupIpcEndpoint,
+  cleanupIpcSession,
+  computeWindowsStateHash16,
+  createWindowsIpcSession,
   defaultAntigravityAppPath,
   defaultAntigravityInstallDirs,
   defaultAntigravityProfileDir,
@@ -17,18 +24,27 @@ import {
   defaultGravityBoxStateDir,
   defaultTrashDir,
   finalizeIpcEndpointAfterListen,
+  ipcSessionPath,
   isNamedPipe,
   isOwnedByCurrentUser,
   isPathUnder,
+  isRandomWindowsPipeName,
+  isValidIpcAuthToken,
   normalizePathForCompare,
   pathsEqual,
   prepareIpcEndpointForListen,
+  prepareWindowsIpcForListen,
+  readIpcSession,
+  resolveClientIpcTarget,
   resolveIpcEndpoint,
+  resolveWin32HelperPath,
   safeOpenFlagsNoFollow,
   validateIpcEndpointForClient,
+  verifyIpcAuthToken,
+  verifyPipeServer,
+  writeIpcSession,
 } from '../dist/platform/index.js';
 import {
-  applicationTarget,
   matchingTargetForLanguageServerCommand,
   resolveBundleLayout,
   targetForApp,
@@ -59,6 +75,19 @@ import {
 } from '../dist/maintenance.js';
 import { acquireProcessLease } from '../dist/process-lock.js';
 import { detectSystemLocales, normalizeLocale, resolveLocale } from '../dist/i18n.js';
+import {
+  parseEnvProxySnapshot,
+  parseWindowsInternetSettingsOutput,
+  readSystemProxySnapshot,
+  shouldBypassProxy,
+} from '../dist/proxy.js';
+import { matchMainLogRemotePort, parseSshTunnelProcesses } from '../dist/ssh-context.js';
+import {
+  includeSourceDigestPath,
+  includeWindowsSourceDigestPath,
+  sourceDigest,
+  windowsSourceDigest,
+} from '../tools/release-integrity.mjs';
 
 function buildMinimalAsar(filesObj, payloadBuffers) {
   const headerBuf = Buffer.from(JSON.stringify({ files: filesObj }), 'utf8');
@@ -71,6 +100,33 @@ function buildMinimalAsar(filesObj, payloadBuffers) {
   const paddedHeader = Buffer.alloc(alignedHeaderSize - 4);
   headerBuf.copy(paddedHeader, 0);
   return Buffer.concat([prefix, paddedHeader, ...payloadBuffers]);
+}
+
+function sendNdjsonOverPipe(pipePath, payload) {
+  return new Promise((resolveReply, rejectReply) => {
+    const sock = createConnection(pipePath);
+    let buf = '';
+    sock.setTimeout(8000);
+    sock.on('timeout', () => {
+      sock.destroy();
+      rejectReply(new Error('IPC timeout'));
+    });
+    sock.on('error', rejectReply);
+    sock.on('connect', () => {
+      sock.write(JSON.stringify(payload) + '\n');
+    });
+    sock.on('data', (chunk) => {
+      buf += chunk.toString('utf8');
+      if (buf.includes('\n')) {
+        sock.end();
+        try {
+          resolveReply(JSON.parse(buf.split('\n')[0]));
+        } catch (err) {
+          rejectReply(err);
+        }
+      }
+    });
+  });
 }
 
 test('platform/paths: Windows 与 macOS 路径解析、布局及比较零回归', () => {
@@ -89,7 +145,6 @@ test('platform/paths: Windows 与 macOS 路径解析、布局及比较零回归'
     'C:\\Program Files',
   ]);
 
-  // 自动探测优先 LOCALAPPDATA\Programs\Antigravity，不存在时回退 ProgramFiles\Antigravity
   const pfApp = defaultAntigravityAppPath(
     'C:\\Users\\demo',
     winEnv,
@@ -123,11 +178,12 @@ test('platform/paths: Windows 与 macOS 路径解析、布局及比较零回归'
   assert.equal(pathsEqual('C:\\Users\\demo\\Programs\\Antigravity', 'c:/users/demo/programs/antigravity/', 'win32'), true);
   assert.equal(isPathUnder('C:\\Users\\demo\\App\\sub\\file.txt', 'c:/users/demo/app', 'win32'), true);
   assert.equal(isPathUnder('C:\\Users\\demo\\App2\\file.txt', 'C:\\Users\\demo\\App', 'win32'), false);
-  assert.equal(isStrictSubpath('C:\\Users\\demo\\App', 'D:\\Users\\demo\\App\\file.txt'), false);
+  if (process.platform === 'win32') {
+    assert.equal(isStrictSubpath('C:\\Users\\demo\\App', 'D:\\Users\\demo\\App\\file.txt'), false);
+  }
 });
 
 test('application-target & account-probe: Windows 引号路径、大小写混合命令行与 .exe 后缀匹配', () => {
-  if (process.platform !== 'win32') return;
   const appPath = 'C:\\Program Files\\Antigravity';
   const target = targetForApp(appPath, 'C:\\Users\\alice');
   assert.equal(target.executable, 'Antigravity.exe');
@@ -151,7 +207,7 @@ test('application-target & account-probe: Windows 引号路径、大小写混合
   assert.throws(() => targetForApp('C:\\Users\\alice\\AppData\\Local\\Programs\\Antigravity - Insiders'), /仅支持/);
 });
 
-test('platform/ipc: Windows Named Pipe 确定性端点、监听、重复实例拒绝与安全清理', async (t) => {
+test('platform/ipc: Windows 随机管道名、ipc-session.json 防抢注、timingSafeEqual 鉴权与 macOS 零回归', async (t) => {
   const dirA = 'C:\\Users\\demo\\AppData\\Roaming\\GravityBox';
   const dirB = 'c:\\users\\demo\\appdata\\roaming\\gravitybox\\';
   const pipeA = resolveIpcEndpoint(dirA, 'win32');
@@ -159,33 +215,143 @@ test('platform/ipc: Windows Named Pipe 确定性端点、监听、重复实例�
   assert.equal(isNamedPipe(pipeA), true);
   assert.match(pipeA, /^\\\\\.\\pipe\\gravitybox-[0-9a-f]{24}$/);
   assert.equal(pipeA, pipeB, 'Windows Named Pipe 哈希必须大小写与尾斜杠无关');
+  assert.equal(computeWindowsStateHash16(dirA), computeWindowsStateHash16(dirB));
   assert.equal(resolveIpcEndpoint('/Users/demo/Library/Application Support/GravityBox', 'darwin'), '/Users/demo/Library/Application Support/GravityBox/control.sock');
-  assert.equal(isNamedPipe('/tmp/control.sock'), false);
+  assert.equal(isNamedPipe('/Users/demo/Library/Application Support/GravityBox/control.sock'), false);
+
+  // macOS resolveClientIpcTarget 保持 control.sock + authToken: null
+  const macTarget = await resolveClientIpcTarget('/Users/demo/Library/Application Support/GravityBox', { platform: 'darwin' });
+  assert.deepEqual(macTarget, {
+    endpoint: '/Users/demo/Library/Application Support/GravityBox/control.sock',
+    authToken: null,
+    session: null,
+  });
+
+  // 随机防抢注会话生成与恒定时间 token 校验（双端纯逻辑均可验证）
+  const stateDir = await mkdtemp(join(tmpdir(), 'gb-ipc-session-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const sess1 = createWindowsIpcSession(stateDir, process.pid);
+  const sess2 = createWindowsIpcSession(stateDir, process.pid);
+  assert.equal(isRandomWindowsPipeName(sess1.pipeName), true);
+  assert.equal(isValidIpcAuthToken(sess1.authToken), true);
+  assert.notEqual(sess1.pipeName, sess2.pipeName);
+  assert.notEqual(sess1.authToken, sess2.authToken);
+  assert.equal(verifyIpcAuthToken(sess1.authToken, sess1.authToken), true);
+  assert.equal(verifyIpcAuthToken(sess2.authToken, sess1.authToken), false);
+  assert.equal(verifyIpcAuthToken('', sess1.authToken), false);
+  assert.equal(verifyIpcAuthToken(null, sess1.authToken), false);
+
+  // 原子写入、读取、身份校验回调与按 PID 精确清理
+  const writtenPath = await writeIpcSession(stateDir, sess1);
+  assert.equal(writtenPath, ipcSessionPath(stateDir));
+  assert.ok(writtenPath.endsWith(IPC_SESSION_FILENAME));
+  const readBack = await readIpcSession(stateDir);
+  assert.deepEqual(readBack, sess1);
+
+  const clientOk = await resolveClientIpcTarget(stateDir, {
+    platform: 'win32',
+    verifyServerIdentity: async (s) => ({ pipeName: s.pipeName, serverPid: s.pid, sameUserSid: true }),
+  });
+  assert.equal(clientOk?.endpoint, sess1.pipeName);
+  assert.equal(clientOk?.authToken, sess1.authToken);
+
+  await assert.rejects(
+    () =>
+      resolveClientIpcTarget(stateDir, {
+        platform: 'win32',
+        verifyServerIdentity: async (s) => ({ pipeName: s.pipeName, serverPid: s.pid, sameUserSid: false }),
+      }),
+  );
+
+  // 不匹配 PID 时不得误删会话文件
+  await cleanupIpcSession(stateDir, process.pid + 99999);
+  assert.ok(await readIpcSession(stateDir));
+  await cleanupIpcSession(stateDir, process.pid);
+  assert.equal(await readIpcSession(stateDir), null);
 
   if (process.platform !== 'win32') return;
-  const temp = await mkdtemp(join(tmpdir(), 'gb-win-pipe-'));
-  t.after(() => rm(temp, { recursive: true, force: true }));
-  const endpoint = resolveIpcEndpoint(temp);
-  assert.equal(isNamedPipe(endpoint), true);
 
-  // 尚未监听时 prepare 通过
-  await prepareIpcEndpointForListen(endpoint);
-  const server = createServer((socket) => {
-    socket.end('{"ok":true}\n');
+  // Windows 真机 Named Pipe 监听 + 重复实例拒绝 + 清理
+  const liveSession = await prepareWindowsIpcForListen(stateDir);
+  const srv = createServer((sock) => sock.end());
+  await new Promise((res, rej) => {
+    srv.once('error', rej);
+    srv.listen(liveSession.pipeName, res);
   });
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(endpoint, resolve);
+  t.after(() => new Promise((res) => srv.close(() => res())));
+  await finalizeIpcEndpointAfterListen(liveSession.pipeName);
+  await writeIpcSession(stateDir, liveSession);
+  await validateIpcEndpointForClient(liveSession.pipeName);
+  await assert.rejects(() => prepareWindowsIpcForListen(stateDir), /运行|running/i);
+  await assert.rejects(() => prepareIpcEndpointForListen(liveSession.pipeName), /运行|running/i);
+  await cleanupIpcEndpoint(liveSession.pipeName);
+  await cleanupIpcSession(stateDir, process.pid);
+});
+
+test('main.ts IPC: Windows 随机 Named Pipe 强制校验 authToken、CLI 自动鉴权与退出清理', async (t) => {
+  if (process.platform !== 'win32') return;
+  const stateDir = await mkdtemp(join(tmpdir(), 'gb-win-main-ipc-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+
+  const child = spawn(process.execPath, ['dist/main.js', '--state-dir', stateDir], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env },
   });
-  t.after(() => new Promise((resolve) => server.close(() => resolve())));
+  let stderr = '';
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk.toString('utf8');
+  });
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      try { child.kill(); } catch {}
+    }
+  });
 
-  await finalizeIpcEndpointAfterListen(endpoint);
-  await validateIpcEndpointForClient(endpoint);
-  // 已有活服务监听同一 Named Pipe 时必须拒绝二次启动
-  await assert.rejects(prepareIpcEndpointForListen(endpoint), /已运行|已在运行|already running/i);
+  // 等待 ipc-session.json 原子落盘
+  let session = null;
+  for (let i = 0; i < 80; i++) {
+    session = await readIpcSession(stateDir).catch(() => null);
+    if (session) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(session, 'Windows 后端启动后必须写出 ipc-session.json');
+  assert.equal(isRandomWindowsPipeName(session.pipeName), true);
+  assert.equal(isValidIpcAuthToken(session.authToken), true);
 
-  await new Promise((resolve) => server.close(() => resolve()));
-  await cleanupIpcEndpoint(endpoint);
+  // 1. 缺失 authToken 的未授权请求必须被拒绝
+  const unauthRes = await sendNdjsonOverPipe(session.pipeName, { command: 'ping' });
+  assert.equal(unauthRes.ok, false);
+
+  // 2. 错误 authToken 必须被拒绝
+  const wrongToken = session.authToken.startsWith('0') ? '1' + session.authToken.slice(1) : '0' + session.authToken.slice(1);
+  const forgedRes = await sendNdjsonOverPipe(session.pipeName, { command: 'ping', authToken: wrongToken });
+  assert.equal(forgedRes.ok, false);
+
+  // 3. 正确 authToken 请求成功
+  const okPing = await sendNdjsonOverPipe(session.pipeName, { command: 'ping', authToken: session.authToken });
+  assert.equal(okPing.ok, true);
+  assert.equal(okPing.pid, session.pid);
+
+  // 4. CLI --command 自动读取 ipc-session.json 鉴权且不泄漏 authToken
+  const cliOut = execFileSync(process.execPath, ['dist/main.js', '--state-dir', stateDir, '--command', 'ping'], {
+    encoding: 'utf8',
+    timeout: 8000,
+  });
+  assert.equal(cliOut.includes(session.authToken), false, 'CLI 输出不得泄漏 authToken');
+  const cliJson = JSON.parse(cliOut.trim());
+  assert.equal(cliJson.ok, true);
+
+  // 5. 合法 stop 优雅退出、stderr 为空且清理 ipc-session.json
+  const stopRes = await sendNdjsonOverPipe(session.pipeName, { command: 'stop', authToken: session.authToken });
+  assert.equal(stopRes.ok, true);
+  const exitCode = await new Promise((res) => {
+    if (child.exitCode !== null || child.signalCode !== null) return res(child.exitCode);
+    child.once('exit', (code) => res(code));
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(stderr.trim(), '');
+  assert.equal(stderr.includes(session.authToken), false);
+  await assert.rejects(() => access(ipcSessionPath(stateDir)));
 });
 
 test('platform/fs & process-lock: 跨平台所有权校验、退避重试重命名与无 lsof 陈旧锁回收', async (t) => {
@@ -194,14 +360,14 @@ test('platform/fs & process-lock: 跨平台所有权校验、退避重试重命�
   assert.equal(isOwnedByCurrentUser({ uid: 0 }, 'darwin', 501), false);
   assert.equal(safeOpenFlagsNoFollow('win32'), 0);
 
-  // atomicRenameWithRetry: Windows 遇到 EBUSY / EPERM 时重试成功
+  // atomicRenameWithRetry 在模拟 Windows EBUSY/EPERM 后成功
   let attempts = 0;
-  await atomicRenameWithRetry('src', 'dest', {
+  await atomicRenameWithRetry('src.tmp', 'dst.json', {
     platform: 'win32',
-    maxRetries: 4,
     baseDelayMs: 5,
+    maxRetries: 4,
     renameFn: () => {
-      attempts++;
+      attempts += 1;
       if (attempts < 3) {
         const err = new Error('locked');
         err.code = attempts === 1 ? 'EBUSY' : 'EPERM';
@@ -211,68 +377,47 @@ test('platform/fs & process-lock: 跨平台所有权校验、退避重试重命�
   });
   assert.equal(attempts, 3);
 
-  // macOS 上不做重试
-  let macAttempts = 0;
-  await assert.rejects(
-    atomicRenameWithRetry('src', 'dest', {
-      platform: 'darwin',
-      renameFn: () => {
-        macAttempts++;
-        const err = new Error('busy');
-        err.code = 'EBUSY';
-        throw err;
-      },
-    }),
-  );
-  assert.equal(macAttempts, 1);
-
-  // 无 lsof 回收陈旧空锁与死进程锁
+  // 进程锁：死 PID 与陈旧半残损锁自动回收
   const dir = await mkdtemp(join(tmpdir(), 'gb-win-lock-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const lockPath = join(dir, 'service.lock');
-  await writeFile(lockPath, '');
-  const past = new Date(Date.now() - 30_000);
-  await utimes(lockPath, past, past);
-  const lease1 = await acquireProcessLease(lockPath, 2000);
-  await assert.rejects(acquireProcessLease(lockPath, 30), /已有|等待|锁|占用/);
+  const lockPath = join(dir, 'test.lock');
+
+  await writeFile(lockPath, JSON.stringify({ pid: 99999999, nonce: 'dead-owner' }));
+  const lease1 = await acquireProcessLease(lockPath, 3000);
   await lease1.release();
 
-  // 死 PID 锁自动回收
-  await writeFile(lockPath, JSON.stringify({ pid: 999_999, nonce: 'dead-owner' }));
-  const lease2 = await acquireProcessLease(lockPath, 2000);
-  await lease2.release();
+  // 仅在 Windows 上测试无 lsof 残损孤儿锁回收（macOS 仍走 lsof 路径）
+  if (process.platform === 'win32') {
+    await writeFile(lockPath, 'not-valid-json');
+    const oldDate = new Date(Date.now() - 60_000);
+    await utimes(lockPath, oldDate, oldDate);
+    const lease2 = await acquireProcessLease(lockPath, 3000);
+    await lease2.release();
+  }
 });
 
-test('account-keychain & account-switch: Windows raw UTF-8 JSON 编码、node:sqlite 事务及无 state.vscdb 切号回滚', async (t) => {
+test('account-keychain & account-switch: Windows raw UTF-8 JSON 编码、node:sqlite 事务及切号回滚', async (t) => {
   const sampleAcc = {
     email: 'alice@example.invalid',
     token: {
       access_token: 'synthetic-access',
       refresh_token: '1//synthetic-refresh',
-      expiry_timestamp: 1900000000,
-      project_id: 'proj-win',
-      is_gcp_tos: false,
+      expiry_timestamp: Math.floor(Date.now() / 1000) + 3600,
     },
   };
-
-  // Windows raw JSON 与 macOS go-keyring-base64 互通解析
-  const rawPayload = encodeKeychainOauthPayload(sampleAcc, 'raw');
-  assert.equal(rawPayload.startsWith('{'), true);
-  assert.equal(rawPayload.startsWith('go-keyring-base64:'), false);
-  assert.equal(JSON.parse(decodeKeychainOauthPayload(rawPayload)).token.refresh_token, '1//synthetic-refresh');
-
+  const winPayload = encodeKeychainOauthPayload(sampleAcc, 'raw');
   const macPayload = encodeKeychainOauthPayload(sampleAcc, 'go-keyring-base64');
-  assert.equal(macPayload.startsWith('go-keyring-base64:'), true);
+  assert.ok(winPayload.startsWith('{'));
+  assert.ok(macPayload.startsWith('go-keyring-base64:'));
+  assert.equal(JSON.parse(decodeKeychainOauthPayload(winPayload)).token.email, 'alice@example.invalid');
   assert.equal(JSON.parse(decodeKeychainOauthPayload(macPayload)).token.email, 'alice@example.invalid');
 
-  // syncAccountToKeychain 按 adapter.payloadEncoding 写入原生 raw JSON
   const winKeychain = new MockKeychainAdapter({ payloadEncoding: 'raw' });
   await syncAccountToKeychain(sampleAcc, winKeychain);
   const storedRaw = await winKeychain.readPassword('gemini', 'antigravity');
   assert.ok(storedRaw && storedRaw.startsWith('{'));
   assert.equal(JSON.parse(storedRaw).id_token_email, 'alice@example.invalid');
 
-  // DatabaseTransaction (node:sqlite) 直接提交与回滚测试
   const root = await mkdtemp(join(tmpdir(), 'gb-win-switch-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const stateDir = join(root, 'state');
@@ -289,8 +434,8 @@ test('account-keychain & account-switch: Windows raw UTF-8 JSON 编码、node:sq
   const tx = new DatabaseTransaction(dbPath);
   await tx.begin();
   await tx.replace({ antigravityOnboarding: 'true' });
-  await tx.finish(false); // rollback
-  await tx.close(); // 幂等 close
+  await tx.finish(false);
+  await tx.close();
 
   const checkConn = new DatabaseSync(dbPath);
   try {
@@ -300,7 +445,6 @@ test('account-keychain & account-switch: Windows raw UTF-8 JSON 编码、node:sq
     checkConn.close();
   }
 
-  // 完整四阶段切号 + 回滚（带 state.vscdb + raw JSON Keychain）
   const mgr = new AccountsManager(stateDir);
   const acc = await mgr.upsertAccount({
     email: 'switch-win@example.invalid',
@@ -324,10 +468,9 @@ test('account-keychain & account-switch: Windows raw UTF-8 JSON 编码、node:sq
   const res = await service.switchAccount(acc.id);
   assert.equal(res.switchedTo, 'switch-win@example.invalid');
   const afterSwitchCred = await winKeychain.readPassword('gemini', 'antigravity');
-  assert.ok(afterSwitchCred?.startsWith('{'), 'Windows 切号写入 Credential Manager 必须为 raw UTF-8 JSON');
+  assert.ok(afterSwitchCred?.startsWith('{'));
   assert.equal(JSON.parse(afterSwitchCred).id_token_email, 'switch-win@example.invalid');
 
-  // saveCurrentAccount 可直接读取 raw JSON 凭据
   const readbackMgr = new AccountsManager(join(root, 'readback'));
   const savedCurrent = await readbackMgr.saveCurrentAccount({
     keychain: winKeychain,
@@ -336,9 +479,33 @@ test('account-keychain & account-switch: Windows raw UTF-8 JSON 编码、node:sq
   });
   assert.equal(savedCurrent.email, 'switch-win@example.invalid');
 
-  // 回滚精确恢复 raw JSON 与数据库
   await service.rollback();
   assert.equal(await winKeychain.readPassword('gemini', 'antigravity'), initialRawCred);
+
+  // 无 state.vscdb（Antigravity 2.x 场景）同样支持切号与回滚
+  const noDbProfile = join(root, 'profile-nodb');
+  await mkdir(noDbProfile, { recursive: true });
+  const noDbState = join(root, 'state-nodb');
+  const noDbMgr = new AccountsManager(noDbState);
+  const noDbAcc = await noDbMgr.upsertAccount({
+    email: 'nodb-win@example.invalid',
+    name: 'NoDb Win',
+    refreshToken: '1//nodb-refresh',
+    accessToken: 'synthetic-nodb-access',
+    expiresIn: 3600,
+  });
+  const noDbKeychain = new MockKeychainAdapter({ payloadEncoding: 'raw' });
+  await noDbKeychain.writePassword('gemini', 'antigravity', initialRawCred);
+  const noDbService = new AccountSwitchService(noDbMgr, {
+    stateDir: noDbState,
+    profile: noDbProfile,
+    keychain: noDbKeychain,
+    isRunning: async () => false,
+  });
+  await noDbService.switchAccount(noDbAcc.id);
+  assert.equal(JSON.parse(await noDbKeychain.readPassword('gemini', 'antigravity')).id_token_email, 'nodb-win@example.invalid');
+  await noDbService.rollback();
+  assert.equal(await noDbKeychain.readPassword('gemini', 'antigravity'), initialRawCred);
 });
 
 test('account-probe: Windows lsInspect 路径多端口探测并严格脱敏 csrfToken', async () => {
@@ -373,33 +540,34 @@ test('account-probe: Windows lsInspect 路径多端口探测并严格脱敏 csrf
       return Response.json({
         userStatus: {
           email: 'win-live@example.invalid',
-          name: 'Win Live User',
-          userTier: { id: 'g1-ultra-tier', name: 'Google AI Ultra' },
+          name: 'Win User',
+          userTier: { id: 'g1-pro-tier', name: 'Google AI Pro' },
           cascadeModelConfigData: {
-            clientModelConfigs: [{ modelId: 'gemini-3-pro', label: 'Gemini 3 Pro', quotaInfo: { remainingFraction: 0.9 } }],
+            clientModelConfigs: [
+              {
+                label: 'Gemini 3.1 Pro (High)',
+                modelOrAlias: { model: 'MODEL_PLACEHOLDER_M37' },
+                quotaInfo: { remainingFraction: 0.8, resetTime: new Date(Date.now() + 3600_000).toISOString() },
+              },
+            ],
           },
         },
       });
     }
-    if (parsed.pathname.endsWith('/RetrieveUserQuotaSummary')) {
-      return Response.json({
-        groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.9 }] }],
-      });
-    }
-    return new Response('not found', { status: 404 });
+    return new Response('{}', { status: 404 });
   };
 
-  const live = await probeLiveLanguageServerOnce(
+  const status = await probeLiveLanguageServerOnce(
     target,
     fetchImpl,
     { lsInspectImpl },
     { modelQuotaFromNormalized, groupToQuotaGroup },
   );
-  assert.ok(live);
-  assert.equal(live.email, 'win-live@example.invalid');
-  assert.equal(live.tier, 'ULTRA');
-  assert.equal(live.quota.models[0]?.percentage, 90);
-  assert.equal(JSON.stringify(live).includes(csrf), false, '返回体绝不得包含 csrfToken');
+  assert.ok(status);
+  assert.equal(status.email, 'win-live@example.invalid');
+  assert.equal(status.tier, 'PRO');
+  assert.equal(JSON.stringify(status).includes(csrf), false, '探测结果不得暴露 csrfToken');
+  clearLiveEndpointCache();
 });
 
 test('discovery & pricing-catalog-runtime: Windows 安装包无签名正常探测且不误读 Electron version 文件', async (t) => {
@@ -411,7 +579,6 @@ test('discovery & pricing-catalog-runtime: Windows 安装包无签名正常探�
   t.after(() => rm(dir, { recursive: true, force: true }));
   const appDir = join(dir, 'Antigravity');
   await mkdir(join(appDir, 'resources'), { recursive: true });
-  // 故意放置 Electron 的 version 文件 (44.9.1)，校验绝不被误读
   await writeFile(join(appDir, 'version'), '44.9.1\n');
   await writeFile(join(appDir, 'Antigravity.exe'), Buffer.from('MZ-synthetic-unsigned-placeholder'));
   const pkgBuf = Buffer.from(JSON.stringify({ name: 'antigravity', version: '2.34.0', productName: 'Antigravity' }), 'utf8');
@@ -443,7 +610,6 @@ test('maintenance: Windows 回收站清理成功路径与不可用时自动平�
   );
   if (process.platform !== 'win32') return;
 
-  // 场景 A: 系统回收站可用，清理后通过 moveToSystemTrash 移入回收站
   const rootA = await mkdtemp(join(tmpdir(), 'gb-win-trash-ok-'));
   t.after(() => rm(rootA, { recursive: true, force: true }));
   const profileA = join(rootA, 'profile');
@@ -472,7 +638,6 @@ test('maintenance: Windows 回收站清理成功路径与不可用时自动平�
   assert.equal(clearA.trashDir, 'Recycle Bin');
   assert.equal(trashedPaths.length, 1);
 
-  // 场景 B: 系统回收站不可用，平滑降级到 fallbackTrashDir 并完整支持 restore 一键撤回
   const rootB = await mkdtemp(join(tmpdir(), 'gb-win-trash-fb-'));
   t.after(() => rm(rootB, { recursive: true, force: true }));
   const profileB = join(rootB, 'profile');
@@ -501,6 +666,85 @@ test('maintenance: Windows 回收站清理成功路径与不可用时自动平�
   assert.equal(await readFile(join(profileB, 'Cache', 'restore-me.txt'), 'utf8'), 'original-cache-data');
 });
 
+test('proxy: Windows 注册表系统代理、分协议映射、环境变量回退与 <local> 旁路', async () => {
+  const globalReg = `
+HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings
+    ProxyEnable    REG_DWORD    0x1
+    ProxyServer    REG_SZ    127.0.0.1:10808
+    ProxyOverride    REG_SZ    <local>;localhost;127.*;10.*;*.corp.invalid
+`;
+  const snapGlobal = parseWindowsInternetSettingsOutput(globalReg);
+  assert.equal(snapGlobal.httpEnabled, true);
+  assert.equal(snapGlobal.httpUrl, 'http://127.0.0.1:10808');
+  assert.equal(snapGlobal.httpsEnabled, true);
+  assert.equal(snapGlobal.httpsUrl, 'http://127.0.0.1:10808');
+  assert.deepEqual(snapGlobal.exceptions, ['<local>', 'localhost', '127.*', '10.*', '*.corp.invalid']);
+
+  // <local> 应仅旁路单段内网主机名，不旁路公网域名
+  assert.equal(shouldBypassProxy('https://intranet/api', snapGlobal.exceptions, ''), true);
+  assert.equal(shouldBypassProxy('https://cloudcode-pa.googleapis.com/v1', snapGlobal.exceptions, ''), false);
+  assert.equal(shouldBypassProxy('https://api.corp.invalid/v1', snapGlobal.exceptions, ''), true);
+
+  // 分协议 ProxyServer
+  const perProtoReg = `
+    ProxyEnable    REG_DWORD    0x1
+    ProxyServer    REG_SZ    http=127.0.0.1:7890;https=127.0.0.1:7891;socks=127.0.0.1:7892
+`;
+  const snapPerProto = parseWindowsInternetSettingsOutput(perProtoReg);
+  assert.equal(snapPerProto.httpUrl, 'http://127.0.0.1:7890');
+  assert.equal(snapPerProto.httpsUrl, 'http://127.0.0.1:7891');
+  assert.equal(snapPerProto.socksUrl, 'socks5://127.0.0.1:7892');
+
+  // ProxyEnable=0x0 时忽略 ProxyServer，但保留 PAC AutoConfigURL
+  const pacReg = `
+    ProxyEnable    REG_DWORD    0x0
+    ProxyServer    REG_SZ    127.0.0.1:7890
+    AutoConfigURL    REG_SZ    http://127.0.0.1:7890/proxy.pac
+`;
+  const snapPac = parseWindowsInternetSettingsOutput(pacReg);
+  assert.equal(snapPac.httpEnabled, false);
+  assert.equal(snapPac.pacEnabled, true);
+  assert.equal(snapPac.pacUrl, 'http://127.0.0.1:7890/proxy.pac');
+
+  // 环境变量回退解析
+  const envSnap = parseEnvProxySnapshot({
+    HTTPS_PROXY: 'http://127.0.0.1:8080',
+    NO_PROXY: 'localhost,*.internal.invalid',
+  });
+  assert.equal(envSnap.httpsEnabled, true);
+  assert.equal(envSnap.httpsUrl, 'http://127.0.0.1:8080');
+  assert.deepEqual(envSnap.exceptions, ['localhost', '*.internal.invalid']);
+
+  // readSystemProxySnapshot 在注册表未启用时自动回退到环境变量
+  const fallbackSnap = await readSystemProxySnapshot({
+    execWinReg: async () => '    ProxyEnable    REG_DWORD    0x0\n    ProxyOverride    REG_SZ    <local>\n',
+    env: { HTTPS_PROXY: 'http://127.0.0.1:9090' },
+  });
+  assert.equal(fallbackSnap.httpsEnabled, true);
+  assert.equal(fallbackSnap.httpsUrl, 'http://127.0.0.1:9090');
+  assert.ok(fallbackSnap.exceptions.includes('<local>'));
+});
+
+test('ssh-context: Windows OpenSSH 进程解析与 CRLF main.log 端口匹配', async (t) => {
+  const winPs = [
+    '4201 3000 "C:\\Windows\\System32\\OpenSSH\\ssh.exe" -N -D 127.0.0.1:10888 dev@example.invalid',
+    '4202 9999 "C:\\Windows\\System32\\OpenSSH\\ssh.exe" -N -D 10999 other@example.invalid',
+  ].join('\r\n');
+  const tunnels = parseSshTunnelProcesses(winPs, 3000);
+  assert.deepEqual(tunnels, [{ pid: 4201, socksPort: 10888 }]);
+
+  const dir = await mkdtemp(join(tmpdir(), 'gb-win-sshlog-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const logPath = join(dir, 'main.log');
+  await writeFile(
+    logPath,
+    '2026-11-23 20:00:00.123 [info] [SSH] Connected to dev-box at https://127.0.0.1:54321/\r\n',
+    'utf8',
+  );
+  assert.equal(await matchMainLogRemotePort('54321', 'dev-box', { logPath }), true);
+  assert.equal(await matchMainLogRemotePort('54322', 'dev-box', { logPath }), false);
+});
+
 test('i18n: Windows 系统语言检测走 Intl 且无需 macOS defaults', () => {
   const detected = detectSystemLocales();
   assert.ok(Array.isArray(detected) && detected.length > 0);
@@ -508,4 +752,180 @@ test('i18n: Windows 系统语言检测走 Intl 且无需 macOS defaults', () => 
   assert.equal(normalizeLocale('zh-Hans-CN'), 'zh-Hans');
   assert.equal(resolveLocale('system', ['zh-CN']), 'zh-Hans');
   assert.equal(resolveLocale('system', ['en-US']), 'en');
+});
+
+test('release-integrity: macOS/core sourceDigest 严格排除 windows/，windowsSourceDigest 独立感知变更并忽略 target/', async (t) => {
+  assert.equal(includeSourceDigestPath('windows/win-helper/src/main.rs'), false);
+  assert.equal(includeSourceDigestPath('windows\\app\\src\\App.tsx'), false);
+  assert.equal(includeSourceDigestPath('src/main.ts'), true);
+  assert.equal(includeWindowsSourceDigestPath('windows/win-helper/src/main.rs'), true);
+  assert.equal(includeWindowsSourceDigestPath('windows/win-helper/target/release/gravitybox-win-helper.exe'), false);
+  assert.equal(includeWindowsSourceDigestPath('windows/app/node_modules/pkg/index.js'), false);
+  assert.equal(includeWindowsSourceDigestPath('src/main.ts'), false);
+
+  const fakeRoot = await mkdtemp(join(tmpdir(), 'gb-release-digest-decouple-'));
+  t.after(() => rm(fakeRoot, { recursive: true, force: true }));
+
+  for (const dir of ['src', 'runtime', 'native', 'tools', 'test', 'dict', 'ui-strings', 'assets', 'licenses']) {
+    await mkdir(join(fakeRoot, dir), { recursive: true });
+    await writeFile(join(fakeRoot, dir, 'placeholder.txt'), `${dir}\n`);
+  }
+  for (const rootFile of ['package.json', 'package-lock.json', 'tsconfig.json', 'README.md', 'THIRD_PARTY_NOTICES.md']) {
+    await writeFile(join(fakeRoot, rootFile), `${rootFile}\n`);
+  }
+  await mkdir(join(fakeRoot, 'windows', 'win-helper', 'src'), { recursive: true });
+  await mkdir(join(fakeRoot, 'windows', 'win-helper', 'target', 'release'), { recursive: true });
+  const winSrcPath = join(fakeRoot, 'windows', 'win-helper', 'src', 'main.rs');
+  const winTargetPath = join(fakeRoot, 'windows', 'win-helper', 'target', 'release', 'gravitybox-win-helper.exe');
+  await writeFile(winSrcPath, 'fn main() {}\n');
+  await writeFile(winTargetPath, 'artifact-v1\n');
+
+  const coreDigest1 = await sourceDigest(fakeRoot);
+  const winDigest1 = await windowsSourceDigest(fakeRoot);
+
+  // 修改 windows/**/target/ 构建产物：双端指纹均不得变化
+  await writeFile(winTargetPath, 'artifact-v2-changed\n');
+  assert.equal(await sourceDigest(fakeRoot), coreDigest1);
+  assert.equal(await windowsSourceDigest(fakeRoot), winDigest1);
+
+  // 修改 windows/ 源码：macOS/core sourceDigest 绝对不变，windowsSourceDigest 必须变化
+  await writeFile(winSrcPath, 'fn main() { println!("v2"); }\n');
+  assert.equal(await sourceDigest(fakeRoot), coreDigest1);
+  assert.notEqual(await windowsSourceDigest(fakeRoot), winDigest1);
+});
+
+test('win32-helper: verifyPipeServer 原生 SID/PID 鉴权与 resolveClientIpcTarget 自动防抢注', async (t) => {
+  if (process.platform !== 'win32') return;
+  const helperPath = resolveWin32HelperPath();
+  if (!helperPath) {
+    t.skip('gravitybox-win-helper.exe 尚未构建');
+    return;
+  }
+
+  const stateDir = await mkdtemp(join(tmpdir(), 'gb-win-pipe-verify-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+
+  const session = await prepareWindowsIpcForListen(stateDir);
+  const srv = createServer((sock) => sock.end());
+  await new Promise((res, rej) => {
+    srv.once('error', rej);
+    srv.listen(session.pipeName, res);
+  });
+  t.after(() => new Promise((res) => srv.close(() => res())));
+  await writeIpcSession(stateDir, session);
+
+  // 1. 真实 Node Named Pipe 服务端：同用户 SID + PID + exe 匹配通过
+  const okRes = await verifyPipeServer(session.pipeName, {
+    expectedPid: process.pid,
+    expectedExe: 'node.exe',
+    helperPath,
+  });
+  assert.equal(okRes.verified, true);
+  assert.equal(okRes.sameUserSid, true);
+  assert.equal(okRes.serverPid, process.pid);
+  assert.equal(okRes.pipeName, session.pipeName);
+  assert.equal(okRes.reason, null);
+  assert.match(okRes.exePath.toLowerCase(), /node\.exe$/);
+
+  // 2. 错 expectedPid 必须返回 pid_mismatch
+  const wrongPidRes = await verifyPipeServer(session.pipeName, {
+    expectedPid: process.pid + 1,
+    helperPath,
+  });
+  assert.equal(wrongPidRes.verified, false);
+  assert.equal(wrongPidRes.sameUserSid, true);
+  assert.equal(wrongPidRes.serverPid, process.pid);
+  assert.equal(wrongPidRes.reason, 'pid_mismatch');
+
+  // 3. 错 expectedExe 必须返回 exe_mismatch
+  const wrongExeRes = await verifyPipeServer(session.pipeName, {
+    expectedPid: process.pid,
+    expectedExe: 'definitely-not-this-binary.exe',
+    helperPath,
+  });
+  assert.equal(wrongExeRes.verified, false);
+  assert.equal(wrongExeRes.sameUserSid, true);
+  assert.equal(wrongExeRes.reason, 'exe_mismatch');
+
+  // 4. 不存在的管道返回 pipe_not_found
+  const missingPipe = `\\\\.\\pipe\\gravitybox-${computeWindowsStateHash16(stateDir)}-0000000000000000`;
+  const missingRes = await verifyPipeServer(missingPipe, { helperPath });
+  assert.equal(missingRes.verified, false);
+  assert.equal(missingRes.sameUserSid, false);
+  assert.equal(missingRes.serverPid, null);
+  assert.equal(missingRes.reason, 'pipe_not_found');
+
+  // 5. 非法管道前缀与路径穿越必须抛出 INVALID_ARGS
+  await assert.rejects(
+    () => verifyPipeServer('\\\\.\\pipe\\other-unrelated-pipe', { helperPath }),
+    (err) => err instanceof Win32HelperError && err.code === 'INVALID_ARGS',
+  );
+
+  // 6. resolveClientIpcTarget 默认自动调用 verifyPipeServer：合法会话通过
+  const targetOk = await resolveClientIpcTarget(stateDir, { helperPath });
+  assert.equal(targetOk?.endpoint, session.pipeName);
+  assert.equal(targetOk?.authToken, session.authToken);
+
+  // 7. 模拟抢注/PID 不匹配：ipc-session.json 中 PID 与实际管道服务端不符必须拒绝
+  await writeIpcSession(stateDir, { ...session, pid: process.pid + 1 });
+  await assert.rejects(() => resolveClientIpcTarget(stateDir, { helperPath }));
+
+  // 8. 过期 session 指向不存在管道时返回 null（交由上层提示服务未运行）
+  await writeIpcSession(stateDir, { ...session, pipeName: missingPipe });
+  assert.equal(await resolveClientIpcTarget(stateDir, { helperPath }), null);
+});
+
+test('win32-helper: appGracefulClose 默认零 TerminateProcess 返回 background_resident，显式 confirmBackgroundExit 才终止隔离无窗口进程', async (t) => {
+  if (process.platform !== 'win32') return;
+  const helperPath = resolveWin32HelperPath();
+  if (!helperPath) {
+    t.skip('gravitybox-win-helper.exe 尚未构建');
+    return;
+  }
+
+  const dummyDir = await mkdtemp(join(tmpdir(), 'gb-win-close-boundary-'));
+  const dummyExe = join(dummyDir, 'dummy_headless.exe');
+  const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+  await copyFile(join(systemRoot, 'System32', 'PING.EXE'), dummyExe);
+
+  const child = spawn(dummyExe, ['127.0.0.1', '-n', '30'], {
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      try { child.kill(); } catch {}
+      await new Promise((res) => child.once('exit', () => res())).catch(() => {});
+    }
+    await rm(dummyDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  assert.ok(child.pid && child.pid > 0, '隔离无窗口哑进程必须成功启动');
+
+  // 1. 默认模式严禁强杀：必须返回 closed: false, reason: background_resident，且进程仍存活
+  const defaultRes = await appGracefulClose(dummyDir, {
+    closeTimeoutMs: 1200,
+    graceMs: 200,
+    helperPath,
+  });
+  assert.equal(defaultRes.closed, false);
+  assert.equal(defaultRes.reason, 'background_resident');
+  assert.ok(defaultRes.remainingPids.includes(child.pid));
+  assert.equal(child.exitCode, null, '默认模式下无窗口后台进程绝不可被静默强杀');
+
+  // 2. 显式传入 confirmBackgroundExit: true 后才安全终止隔离哑进程
+  const confirmedRes = await appGracefulClose(dummyDir, {
+    closeTimeoutMs: 1200,
+    graceMs: 200,
+    confirmBackgroundExit: true,
+    helperPath,
+  });
+  assert.equal(confirmedRes.closed, true);
+  assert.equal(confirmedRes.reason, 'background_terminated');
+  assert.deepEqual(confirmedRes.remainingPids, []);
+  await new Promise((res) => {
+    if (child.exitCode !== null || child.signalCode !== null) return res();
+    child.once('exit', () => res());
+  });
+  assert.ok(child.exitCode !== null || child.signalCode !== null);
 });

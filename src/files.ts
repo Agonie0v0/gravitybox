@@ -1,8 +1,9 @@
 import { open, lstat, unlink, mkdir, readFile } from 'node:fs/promises';
+import { renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { bt } from './i18n.js';
-import { atomicRenameWithRetry, isOwnedByCurrentUser } from './platform/index.js';
+import { atomicRenameWithRetry, isOwnedByCurrentUser, isWindows } from './platform/index.js';
 
 export interface AtomicWriteOptions {
   durability?: 'strict' | 'relaxed';
@@ -26,7 +27,11 @@ export async function atomicText(path: string, text: string, signal?: AbortSigna
       if (strict) await handle.sync();
     } finally { await handle.close(); }
     signal?.throwIfAborted();
-    await atomicRenameWithRetry(temp, path, { signal });
+    if (isWindows()) {
+      await atomicRenameWithRetry(temp, path);
+    } else {
+      renameSync(temp, path);
+    }
     if (strict) {
       // Persist the directory entry as well, otherwise a power loss can roll the rename back.
       const dir = await open(dirname(path), 'r').catch(() => null);
@@ -145,7 +150,7 @@ export function sanitizeError(msg: string, secrets: (string | undefined | null)[
   unique.forEach((secret, index) => { cleaned = cleaned.split(secret).join(SECRET_SENTINEL(index)); });
   cleaned = cleaned.replace(/\b((?:proxy-)?authorization\s*[:=]\s*)(?:bearer|basic|digest|token)\s+[^\s,;]+/gi, `$1${REDACTED_TOKEN}`);
   cleaned = cleaned.replace(/\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{4,}/gi, `$1 ${REDACTED_TOKEN}`);
-  cleaned = cleaned.replace(/(\bhttps?:\/\/[^/\s:@]+:)([^@\s/]+)(@)/gi, `$1${REDACTED_KEY}$3`);
+  cleaned = cleaned.replace(/(\b(?:https?|socks4a?|socks5h?|socks):\/\/[^/\s:@]*:)([^@\s/]+)(@)/gi, `$1${REDACTED_KEY}$3`);
   cleaned = cleaned.replace(/\b(?:sk-[A-Za-z0-9_-]{4,}|AIza[A-Za-z0-9_-]{4,}|ya29\.[A-Za-z0-9._-]+|gh[pousr]_[A-Za-z0-9]{4,}|xox[baprs]-[A-Za-z0-9-]{4,}|AKIA[0-9A-Z]{8,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b/g, REDACTED_KEY);
   cleaned = cleaned.replace(/\u0000(\d+)\u0000/g, REDACTED_KEY);
   return cleaned.length > 300 ? `${cleaned.slice(0, 300)}...` : cleaned;

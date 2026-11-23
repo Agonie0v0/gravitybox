@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, readFile, stat as fsStat, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { readFile, stat as fsStat } from 'node:fs/promises';
+import { join } from 'node:path';
 import { openAsarArchive } from './asar.js';
 import { assertLoopback } from './cdp.js';
 import { resolveBundleLayout, targetForApp } from './application-target.js';
+import { atomicJson } from './files.js';
 import { bt } from './i18n.js';
 import {
   appProcesses,
@@ -97,8 +98,7 @@ async function saveDiskBundleCache(): Promise<void> {
       const { expiresAt: _e, hardExpiresAt: _h, ...persisted } = entry;
       entries[k] = persisted;
     }
-    await mkdir(dirname(BUNDLE_DISK_CACHE_PATH), { recursive: true, mode: 0o700 });
-    await writeFile(BUNDLE_DISK_CACHE_PATH, JSON.stringify({ schema: 1, entries }) + '\n', { mode: 0o600 });
+    await atomicJson(BUNDLE_DISK_CACHE_PATH, { schema: 1, entries }, undefined, { durability: 'relaxed' });
   } catch {}
 }
 
@@ -286,7 +286,7 @@ async function discoverSingle(appPath: string, profile: string): Promise<Endpoin
   let ownerPid: number;
   if (isWindows()) {
     const layout = resolveBundleLayout(appPath);
-    let owners: Awaited<ReturnType<typeof portOwner>>;
+    let owners;
     try { owners = await portOwner(port); } catch { return undefined; }
     if (owners.length === 0) return undefined;
     for (const owner of owners) {
@@ -294,9 +294,11 @@ async function discoverSingle(appPath: string, profile: string): Promise<Endpoin
     }
     const uniquePids = Array.from(new Set(owners.map((o) => o.pid)));
     if (uniquePids.length !== 1) return undefined;
-    ownerPid = uniquePids[0]!;
-    const matchingOwner = owners.find((o) => o.pid === ownerPid && pathsEqual(o.exePath, layout.executablePath, 'win32'));
-    if (!matchingOwner) return undefined;
+    const matched = owners.find(
+      (o) => pathsEqual(o.exePath, layout.executablePath, 'win32') || isPathUnder(o.exePath, appPath, 'win32'),
+    );
+    if (!matched) return undefined;
+    ownerPid = matched.pid;
   } else {
     let listeners: string;
     try { listeners = (await execute('/usr/sbin/lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpfn'])).stdout; } catch { return undefined; }
@@ -372,40 +374,70 @@ export function allowedTarget(target: { type: string; url: string }, fixtureOrig
 
 const verifiedPortCache = new Map<string, { valid: boolean; expiresAt: number }>();
 
-export async function verifyPageService(url: string, appPath: string): Promise<boolean> {
-  if (!allowedTarget({ type: 'page', url })) return false;
+export type PageServiceKind = 'local' | 'unlisted' | 'foreign';
+
+export async function inspectPageService(url: string, appPath: string): Promise<PageServiceKind> {
+  if (!allowedTarget({ type: 'page', url })) return 'foreign';
   const port = Number(new URL(url).port);
   const cacheKey = `${appPath}:${port}`;
   const now = Date.now();
   const cached = verifiedPortCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) return cached.valid;
+  if (cached && cached.expiresAt > now) return cached.valid ? 'local' : 'foreign';
 
-  try {
-    if (isWindows()) {
+  if (isWindows()) {
+    try {
       const layout = resolveBundleLayout(appPath);
       const owners = await portOwner(port);
-      if (owners.length === 0 || !owners.every((o) => isLoopbackAddress(o.localAddress))) {
+      if (owners.length === 0) {
         verifiedPortCache.delete(cacheKey);
-        return false;
+        return 'unlisted';
+      }
+      if (!owners.every((o) => isLoopbackAddress(o.localAddress))) {
+        verifiedPortCache.delete(cacheKey);
+        return 'foreign';
       }
       const uniquePids = Array.from(new Set(owners.map((o) => o.pid)));
       if (uniquePids.length !== 1) {
         verifiedPortCache.delete(cacheKey);
-        return false;
+        return 'foreign';
       }
       const valid = owners.some(
         (o) => pathsEqual(o.exePath, layout.languageServerPath, 'win32') || isPathUnder(o.exePath, appPath, 'win32'),
       );
-      if (valid) verifiedPortCache.set(cacheKey, { valid: true, expiresAt: now + 60_000 });
-      else verifiedPortCache.delete(cacheKey);
-      return valid;
+      if (valid) {
+        verifiedPortCache.set(cacheKey, { valid: true, expiresAt: now + 60_000 });
+        return 'local';
+      }
+      verifiedPortCache.delete(cacheKey);
+      return 'foreign';
+    } catch {
+      verifiedPortCache.delete(cacheKey);
+      return 'foreign';
     }
+  }
 
-    const listeners = (await execute('/usr/sbin/lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpfn'])).stdout;
+  let listeners = '';
+  try {
+    listeners = (await execute('/usr/sbin/lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpfn'])).stdout;
+  } catch (err: any) {
+    // lsof exits with code 1 and empty stdout when no local process listens on that TCP port.
+    if (err && typeof err === 'object' && err.code === 1 && !String(err.stdout ?? '').trim()) {
+      verifiedPortCache.delete(cacheKey);
+      return 'unlisted';
+    }
+    verifiedPortCache.delete(cacheKey);
+    return 'foreign';
+  }
+
+  try {
     const owners = parseListeners(listeners, port);
+    if (owners.length === 0) {
+      verifiedPortCache.delete(cacheKey);
+      return 'unlisted';
+    }
     if (owners.length !== 1) {
       verifiedPortCache.delete(cacheKey);
-      return false;
+      return 'foreign';
     }
     const executable = (await execute('/usr/sbin/lsof', ['-nP', '-a', '-p', String(owners[0]!.pid), '-d', 'txt', '-Fn'])).stdout;
     const lines = executable.split('\n');
@@ -415,13 +447,20 @@ export async function verifyPageService(url: string, appPath: string): Promise<b
       return binPath === join(appPath, 'Contents', 'Resources', 'bin', 'language_server') ||
         binPath.startsWith(appPath + '/Contents/');
     });
-    if (valid) verifiedPortCache.set(cacheKey, { valid: true, expiresAt: now + 60_000 });
-    else verifiedPortCache.delete(cacheKey);
-    return valid;
+    if (valid) {
+      verifiedPortCache.set(cacheKey, { valid: true, expiresAt: now + 60_000 });
+      return 'local';
+    }
+    verifiedPortCache.delete(cacheKey);
+    return 'foreign';
   } catch {
     verifiedPortCache.delete(cacheKey);
-    return false;
+    return 'foreign';
   }
+}
+
+export async function verifyPageService(url: string, appPath: string): Promise<boolean> {
+  return (await inspectPageService(url, appPath)) === 'local';
 }
 
 const verifiedLsPidPortsCache = new Map<string, { ports: number[]; expiresAt: number }>();
@@ -445,15 +484,17 @@ export async function resolveVerifiedLanguageServerPorts(pid: number, appPath = 
     await inspectBundle(appPath);
     if (isWindows()) {
       const layout = resolveBundleLayout(appPath);
-      const procs = await lsInspect();
-      const matched = procs.find((proc) => proc.pid === pid && pathsEqual(proc.exePath, layout.languageServerPath, 'win32'));
-      if (!matched) return null;
-      const ports = Array.from(new Set(matched.ports.filter((p) => Number.isInteger(p) && p >= 1 && p <= 65535)));
-      if (ports.length === 0) return null;
-      verifiedLsPidPortsCache.set(cacheKey, { ports, expiresAt: Date.now() + 15_000 });
-      return ports;
+      const lsProcs = await lsInspect();
+      const matched = lsProcs.find(
+        (proc) => proc.pid === pid && pathsEqual(proc.exePath, layout.languageServerPath, 'win32'),
+      );
+      if (!matched || matched.ports.length === 0) return null;
+      const ports = Array.from(new Set(matched.ports.filter((p) => Number.isInteger(p) && p > 0 && p <= 65535)));
+      if (ports.length > 0) {
+        verifiedLsPidPortsCache.set(cacheKey, { ports, expiresAt: Date.now() + 15_000 });
+      }
+      return ports.length > 0 ? ports : null;
     }
-
     const [execRes, listenerRes] = await Promise.all([
       execute('/usr/sbin/lsof', ['-nP', '-a', '-p', String(pid), '-d', 'txt', '-Fn']),
       execute('/usr/sbin/lsof', ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN', '-Fn']),

@@ -35,9 +35,9 @@
 </div>
 
 > [!NOTE]
-> **Windows Adaptation Fork (`Agonie0v0/gravitybox`)** — Forked from [Enzoo404/gravitybox](https://github.com/Enzoo404/gravitybox) with full native **Windows 10/11 (x64)** support (Tauri 2 + React 19 desktop & system tray UI, Rust Win32 helper, Windows Named Pipe IPC, Credential Manager, Recycle Bin trim, and bundled Node 22) while keeping macOS behavior intact.
+> **Windows Adaptation Fork (`Agonie0v0/gravitybox`, v1.2.0-win)** — Synced with upstream [Enzoo404/gravitybox](https://github.com/Enzoo404/gravitybox) `v1.2.0` (Proxy Forwarding, SSH Remote Sync, Telemetry HUD, Dual-Window Quotas, Multi-Account Switching, Reversible Cache Trim) with full native **Windows 10/11 (x64)** support: Tauri 2 + React 19 desktop & system tray UI, Rust Win32 helper (`+crt-static`), randomized Named Pipe IPC with `GetNamedPipeServerProcessId` + `EqualSid` + 256-bit `authToken` anti-squatting, explicit confirmation before terminating headless background processes (zero silent force-kill), Windows Credential Manager, Recycle Bin trim, and bundled Node 22.
 >
-> - **Windows Downloads**: Get the self-contained installer (`GravityBox-<version>-win-x64-setup.exe`), portable archive (`GravityBox-<version>-win-x64.zip`), and `.sha256` checksums from [GitHub Releases](https://github.com/Agonie0v0/gravitybox/releases/latest).
+> - **Windows Downloads**: Get the user-level self-contained installer (`GravityBox-<version>-win-x64-setup.exe`), portable archive (`GravityBox-<version>-win-x64.zip`), and `.sha256` checksums from [GitHub Releases](https://github.com/Agonie0v0/gravitybox/releases/latest).
 > - **Windows Local Development (Hot Reload)**:
 >   - `npm run dev:win` — full-stack Windows dev (Vite HMR + Tauri Rust auto-rebuild/restart + backend `tsc --watch`).
 >   - `npm run dev:backend` — backend hot reload (`tsc --watch` + `runtime/` watch + `node --watch dist/main.js`).
@@ -59,21 +59,23 @@
 
 ## Overview
 
-**GravityBox** (`GravityBox v1.1.3`) is a lightweight, native macOS utility for the official stable release of `/Applications/Antigravity.app`. It embeds a self-contained Node 22 engine and communicates via local loopback CDP and read-only SQLite transactions—never unpacking, modifying, or re-signing the official application bundle.
+**GravityBox** (`GravityBox v1.2.0`) is a lightweight, native macOS utility for the official stable release of `/Applications/Antigravity.app`. It embeds a self-contained Node 22 engine and communicates via local loopback CDP and read-only SQLite transactions—never unpacking, modifying, or re-signing the official application bundle.
 
 | Capability | What It Solves |
 | :--- | :--- |
-| **Runtime Localization** | Dynamically toggles Antigravity UI between English and Simplified Chinese (`2.23.0`–`2.33.0` verified dictionaries plus adaptive fallback for `2.34.0+`) with zero binary patches. Prompts, chats, code, and terminal output remain untouched. |
+| **Runtime Localization** | Dynamically toggles Antigravity UI between English and Simplified Chinese (`2.23.0`–`2.34.0` verified dictionaries plus adaptive fallback for `2.35.0+`) with zero binary patches. Prompts, chats, code, and terminal output remain untouched. |
 | **In-IDE Telemetry HUD** | Mounts a compact 3-capsule toolbar below each chat composer displaying turn time, TPS, token totals, cache hit rate, compaction state, and model context usage. |
 | **Dual-Window Quotas & Usage** | Separates **5-Hour** rolling limits from **Weekly** caps and standalone high-tier pools (e.g. `Gemini 4 Argon`), aggregates thinking variants (`-low` to `-max`) in summaries, and tracks historical spend via dated official API rates. |
+| **SSH Remote & Multi-Env Ledger** | Adapts Antigravity `2.33.0+` SSH remote windows over local CDP with zero external `ssh` calls—providing bilingual UI, live HUD, read-only per-host quotas, and a unified Local + SSH usage ledger with `Environment × Account` filtering. |
+| **HTTP / HTTPS Network Proxy** | Supports **Off**, automatic **macOS System Proxy**, or **Manual** `http://` / `https://` proxy endpoints—injecting proxy variables into Antigravity, routing GravityBox outbound requests through the same proxy, and detecting shell overrides. |
 | **Multi-Account & CLI Sync** | Supports zero-config session capture, batch JSON import/export (`0600`), standby recommendations, non-invasive `agy` CLI token sync, and atomic 4-phase manual switching with rollback. |
-| **Reversible Storage Trim** | Moves runtime caches and optional aged task logs to macOS Trash with one-click undo, while locking credentials, workspaces, and active chats behind a strict allowlist. |
+| **Reversible Storage Trim** | Moves runtime caches and optional aged task logs (archiving ledgers before cleanup) to macOS Trash with one-click undo, while locking credentials, workspaces, and active chats behind a strict allowlist. |
 
 ---
 
 ## Quick Start
 
-1. **Install**: Download `GravityBox-<version>-arm64.dmg` from [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest), drag **GravityBox.app** into **Applications**, and clear Gatekeeper quarantine once (open-source builds are not Apple-notarized):
+1. **Install**: Download `GravityBox-<version>-arm64.dmg` from [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest), drag **GravityBox.app** into **Applications**, and clear Gatekeeper quarantine once (or click **Open Anyway** in **System Settings → Privacy & Security**; open-source builds are not Apple-notarized):
    ```bash
    xattr -cr /Applications/GravityBox.app
    ```
@@ -129,7 +131,7 @@ Hover over or click any capsule to inspect its breakdown (`Esc` or click outside
       </picture>
     </td>
     <td width="33.3%" align="center">
-      <b>Current Context (v1.1.3)</b><br /><br />
+      <b>Current Context (v1.2.0)</b><br /><br />
       <picture>
         <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en-hud-card-context-dark.png" />
         <img src="assets/screenshots/en-hud-card-context.png" alt="Current Context Popover with Orchestrator Prior Model Context" width="100%" />
@@ -139,11 +141,11 @@ Hover over or click any capsule to inspect its breakdown (`Esc` or click outside
 </table>
 
 <details>
-<summary>Popover field highlights &amp; v1.1.3 context card updates</summary>
+<summary>Popover field highlights &amp; v1.2.0 context card updates</summary>
 
 - **Session Stats**: Splits cumulative Model vs. Tool duration (with parallel tool intervals deduplicated), overall Avg TTFT/TPS, and latest foreground step TTFT/TPS plus subagent step totals.
 - **Token Usage**: Breaks down Uncached Input, Cached Read, Cache Write, and Output (with `Reasoning / Reply` split when provided), plus step-locked equivalent API dollar spend (`≥ $X` when an unpriced model is present) and Cache Saved.
-- **Current Context (`v1.1.3`)**: Single-line header with active role pill (`Exec` / `Plan`), two-color fill bar (Cached Context vs. New Uncached Input), latest step output, model peak context, and a unified **Prior Model Context** list with neutral frosted role pills and compaction counts.
+- **Current Context (`v1.2.0`)**: Single-line header with active role pill (`Exec` / `Plan`), two-color fill bar (Cached Context vs. New Uncached Input), latest step output, model peak context, and a unified **Prior Model Context** list with neutral frosted role pills and compaction counts.
 
 </details>
 
@@ -232,8 +234,11 @@ Hover over or click any capsule to inspect its breakdown (`Esc` or click outside
 </table>
 </details>
 
-### Key Behaviors in v1.1.3
+### Key Behaviors in v1.2.0
 
+- **Zero-SSH Remote Windows & Multi-Host UI**: Adapts Antigravity `2.33.0+` SSH remote windows over local CDP without spawning external `ssh` processes—delivering full bilingual UI, live Telemetry HUD, isolated read-only `Local / SSH: <host>` dual-window quota views (never cross-contaminating local accounts), active-SSH safety reminders during switching/relaunch/maintenance, plus companion SSH host lists in **Overview** and an expandable scope selector in the **Menu Bar Panel**.
+- **Unified Local + SSH Usage Ledger**: Incrementally syncs remote session usage into the local SQLite ledger (deduplicated by remote trajectory ID with timeline-based account attribution), surfacing a merged total, `Local % · SSH %` split bar, orthogonal `Environment × Account` filters, and offline SSH history badges.
+- **HTTP / HTTPS Proxy Support**: Choose **Off**, **Follow macOS System Proxy**, or **Manual** `http://` / `https://` proxy in **Settings** (PAC and SOCKS5 are not supported). GravityBox injects `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` when launching Antigravity, reuses the configured proxy for its own outbound requests, and inspects running Antigravity processes for proxy mismatches or shell overrides.
 - **Standby Account Quotas on Antigravity `2.34.0+`**: The active account refreshes passwordlessly via local process environment probing. Because `2.34.0` restricts local quota RPC to the active keychain session and GravityBox stays local-only without bundling official OAuth client secrets or relay servers, inactive standby accounts stop background cloud refreshes once their token expires (~1 hour). GravityBox refreshes right before expiry, skips expired polls silently without errors, marks passed reset timestamps as **Est. Reset**, factors likely-reset candidates into **Standby Advisor**, and syncs live balances as soon as you switch.
 - **JSON Account Management & `agy` CLI Sync**: Save the live account, batch-import JSON files or directories (deduplicated by email), or export backups (`0600` after confirmation). Switching and rollback also sync existing same-origin CLI token files (`antigravity-oauth-token` and `jetski-standalone-oauth-token`) without touching `@google/gemini-cli` credentials.
 - **Thinking-Variant Folding & Live Pricing Feed**: Usage cards fold `-low`, `-medium`, `-high`, `-xhigh`, `-thinking`, `-max`, and `-tiered` variants under each base model while preserving raw entries in **Request Log**. Enable **Auto-Sync Pricing Feed** (or click **Check Now**) to pull catalog updates via GitHub / jsDelivr with SHA-256 deduplication.
@@ -306,7 +311,7 @@ gravitybox/
 ├── src/          # Node 22 / TypeScript backend (IPC, i18n, atomic switch, quota, SQLite ledger, HUD)
 ├── runtime/      # CDP isolated-world scripts (DOM localization engine, guards, Telemetry HUD)
 ├── dict/         # Layered bilingual dictionaries and custom overrides
-├── ui-strings/   # Versioned official bundle extraction snapshots (2.23.0 – 2.33.0)
+├── ui-strings/   # Versioned official bundle extraction snapshots (2.23.0 – 2.34.0)
 ├── assets/       # Icons, i18n JSON packs, model catalog, pricing feed, Retina screenshots
 ├── test/         # Unit, integration, headless Chromium E2E, and Swift UI layout suites
 └── tools/        # Release integrity, privacy check, docs parity, screenshot & DMG scripts

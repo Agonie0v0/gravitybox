@@ -6,10 +6,10 @@ Unicode True
 SetCompressor /SOLID lzma
 
 !ifndef APP_VERSION
-  !error "APP_VERSION must be defined (e.g. /DAPP_VERSION=1.1.3)"
+  !error "APP_VERSION must be defined (e.g. /DAPP_VERSION=1.2.0)"
 !endif
 !ifndef APP_VI_VERSION
-  !error "APP_VI_VERSION must be defined (e.g. /DAPP_VI_VERSION=1.1.3.0)"
+  !error "APP_VI_VERSION must be defined (e.g. /DAPP_VI_VERSION=1.2.0.0)"
 !endif
 !ifndef APP_ARCH
   !define APP_ARCH "x64"

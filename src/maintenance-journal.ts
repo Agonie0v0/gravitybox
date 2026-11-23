@@ -1,8 +1,8 @@
-import { lstat, mkdir, readFile, open } from 'node:fs/promises';
+import { lstat, mkdir, rename, readFile, open } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { atomicJson } from './files.js';
 import { bt } from './i18n.js';
-import { atomicRenameWithRetry, isOwnedByCurrentUser } from './platform/index.js';
+import { atomicRenameWithRetry, isOwnedByCurrentUser, isWindows } from './platform/index.js';
 export interface JournalMove {
     from: string;
     to: string;
@@ -63,7 +63,11 @@ export async function reconcileMoves(path: string, manifest: MaintenanceManifest
                 continue;
             }
             await mkdir(dirname(move.from), { recursive: true });
-            await atomicRenameWithRetry(move.to, move.from);
+            if (isWindows()) {
+                await atomicRenameWithRetry(move.to, move.from);
+            } else {
+                await rename(move.to, move.from);
+            }
             await persistDirectories(move.to, move.from);
         }
         catch {
@@ -100,7 +104,11 @@ export async function executeMoves(path: string, manifest: MaintenanceManifest, 
             if (await identity(move.from) !== move.identity || await identity(move.to) !== null)
                 throw Error(bt('maintenance.journal.err.path_changed_during'));
             await mkdir(dirname(move.to), { recursive: true, mode: 0o700 });
-            await atomicRenameWithRetry(move.from, move.to);
+            if (isWindows()) {
+                await atomicRenameWithRetry(move.from, move.to);
+            } else {
+                await rename(move.from, move.to);
+            }
             await persistDirectories(move.from, move.to);
         }
         await persist(path, { ...manifest, ...committedPatch, transaction: { ...manifest.transaction, phase: 'committed' } });

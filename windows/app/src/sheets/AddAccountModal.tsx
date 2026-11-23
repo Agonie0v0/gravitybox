@@ -238,9 +238,14 @@ export function AddAccountModal({
     }
   };
 
+  const invalidOAuthUrlMsg =
+    locale === 'en'
+      ? 'Invalid Google OAuth authorization link.'
+      : '无效的 Google OAuth 授权链接。';
+
   const handleReopenOAuthUrl = async () => {
     if (!oauthAuthUrl || !isSafeGoogleOAuthUrl(oauthAuthUrl)) {
-      setErrorMsg(t('add_account.error.invalid_url'));
+      setErrorMsg(invalidOAuthUrlMsg);
       return;
     }
     setErrorMsg('');
@@ -253,7 +258,7 @@ export function AddAccountModal({
 
   const handleCopyOAuthUrl = async () => {
     if (!oauthAuthUrl || !isSafeGoogleOAuthUrl(oauthAuthUrl)) {
-      setErrorMsg(t('add_account.error.invalid_url'));
+      setErrorMsg(invalidOAuthUrlMsg);
       return;
     }
     try {
@@ -268,7 +273,7 @@ export function AddAccountModal({
 
   const handleOAuthBegin = async () => {
     setErrorMsg('');
-    setStatusMsg(t('add_account.status.opening_google'));
+    setStatusMsg(locale === 'en' ? 'Opening Google sign-in…' : '正在打开 Google 授权登录…');
     setBusy(true);
     try {
       const res = await backendRequest<OAuthBeginReply>({
@@ -277,12 +282,16 @@ export function AddAccountModal({
       const authUrl = (res.authUrl || res.url || '').trim();
       const id = (res.id || '').trim();
       if (!authUrl || !id || !isSafeGoogleOAuthUrl(authUrl)) {
-        throw new Error(t('add_account.error.invalid_url'));
+        throw new Error(invalidOAuthUrlMsg);
       }
       setOauthSessionId(id);
       setOauthAuthUrl(authUrl);
       setCopiedAuthUrl(false);
-      setStatusMsg(t('add_account.status.complete_in_browser'));
+      setStatusMsg(
+        locale === 'en'
+          ? 'Complete Google sign-in in your browser…'
+          : '请在浏览器中完成 Google 授权登录…',
+      );
 
       try {
         await openExternalUrl(authUrl);
@@ -309,7 +318,7 @@ export function AddAccountModal({
           if (phase === 'exchanging') {
             setStatusMsg(locale === 'en' ? 'Exchanging Google authorization...' : '正在交换 Google 授权凭据...');
           } else if (phase === 'saving') {
-            setStatusMsg(t('add_account.status.saving'));
+            setStatusMsg(t('oauth.err.saving_in_progress'));
           } else if (phase === 'succeeded' || phase === 'completed') {
             stopPolling();
             setOauthSessionId(null);
@@ -324,7 +333,7 @@ export function AddAccountModal({
             setOauthAuthUrl('');
             setBusy(false);
             setStatusMsg('');
-            setErrorMsg(st.error || st.message || t('add_account.error.incomplete'));
+            setErrorMsg(st.error || st.message || t('oauth.err.incomplete'));
           }
         } catch (pollErr) {
           consecutiveErrors += 1;
@@ -334,7 +343,7 @@ export function AddAccountModal({
             setOauthAuthUrl('');
             setBusy(false);
             setStatusMsg('');
-            setErrorMsg(pollErr instanceof Error ? pollErr.message : t('add_account.error.incomplete'));
+            setErrorMsg(pollErr instanceof Error ? pollErr.message : t('oauth.err.incomplete'));
           }
         } finally {
           pollInFlightRef.current = false;
@@ -371,7 +380,7 @@ export function AddAccountModal({
       return;
     }
     setErrorMsg('');
-    setStatusMsg(t('add_account.status.saving'));
+    setStatusMsg(t('oauth.err.saving_in_progress'));
     setBusy(true);
     try {
       const start = await backendRequest<{ taskId?: string }>({
@@ -538,13 +547,15 @@ export function AddAccountModal({
               <Globe size={15} />
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>{t('add_account.google_title')}</div>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>
+                {locale === 'en' ? 'Google Browser Sign-In (Optional)' : 'Google 浏览器授权（可选）'}
+              </div>
               <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2, lineHeight: 1.45 }}>
                 {oauthConfigured
-                  ? t('add_account.google_sub')
-                  : locale === 'en'
-                  ? 'Neither macOS nor Windows bundles OAuth keys by default. To enable browser sign-in, configure GRAVITYBOX_GOOGLE_CLIENT_ID and GRAVITYBOX_GOOGLE_CLIENT_SECRET in %APPDATA%\\GravityBox\\.env and restart GravityBox.'
-                  : '原版 macOS 与 Windows 默认均不内置 OAuth 密钥；如需浏览器授权，请在 %APPDATA%\\GravityBox\\.env 配置 GRAVITYBOX_GOOGLE_CLIENT_ID 与 GRAVITYBOX_GOOGLE_CLIENT_SECRET 后重启应用。'}
+                  ? locale === 'en'
+                    ? 'Authorize an additional Google account directly in your browser without switching Antigravity first.'
+                    : '直接在浏览器中完成 Google 授权并保存，无需先在 Antigravity 内切换登录。'
+                  : t('oauth.err.missing_client')}
               </div>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6, flexShrink: 0 }}>
@@ -555,7 +566,7 @@ export function AddAccountModal({
                   disabled={busy}
                   onClick={handleOAuthBegin}
                 >
-                  {t('add_account.google_btn')}
+                  {locale === 'en' ? 'Sign In with Google' : 'Google 授权登录'}
                 </button>
               ) : (
                 <button

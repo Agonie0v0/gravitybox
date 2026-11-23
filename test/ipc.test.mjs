@@ -7,10 +7,10 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveIpcEndpoint } from '../dist/platform/index.js';
+import { sendBackendRpc } from './test-ipc.mjs';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function until(fn) { const deadline = Date.now() + 12000; while (Date.now() < deadline) { const value = await fn(); if (value) return value; await sleep(30); } throw new Error('测试等待超时'); }
-function rpc(directory, payload) { return new Promise((resolve, reject) => { const socket = createConnection(resolveIpcEndpoint(directory)); let value = ''; socket.setTimeout(8000, () => { socket.destroy(); reject(new Error('IPC 超时')); }); socket.on('connect', () => socket.write(JSON.stringify(payload) + '\n')); socket.on('error', reject); socket.on('data', chunk => { value += chunk; if (value.includes('\n')) { socket.end(); resolve(JSON.parse(value.split('\n')[0])); } }); }); }
+function rpc(directory, payload) { return sendBackendRpc(directory, payload, { timeoutMs: 8000 }); }
 
 test('真实后台加载个人覆盖并拒绝已撤下的在线补译和编辑入口',async()=>{
  const directory=await mkdtemp(join(tmpdir(),'gb-ipc-current-'));await mkdir(join(directory,'词典'));

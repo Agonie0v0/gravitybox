@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, type Hash } from 'node:crypto';
+import { basename } from 'node:path';
 import { parentPort, workerData } from 'node:worker_threads';
 import { bt, setActiveLocale } from './i18n.js';
 import { decodeVarint64, skipProtobufField } from './protobuf.js';
@@ -19,6 +20,7 @@ import {
 export interface HudWorkerScanRequest {
   dbPath: string;
   inlineBlobLimitBytes: number;
+  selfCascadeIdHint?: string;
   knownColumns?: {
     hasDataColumn: boolean;
     hasRenderInfoColumn: boolean;
@@ -59,6 +61,10 @@ export interface HudWorkerScanResult {
   executorMetaDigest?: string;
   executorMetaBlob?: Uint8Array | null;
   trajectoryId?: string;
+  cascadeId?: string;
+  trajectoryType?: number;
+  forkStepIndex?: number;
+  forkParentCascadeId?: string;
   metaBlobProjectedSlices: Uint8Array[];
   maxIdx: number;
   stepsMode: 'full' | 'append';
@@ -76,15 +82,15 @@ export interface HudWorkerScanResult {
 const TERMINAL_STEP_STATUSES = new Set([3, 5]);
 // SQLite 的 substr(blob, start, len) 每次调用都会经由 OP_Column 物化整列 BLOB；
 // 对含大量重复分块的中等 BLOB（<=64MB），在连续 chunk 读取超过阈值后只物化一次并用 subarray 零拷贝切片，
-// 避免 Windows 下百次 VirtualAlloc/页错误触发 4s 时间预算，同时保持超大 BLOB（>64MB）的内存有界性。
+// 避免百次内存分配与页错误开销，同时保持超大 BLOB（>64MB）的内存有界性。
 const MAX_MATERIALIZED_BLOB_BYTES = 64 * 1024 * 1024;
 const SUBSTR_FALLBACK_CALL_THRESHOLD = 3;
 
-function createSqlBlobChunkReader(
+export function createSqlBlobChunkReader(
   size: number,
   key: number | string,
-  getSubstrStmt: () => ReturnType<DatabaseSync['prepare']>,
-  getFullStmt: () => ReturnType<DatabaseSync['prepare']>
+  getSubstrStmt: () => { get(...args: any[]): unknown },
+  getFullStmt: () => { get(...args: any[]): unknown }
 ): (offset: number, length: number) => Uint8Array {
   let calls = 0;
   let fullBlob: Uint8Array | null | undefined;
@@ -164,6 +170,197 @@ function hashRawGenRowMeta(
   hash.update('\n');
 }
 
+const EXACT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_VALID_FORK_STEP_INDEX = 10_000_000;
+
+export interface ForkParentMetadata {
+  trajectoryId?: string;
+  cascadeId?: string;
+  trajectoryType?: number;
+  forkStepIndex?: number;
+  forkParentCascadeId?: string;
+}
+
+function readVarint64Strict(buf: Uint8Array, cursor: { pos: number }): bigint | null {
+  let result = 0n;
+  let shift = 0n;
+  while (cursor.pos < buf.length && shift <= 63n) {
+    const b = BigInt(buf[cursor.pos++]!);
+    result |= (b & 0x7fn) << shift;
+    shift += 7n;
+    if ((b & 0x80n) === 0n) {
+      return result;
+    }
+  }
+  cursor.pos = buf.length;
+  return null;
+}
+
+function parseParentReferenceBlob(buf: Uint8Array): {
+  parentTrajectoryId?: string;
+  forkStepIndex?: number;
+  referenceType?: number;
+  parentCascadeId?: string;
+} | null {
+  if (!buf || buf.byteLength === 0) return null;
+  const cursor = { pos: 0 };
+  let parentTrajectoryId: string | undefined;
+  let forkStepIndex: number | undefined;
+  let forkStepIndexInvalid = false;
+  let referenceType: number | undefined;
+  let parentCascadeId: string | undefined;
+
+  while (cursor.pos < buf.length) {
+    const tagVal = readVarint64Strict(buf, cursor);
+    if (tagVal === null || tagVal === 0n || tagVal > 0xffffffffn) return null;
+    const tag = Number(tagVal);
+    const fieldNum = tag >>> 3;
+    const wireType = tag & 0x07;
+    if (fieldNum < 1 || fieldNum > 16384) return null;
+
+    if (wireType === 0) {
+      const val = readVarint64Strict(buf, cursor);
+      if (val === null) return null;
+      if (fieldNum === 2) {
+        if (val >= 0n && val < BigInt(MAX_VALID_FORK_STEP_INDEX)) {
+          const n = Number(val);
+          if (Number.isSafeInteger(n) && n >= 0 && n < MAX_VALID_FORK_STEP_INDEX) {
+            forkStepIndex = n;
+          } else {
+            forkStepIndexInvalid = true;
+          }
+        } else {
+          forkStepIndexInvalid = true;
+        }
+      } else if (fieldNum === 5) {
+        if (val >= 0n && val <= 0x7fffffffn) {
+          referenceType = Number(val);
+        }
+      }
+    } else if (wireType === 2) {
+      const lenVal = readVarint64Strict(buf, cursor);
+      if (lenVal === null || lenVal < 0n || lenVal > BigInt(buf.length - cursor.pos)) return null;
+      const len = Number(lenVal);
+      const slice = buf.subarray(cursor.pos, cursor.pos + len);
+      cursor.pos += len;
+      if (fieldNum === 1) {
+        parentTrajectoryId = Buffer.from(slice).toString('utf8').trim().toLowerCase();
+      } else if (fieldNum === 6) {
+        parentCascadeId = Buffer.from(slice).toString('utf8').trim().toLowerCase();
+      }
+    } else if (wireType === 1 || wireType === 5) {
+      if (!skipProtobufField(buf, cursor, wireType)) return null;
+    } else {
+      return null;
+    }
+  }
+
+  if (cursor.pos !== buf.length || forkStepIndexInvalid) return null;
+  return {
+    parentTrajectoryId,
+    forkStepIndex,
+    referenceType,
+    parentCascadeId,
+  };
+}
+
+export function readForkParentMetadata(
+  db: DatabaseSync,
+  selfCascadeIdHint?: string
+): ForkParentMetadata {
+  const out: ForkParentMetadata = {};
+  const selfIds = new Set<string>();
+  const cleanHint = typeof selfCascadeIdHint === 'string' ? selfCascadeIdHint.trim().toLowerCase() : '';
+  if (cleanHint) selfIds.add(cleanHint);
+
+  let hasParentReferencesTable = false;
+  try {
+    const tables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('trajectory_meta', 'parent_references')")
+      .all() as Array<{ name?: unknown }>;
+    const tableSet = new Set(tables.map(t => String(t.name ?? '')));
+    hasParentReferencesTable = tableSet.has('parent_references');
+
+    if (tableSet.has('trajectory_meta')) {
+      const tmCols = new Set(
+        (db.prepare('PRAGMA table_info(trajectory_meta)').all() as Array<{ name?: unknown }>).map(c => String(c.name ?? ''))
+      );
+      const selectCols = ['trajectory_id', 'cascade_id', 'trajectory_type'].filter(c => tmCols.has(c));
+      if (selectCols.length > 0) {
+        const tm = db
+          .prepare(`SELECT ${selectCols.join(', ')} FROM trajectory_meta LIMIT 1`)
+          .get() as { trajectory_id?: unknown; cascade_id?: unknown; trajectory_type?: unknown } | undefined;
+        if (tm) {
+          if (typeof tm.trajectory_id === 'string' && tm.trajectory_id.trim()) {
+            out.trajectoryId = tm.trajectory_id.trim().toLowerCase();
+            selfIds.add(out.trajectoryId);
+          }
+          if (typeof tm.cascade_id === 'string' && tm.cascade_id.trim()) {
+            out.cascadeId = tm.cascade_id.trim().toLowerCase();
+            selfIds.add(out.cascadeId);
+          }
+          if (tm.trajectory_type !== null && tm.trajectory_type !== undefined) {
+            const tt = Number(tm.trajectory_type);
+            if (Number.isSafeInteger(tt)) {
+              out.trajectoryType = tt;
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    return out;
+  }
+
+  if (!hasParentReferencesTable) {
+    return out;
+  }
+
+  try {
+    const prCols = new Set(
+      (db.prepare('PRAGMA table_info(parent_references)').all() as Array<{ name?: unknown }>).map(c => String(c.name ?? ''))
+    );
+    if (!prCols.has('data')) return out;
+    const orderSql = prCols.has('idx') ? ' ORDER BY idx ASC' : '';
+    const rows = db
+      .prepare(`SELECT data FROM parent_references WHERE data IS NOT NULL${orderSql}`)
+      .all() as Array<{ data?: unknown }>;
+
+    let bestForkStepIndex: number | undefined;
+    let bestParentCascadeId: string | undefined;
+
+    for (const row of rows) {
+      if (!(row.data instanceof Uint8Array) || row.data.byteLength === 0) continue;
+      const parsed = parseParentReferenceBlob(row.data);
+      if (!parsed) continue;
+      const { parentCascadeId, forkStepIndex } = parsed;
+      if (!parentCascadeId || !EXACT_UUID_RE.test(parentCascadeId)) continue;
+      if (selfIds.has(parentCascadeId)) continue;
+      if (
+        forkStepIndex === undefined ||
+        !Number.isSafeInteger(forkStepIndex) ||
+        forkStepIndex < 0 ||
+        forkStepIndex >= MAX_VALID_FORK_STEP_INDEX
+      ) {
+        continue;
+      }
+      if (bestForkStepIndex === undefined || forkStepIndex > bestForkStepIndex) {
+        bestForkStepIndex = forkStepIndex;
+        bestParentCascadeId = parentCascadeId;
+      }
+    }
+
+    if (bestForkStepIndex !== undefined && bestParentCascadeId) {
+      out.forkStepIndex = bestForkStepIndex;
+      out.forkParentCascadeId = bestParentCascadeId;
+    }
+  } catch {
+    // ignore corrupted or unreadable parent_references
+  }
+
+  return out;
+}
+
 function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResult; transfers: ArrayBuffer[] } {
   const inlineLimit = req.inlineBlobLimitBytes || 65_536;
   const db = new DatabaseSync(req.dbPath, { readOnly: true });
@@ -215,15 +412,13 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
     hasTrajectoryMeta = tableSet.has('trajectory_meta');
     const hasGenTable = tableSet.has('gen_metadata');
     const hasExecutorMetaTable = tableSet.has('executor_metadata');
-    if (hasTrajectoryMeta && !trajectoryId) {
-      try {
-        const tm = db
-          .prepare('SELECT trajectory_id FROM trajectory_meta LIMIT 1')
-          .get() as { trajectory_id?: string } | undefined;
-        if (tm?.trajectory_id) {
-          trajectoryId = String(tm.trajectory_id).toLowerCase();
-        }
-      } catch {}
+    const baseNameHint = basename(req.dbPath, '.db').toLowerCase();
+    const selfCascadeIdHint =
+      req.selfCascadeIdHint?.trim().toLowerCase() ||
+      (EXACT_UUID_RE.test(baseNameHint) ? baseNameHint : undefined);
+    const forkMeta = readForkParentMetadata(db, selfCascadeIdHint);
+    if (!trajectoryId && forkMeta.trajectoryId) {
+      trajectoryId = forkMeta.trajectoryId;
     }
 
     if (tableSet.has('trajectory_metadata_blob')) {
@@ -677,6 +872,10 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
         executorMetaDigest,
         executorMetaBlob,
         trajectoryId,
+        ...(forkMeta.cascadeId !== undefined ? { cascadeId: forkMeta.cascadeId } : {}),
+        ...(forkMeta.trajectoryType !== undefined ? { trajectoryType: forkMeta.trajectoryType } : {}),
+        ...(forkMeta.forkStepIndex !== undefined ? { forkStepIndex: forkMeta.forkStepIndex } : {}),
+        ...(forkMeta.forkParentCascadeId !== undefined ? { forkParentCascadeId: forkMeta.forkParentCascadeId } : {}),
         metaBlobProjectedSlices,
         maxIdx,
         stepsMode,
@@ -704,6 +903,12 @@ let database: DatabaseSync | undefined;
 let sessionError: string | undefined;
 let sessionDataVersion = 0;
 
+export function closeSqliteDatabase(db: { exec(sql: string): unknown; close(): unknown } | undefined): void {
+  if (!db) return;
+  try { db.exec('ROLLBACK;'); } catch {}
+  try { db.close(); } catch {}
+}
+
 function openSession(path: string) {
   closeSession();
   try {
@@ -716,10 +921,7 @@ function openSession(path: string) {
 }
 
 function closeSession() {
-  if (database) {
-    try { database.exec('ROLLBACK;'); } catch {}
-    try { database.close(); } catch {}
-  }
+  closeSqliteDatabase(database);
   database = undefined;
   sessionError = undefined;
 }
@@ -748,6 +950,9 @@ export interface UsageWorkerScanResult {
   error?: string;
   changedDuringRead?: boolean;
   countExceeded?: number;
+  trajectoryType?: number;
+  forkStepIndex?: number;
+  forkParentCascadeId?: string;
   genRows: UsageWorkerScanRow[];
   stepSchemaOk: boolean;
   stepError?: string;
@@ -790,6 +995,7 @@ function executeSummariesLookup(req: SummariesLookupRequest): SummariesLookupRes
       return { foundTable: false, childIds: [], terminalChildIds: [], runningChildIds: [], selfRunning: false };
     }
     const childIds = new Set<string>();
+    const parentTableChildIds = new Set<string>();
     const terminalChildIds = new Set<string>();
     const runningChildIds = new Set<string>();
     let selfRunning = false;
@@ -804,12 +1010,18 @@ function executeSummariesLookup(req: SummariesLookupRequest): SummariesLookupRes
         for (const pid of cleanParents) {
           for (const r of stmt.all(pid) as Array<{ cid?: unknown }>) {
             const cid = String(r.cid ?? '').trim().toLowerCase();
-            if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(cid)) childIds.add(cid);
+            if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(cid)) {
+              parentTableChildIds.add(cid);
+            }
           }
         }
       }
     }
-    if (tableSet.has('conversation_summaries')) {
+    if (!tableSet.has('conversation_summaries')) {
+      for (const cid of parentTableChildIds) {
+        childIds.add(cid);
+      }
+    } else {
       const cols = new Set(
         (db.prepare('PRAGMA table_info(conversation_summaries)').all() as Array<{ name?: unknown }>).map(c => String(c.name ?? ''))
       );
@@ -837,11 +1049,16 @@ function executeSummariesLookup(req: SummariesLookupRequest): SummariesLookupRes
             }
           }
         }
-      } else if (cleanParents.length > 0 && childCol && hasStatus && childIds.size > 0) {
-        const byIdStmt = db.prepare(`SELECT status FROM conversation_summaries WHERE lower(${childCol}) = ?`);
-        for (const cid of childIds) {
+      }
+      if (cleanParents.length > 0 && childCol && parentTableChildIds.size > 0) {
+        const selectExpr = hasStatus ? 'status' : '1 AS found';
+        const byIdStmt = db.prepare(`SELECT ${selectExpr} FROM conversation_summaries WHERE lower(${childCol}) = ?`);
+        for (const cid of parentTableChildIds) {
           const row = byIdStmt.get(cid) as { status?: unknown } | undefined;
-          if (row) classifySummaryStatus(cid, row.status);
+          if (row) {
+            childIds.add(cid);
+            if (hasStatus) classifySummaryStatus(cid, row.status);
+          }
         }
       }
       if (cleanSelfIds.length > 0 && childCol && hasStatus) {
@@ -1001,6 +1218,16 @@ function executeUsageScan(req: UsageWorkerScanRequest): { result: UsageWorkerSca
   try {
     db.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 250;');
     const dataVersionBefore = Number((db.prepare('PRAGMA data_version').get() as { data_version?: unknown } | undefined)?.data_version);
+    const baseNameHint = basename(req.dbPath, '.db').toLowerCase();
+    const forkMeta = readForkParentMetadata(
+      db,
+      EXACT_UUID_RE.test(baseNameHint) ? baseNameHint : undefined
+    );
+    const forkMetaFields = {
+      ...(forkMeta.trajectoryType !== undefined ? { trajectoryType: forkMeta.trajectoryType } : {}),
+      ...(forkMeta.forkStepIndex !== undefined ? { forkStepIndex: forkMeta.forkStepIndex } : {}),
+      ...(forkMeta.forkParentCascadeId !== undefined ? { forkParentCascadeId: forkMeta.forkParentCascadeId } : {}),
+    };
 
     const indexRows = db
       .prepare('SELECT idx, length(data) AS size FROM gen_metadata WHERE data IS NOT NULL ORDER BY idx;')
@@ -1011,6 +1238,7 @@ function executeUsageScan(req: UsageWorkerScanRequest): { result: UsageWorkerSca
         result: {
           ok: true,
           countExceeded: indexRows.length,
+          ...forkMetaFields,
           genRows: [],
           stepSchemaOk: true,
           stepRows: [],
@@ -1037,6 +1265,7 @@ function executeUsageScan(req: UsageWorkerScanRequest): { result: UsageWorkerSca
       return {
         result: {
           ok: true,
+          ...forkMetaFields,
           genRows: [],
           stepSchemaOk: true,
           stepRows: [],
@@ -1175,6 +1404,7 @@ function executeUsageScan(req: UsageWorkerScanRequest): { result: UsageWorkerSca
     return {
       result: {
         ok: true,
+        ...forkMetaFields,
         genRows,
         stepSchemaOk,
         stepError,

@@ -13,6 +13,7 @@ const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/tray-icon.png");
 pub const TRAY_ID: &str = "gravitybox-tray";
 
 static LAST_TRAY_HIDE_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_TRAY_SHOW_MS: AtomicU64 = AtomicU64::new(0);
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -23,6 +24,16 @@ fn now_ms() -> u64 {
 
 pub fn mark_tray_hidden_now() {
     LAST_TRAY_HIDE_MS.store(now_ms(), Ordering::SeqCst);
+}
+
+pub fn mark_tray_shown_now() {
+    LAST_TRAY_SHOW_MS.store(now_ms(), Ordering::SeqCst);
+}
+
+/// Guard against transient Win32/WebView2 focus-loss events fired immediately during
+/// tray popover activation (especially during cold WebView2 initialization).
+pub fn is_within_tray_show_grace() -> bool {
+    now_ms().saturating_sub(LAST_TRAY_SHOW_MS.load(Ordering::SeqCst)) < 350
 }
 
 pub fn show_main_window_and_focus(app: &AppHandle, page: Option<&str>) {
@@ -111,6 +122,7 @@ pub fn show_tray_popover(app: &AppHandle, anchor_corner: bool) {
     let phys_h = (535.0 * scale).round() as i32;
     let (x, y) = compute_tray_popup_position(phys_w, phys_h, anchor_corner);
 
+    mark_tray_shown_now();
     let _ = win.set_position(PhysicalPosition::new(x, y));
     let _ = win.show();
     let _ = win.set_focus();
@@ -244,19 +256,29 @@ pub fn setup_tray(app: &AppHandle, backend: Arc<BackendManager>, is_english: boo
             }
             "open_antigravity" => {
                 hide_tray_window(app);
-                std::thread::spawn(|| {
-                    let _ = launch_antigravity();
+                let state_dir = backend_for_menu.state_dir.clone();
+                std::thread::spawn(move || {
+                    let _ = launch_antigravity(Some(state_dir.as_path()));
                 });
             }
             "safe_relaunch" => {
                 hide_tray_window(app);
                 let res_dir = backend_for_menu.resource_dir().map(|p| p.to_path_buf());
+                let state_dir = backend_for_menu.state_dir.clone();
                 let handle = app.clone();
                 std::thread::spawn(move || {
-                    let outcome = safe_relaunch_antigravity(res_dir.as_deref());
+                    let outcome =
+                        safe_relaunch_antigravity(res_dir.as_deref(), Some(state_dir.as_path()), false);
                     match outcome {
+                        Ok(res) if res.needs_background_exit_confirmation => {
+                            show_main_window_and_focus(&handle, None);
+                            let _ = handle.emit(
+                                "confirm-background-relaunch",
+                                json!({ "message": res.message, "reason": res.reason }),
+                            );
+                        }
                         Ok(res) => {
-                            let _ = handle.emit("toast-message", json!({ "message": res.message, "error": false }));
+                            let _ = handle.emit("toast-message", json!({ "message": res.message, "error": !res.ok }));
                         }
                         Err(err) => {
                             let _ = handle.emit("toast-message", json!({ "message": err, "error": true }));

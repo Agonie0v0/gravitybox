@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { open as dialogOpen, save as dialogSave } from '@tauri-apps/plugin-dialog';
-import type { AppInfo, UiConfig } from './types';
+import type { AppInfo, GracefulCloseOutcome, SafeRelaunchResult, UiConfig } from './types';
 
 export function isTauriRuntime(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -24,7 +24,7 @@ export async function restartBackend(): Promise<void> {
 export async function getAppInfo(): Promise<AppInfo> {
   if (!isTauriRuntime()) {
     return {
-      version: '1.1.3',
+      version: '1.2.0',
       stateDir: 'C:\\Users\\demo\\AppData\\Roaming\\GravityBox',
       pipeName: '\\\\.\\pipe\\gravitybox-dev',
       osLabel: 'Windows x86_64',
@@ -46,16 +46,28 @@ export async function launchAntigravity(): Promise<void> {
   await invoke('launch_antigravity_cmd');
 }
 
-export async function safeRelaunchAntigravity(): Promise<{ ok: boolean; debugPortReady: boolean; message: string }> {
+export async function safeRelaunchAntigravity(confirmBackgroundExit = false): Promise<SafeRelaunchResult> {
   if (!isTauriRuntime()) {
-    return { ok: true, debugPortReady: true, message: 'Preview mode' };
+    return {
+      ok: true,
+      debugPortReady: true,
+      needsBackgroundExitConfirmation: false,
+      reason: 'ready',
+      message: 'Preview mode',
+    };
   }
-  return invoke('safe_relaunch_antigravity_cmd');
+  return invoke<SafeRelaunchResult>('safe_relaunch_antigravity_cmd', { confirmBackgroundExit });
 }
 
-export async function quitAntigravityAndWait(timeoutMs = 18_000): Promise<boolean> {
-  if (!isTauriRuntime()) return true;
-  return invoke<boolean>('quit_antigravity_and_wait_cmd', { timeoutMs });
+export async function quitAntigravityAndWait(
+  timeoutMs = 18_000,
+  confirmBackgroundExit = false,
+): Promise<GracefulCloseOutcome> {
+  if (!isTauriRuntime()) return { closed: true, reason: 'clean_exit' };
+  return invoke<GracefulCloseOutcome>('quit_antigravity_and_wait_cmd', {
+    timeoutMs,
+    confirmBackgroundExit,
+  });
 }
 
 export async function getAntigravityRunning(): Promise<boolean> {
@@ -103,15 +115,19 @@ export async function loadUiConfig(): Promise<UiConfig> {
       quotaRefreshMinutes: 0,
       hudEnabled: true,
       autoPricingSyncEnabled: false,
+      launchAntigravityOnStart: false,
       syncAntigravityLifecycle: false,
       autoUpdateEnabled: false,
       accountsCollapsed: false,
       menuSelectedTab: 0,
       menuUsagePeriod: 0,
+      menuUsageEnvironmentId: 'all',
       menuTrendMetric: 'tokens',
       applicationChannel: 'stable',
       appLanguage: 'system',
       themeMode: 'system',
+      antigravityProxyMode: 'off',
+      antigravityProxyManualUrl: '',
     };
   }
   return invoke<UiConfig>('load_ui_config');

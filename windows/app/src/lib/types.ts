@@ -2,6 +2,74 @@ export type PageKey = 'overview' | 'accounts' | 'usage' | 'settings' | 'about';
 export type UsagePeriodKey = 'today' | '7d' | '30d' | 'all';
 export type ThemeMode = 'system' | 'light' | 'dark';
 export type LanguageSetting = 'system' | 'zh-Hans' | 'en';
+export type ProxyMode = 'off' | 'system' | 'manual';
+
+export type EffectiveProxySource =
+  | 'off'
+  | 'manual'
+  | 'system'
+  | 'system_unconfigured'
+  | 'system_pac_unsupported'
+  | 'system_socks_unsupported'
+  | 'invalid_manual'
+  | string;
+
+export interface ProxyInfo {
+  mode: ProxyMode;
+  manualUrl: string;
+  effectiveUrl: string | null;
+  source: EffectiveProxySource;
+}
+
+export interface SafeRelaunchResult {
+  ok: boolean;
+  debugPortReady: boolean;
+  needsBackgroundExitConfirmation: boolean;
+  reason: string;
+  message: string;
+}
+
+export interface GracefulCloseOutcome {
+  closed: boolean;
+  reason: string;
+}
+
+export interface EnvironmentNode {
+  environmentId?: string;
+  id?: string;
+  kind?: 'local' | 'ssh' | string;
+  hostLabel?: string;
+  host_label?: string;
+  label?: string;
+  lifecycleState?: 'online' | 'auth_expired' | 'offline_recent' | 'historical_only' | string;
+  state?: string;
+  online?: boolean;
+  windowCount?: number;
+  window_count?: number;
+  accountEmail?: string;
+  email?: string;
+  accountName?: string;
+  name?: string;
+  tier?: string;
+  subscription_tier?: string;
+  activeTier?: string;
+  matchedLocalAccountId?: string | null;
+  primaryRemoteKey?: string;
+  remoteKey?: string;
+  lastError?: string;
+  lastQuotaObservedAt?: number;
+  quotaLastUpdated?: number;
+  observedAt?: number;
+  lastFocusedAt?: number;
+  lastUsageSyncedAt?: number;
+  focused?: boolean;
+  probing?: boolean;
+  quotaFreshness?: string;
+  sharePct?: number;
+  usageSharePct?: number;
+  quota?: Record<string, unknown> | null;
+  [key: string]: unknown;
+}
 
 export interface UiConfig {
   schema: number;
@@ -9,15 +77,19 @@ export interface UiConfig {
   quotaRefreshMinutes: number;
   hudEnabled: boolean;
   autoPricingSyncEnabled: boolean;
+  launchAntigravityOnStart: boolean;
   syncAntigravityLifecycle: boolean;
   autoUpdateEnabled: boolean;
   accountsCollapsed: boolean;
   menuSelectedTab: number;
   menuUsagePeriod: number;
+  menuUsageEnvironmentId: string;
   menuTrendMetric: 'tokens' | 'requests';
   applicationChannel: string;
   appLanguage: string | null;
   themeMode: ThemeMode;
+  antigravityProxyMode: ProxyMode;
+  antigravityProxyManualUrl: string;
 }
 
 export interface AntigravityInfo {
@@ -58,6 +130,15 @@ export interface LiveStatus {
   runningTasks?: number;
   dictionaryError?: string;
   partial?: boolean;
+  remoteSessions?: EnvironmentNode[];
+  environments?: EnvironmentNode[];
+  environmentsRevision?: string | number;
+  remoteSyncRevision?: string | number;
+  focusedEnvironmentId?: string;
+  focusedContextKey?: string;
+  sshWindowsCount?: number;
+  activeSshHosts?: string[];
+  remoteObservedVersion?: number;
 }
 
 export interface TaskRow {
@@ -148,7 +229,30 @@ export interface UsageSummaryReply {
   ok?: boolean;
   period: UsagePeriodKey;
   snapshotId?: string;
-  summary: UsagePeriodSummaryData;
+  selectedEnvironmentId?: string;
+  selectedAccountId?: string;
+  availableEnvironments?: EnvironmentNode[];
+  environments?: EnvironmentNode[];
+  environmentBreakdown?: {
+    localSharePct?: number;
+    sshSharePct?: number;
+    localTokens?: number;
+    sshTokens?: number;
+    byEnvironment?: Array<{
+      environmentId?: string;
+      environment_id?: string;
+      sharePct?: number;
+      totalTokens?: number;
+      total_tokens?: number;
+    }>;
+    [key: string]: unknown;
+  };
+  summary: UsagePeriodSummaryData & {
+    selectedEnvironmentId?: string;
+    availableEnvironments?: EnvironmentNode[];
+    available_environments?: EnvironmentNode[];
+    environmentBreakdown?: Record<string, unknown>;
+  };
   byModel?: ModelUsageRaw[];
   models?: ModelUsageRaw[];
   dailyTrends?: DailyTrendRaw[];
@@ -253,7 +357,21 @@ export interface DashboardSummaryReply {
     todayHourly?: HourlyPointRaw[];
     todayByModel?: ModelUsageRaw[];
     periods?: Record<UsagePeriodKey, UsageSummaryReply>;
+    environments?: EnvironmentNode[];
+    availableEnvironments?: EnvironmentNode[];
+    environmentsRevision?: string | number;
+    remoteSyncRevision?: string | number;
+    focusedEnvironmentId?: string;
   } | null;
+  remoteSessions?: EnvironmentNode[];
+  environments?: EnvironmentNode[];
+  environmentsRevision?: string | number;
+  remoteSyncRevision?: string | number;
+  focusedEnvironmentId?: string;
+  focusedContextKey?: string;
+  remoteObservedVersion?: number;
+  sshWindowsCount?: number;
+  activeSshHosts?: string[];
   accountsError?: string;
   usageError?: string;
   revision?: string;
@@ -279,6 +397,14 @@ export interface UsageEventRow {
   estimatedUsd?: number;
   priced?: boolean;
   source?: string;
+  environment_id?: string;
+  environmentId?: string;
+  environmentKind?: string;
+  environmentLabel?: string;
+  host_label?: string;
+  hostLabel?: string;
+  account_email?: string;
+  accountEmail?: string;
 }
 
 export interface UsageEventsReply {

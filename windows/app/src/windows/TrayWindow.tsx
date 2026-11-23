@@ -14,6 +14,7 @@ import {
   Power,
   RotateCw,
   Send,
+  Server,
   Settings,
   Sparkles,
   Sun,
@@ -41,8 +42,9 @@ import {
   sortModelsByUsage,
 } from '../lib/format';
 import { formatBarTitle, parseQuotaContract } from '../lib/quota';
+import { normalizeSshEnvironment, sshStateSortOrder } from '../lib/ssh';
 import { hideTrayWindow, quitApp, showMainWindow } from '../lib/tauri';
-import type { LanguageSetting, UsagePeriodKey } from '../lib/types';
+import type { LanguageSetting, UsagePeriodKey, UsageSummaryReply } from '../lib/types';
 
 const PERIODS: UsagePeriodKey[] = ['today', '7d', '30d', 'all'];
 
@@ -63,6 +65,7 @@ export function TrayWindow() {
     activeAccountId,
     usageByPeriod,
     usageLoading,
+    sshEnvironments,
     quotaRefreshing,
     relaunching,
     switchingAccount,
@@ -80,6 +83,8 @@ export function TrayWindow() {
 
   const [tab, setTab] = useState<number>(config.menuSelectedTab ?? 0);
   const [periodIdx, setPeriodIdx] = useState<number>(config.menuUsagePeriod ?? 0);
+  const [environmentId, setEnvironmentId] = useState<string>(config.menuUsageEnvironmentId || 'all');
+  const [scopedUsage, setScopedUsage] = useState<UsageSummaryReply | null>(null);
   const [metric, setMetric] = useState<'tokens' | 'requests'>(config.menuTrendMetric ?? 'tokens');
   const [showAllModels, setShowAllModels] = useState(false);
   const [expandedAccountIds, setExpandedAccountIds] = useState<Set<string>>(() => new Set());
@@ -90,11 +95,23 @@ export function TrayWindow() {
 
   const period = PERIODS[Math.max(0, Math.min(3, periodIdx))];
 
+  const normalizedSshHosts = useMemo(() => {
+    const fallback = t('ssh.remote_fallback');
+    return sshEnvironments
+      .map((env) => normalizeSshEnvironment(env, fallback))
+      .sort((a, b) => sshStateSortOrder(b.state) - sshStateSortOrder(a.state) || a.hostLabel.localeCompare(b.hostLabel));
+  }, [sshEnvironments, t]);
+  const onlineSshHosts = useMemo(
+    () => normalizedSshHosts.filter((h) => h.state === 'online' || h.state === 'auth_expired'),
+    [normalizedSshHosts],
+  );
+
   useEffect(() => {
     setTab(config.menuSelectedTab ?? 0);
     setPeriodIdx(config.menuUsagePeriod ?? 0);
+    setEnvironmentId(config.menuUsageEnvironmentId || 'all');
     setMetric(config.menuTrendMetric ?? 'tokens');
-  }, [config.menuSelectedTab, config.menuUsagePeriod, config.menuTrendMetric]);
+  }, [config.menuSelectedTab, config.menuUsagePeriod, config.menuUsageEnvironmentId, config.menuTrendMetric]);
 
   useEffect(() => {
     if (!initializedExpandedRef.current && accounts.length > 0) {
@@ -105,10 +122,20 @@ export function TrayWindow() {
   }, [accounts, activeAccountId]);
 
   useEffect(() => {
-    if (tab === 0 && reachable) {
+    if (tab !== 0 || !reachable) return;
+    if (!environmentId || environmentId === 'all') {
+      setScopedUsage(null);
       void fetchUsage(period, false);
+    } else {
+      let active = true;
+      void fetchUsage(period, false, environmentId).then((res) => {
+        if (active && res) setScopedUsage(res);
+      });
+      return () => {
+        active = false;
+      };
     }
-  }, [tab, period, reachable, fetchUsage]);
+  }, [tab, period, environmentId, reachable, fetchUsage]);
 
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
@@ -130,7 +157,19 @@ export function TrayWindow() {
     setPeriodIdx(idx);
     setHoveredPt(null);
     void updateConfig({ menuUsagePeriod: idx });
-    void fetchUsage(PERIODS[idx], false);
+    if (!environmentId || environmentId === 'all') {
+      void fetchUsage(PERIODS[idx], false);
+    } else {
+      void fetchUsage(PERIODS[idx], false, environmentId).then((res) => {
+        if (res) setScopedUsage(res);
+      });
+    }
+  };
+
+  const selectEnvironment = (nextEnv: string) => {
+    setEnvironmentId(nextEnv);
+    setHoveredPt(null);
+    void updateConfig({ menuUsageEnvironmentId: nextEnv });
   };
 
   const selectMetric = (next: 'tokens' | 'requests') => {
@@ -140,7 +179,13 @@ export function TrayWindow() {
 
   const handleRefresh = () => {
     if (tab === 0) {
-      void fetchUsage(period, true);
+      if (!environmentId || environmentId === 'all') {
+        void fetchUsage(period, true);
+      } else {
+        void fetchUsage(period, true, environmentId).then((res) => {
+          if (res) setScopedUsage(res);
+        });
+      }
     } else if (tab === 1 && activeAccountId) {
       void refreshSingleAccountQuota(activeAccountId);
     } else {
@@ -151,7 +196,8 @@ export function TrayWindow() {
   const isRefreshing = tab === 0 ? Boolean(usageLoading[period]) : quotaRefreshing;
 
   // Usage tab data
-  const usageReport = usageByPeriod[period];
+  const usageReport =
+    !environmentId || environmentId === 'all' ? usageByPeriod[period] : (scopedUsage ?? usageByPeriod[period]);
   const usageSummary = usageReport?.summary ?? {};
   const totalTokens = usageSummary.totalTokens ?? 0;
   const reqCount = usageSummary.requestCount ?? 0;
@@ -246,9 +292,19 @@ export function TrayWindow() {
       {/* Top Chrome */}
       <header className="gb-tray-header">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
             <BrandMark size={18} />
             <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-0.01em' }}>GravityBox</span>
+            {onlineSshHosts.length > 0 && (
+              <span
+                className="gb-pill gb-pill-success"
+                style={{ fontSize: 10, padding: '1px 6px', maxWidth: 108, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              >
+                {onlineSshHosts.length === 1
+                  ? t('menu_panel.ssh.header_badge_one', { host: onlineSshHosts[0].hostLabel })
+                  : t('menu_panel.ssh.header_badge_many', { count: onlineSshHosts.length })}
+              </span>
+            )}
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, position: 'relative' }} ref={moreRef}>
@@ -413,6 +469,42 @@ export function TrayWindow() {
                 </button>
               ))}
             </div>
+
+            {/* Optional SSH Environment Filter (v1.2.0) */}
+            {normalizedSshHosts.length > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, overflowX: 'auto' }}>
+                <Server size={11} style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
+                <div className="gb-segmented" role="tablist" aria-label={t('menu_panel.env.a11y')}>
+                  <button
+                    type="button"
+                    className={`gb-segmented-btn ${environmentId === 'all' ? 'active' : ''}`}
+                    style={{ height: 21, padding: '0 7px', fontSize: 10.5 }}
+                    onClick={() => selectEnvironment('all')}
+                  >
+                    {t('menu_panel.env.all')}
+                  </button>
+                  <button
+                    type="button"
+                    className={`gb-segmented-btn ${environmentId === 'local' ? 'active' : ''}`}
+                    style={{ height: 21, padding: '0 7px', fontSize: 10.5 }}
+                    onClick={() => selectEnvironment('local')}
+                  >
+                    {t('menu_panel.ssh.scope_local')}
+                  </button>
+                  {normalizedSshHosts.slice(0, 2).map((host) => (
+                    <button
+                      key={host.id}
+                      type="button"
+                      className={`gb-segmented-btn ${environmentId === host.id ? 'active' : ''}`}
+                      style={{ height: 21, padding: '0 7px', fontSize: 10.5 }}
+                      onClick={() => selectEnvironment(host.id)}
+                    >
+                      {host.hostLabel}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* 4 Metric Tiles (2x2) */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 7 }}>

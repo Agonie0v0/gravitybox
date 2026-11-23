@@ -1,8 +1,8 @@
 use crate::antigravity::resolve_win_helper_exe;
 use crate::config::load_config;
 use crate::ipc_pipe::{
-    resolve_ipc_pipe_name, resolve_log_dir, send_ndjson_request,
-    strip_verbatim_prefix, PipeError,
+    read_ipc_session, resolve_log_dir, send_session_ndjson_request, strip_verbatim_prefix,
+    PipeError,
 };
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
@@ -27,7 +27,6 @@ pub(crate) struct RuntimeTarget {
 
 pub struct BackendManager {
     pub state_dir: PathBuf,
-    pub pipe_name: String,
     resource_dir: Option<PathBuf>,
     isolated_logs: bool,
     child: Arc<Mutex<Option<Child>>>,
@@ -44,10 +43,8 @@ impl BackendManager {
     ) -> Self {
         let state_dir = strip_verbatim_prefix(&state_dir);
         let resource_dir = resource_dir.map(|p| strip_verbatim_prefix(&p));
-        let pipe_name = resolve_ipc_pipe_name(&state_dir);
         Self {
             state_dir,
-            pipe_name,
             resource_dir,
             isolated_logs,
             child: Arc::new(Mutex::new(None)),
@@ -59,6 +56,15 @@ impl BackendManager {
 
     pub fn resource_dir(&self) -> Option<&Path> {
         self.resource_dir.as_deref()
+    }
+
+    /// Return the active randomized pipe name from `ipc-session.json` (never exposes `authToken`).
+    pub fn current_pipe_name(&self) -> String {
+        read_ipc_session(&self.state_dir)
+            .ok()
+            .flatten()
+            .map(|s| s.pipe_name)
+            .unwrap_or_default()
     }
 
     pub(crate) fn resolve_runtime_target(&self) -> Option<RuntimeTarget> {
@@ -160,10 +166,10 @@ impl BackendManager {
     }
 
     pub fn ping(&self) -> bool {
-        send_ndjson_request(
-            &self.pipe_name,
+        send_session_ndjson_request(
+            &self.state_dir,
             &json!({ "command": "ping" }),
-            Duration::from_millis(350),
+            Duration::from_millis(450),
         )
         .is_ok()
     }
@@ -325,7 +331,7 @@ impl BackendManager {
         let mut last_err: Option<PipeError> = None;
 
         for attempt in 0..max_attempts {
-            match send_ndjson_request(&self.pipe_name, &payload, timeout) {
+            match send_session_ndjson_request(&self.state_dir, &payload, timeout) {
                 Ok(val) => return Ok(val),
                 Err(err) => {
                     let retryable = err.retryable;
@@ -357,8 +363,8 @@ impl BackendManager {
     fn stop_owned_child(&self) {
         let owns = self.owns_process.swap(false, Ordering::SeqCst);
         if owns {
-            let _ = send_ndjson_request(
-                &self.pipe_name,
+            let _ = send_session_ndjson_request(
+                &self.state_dir,
                 &json!({ "command": "stop" }),
                 Duration::from_millis(1500),
             );

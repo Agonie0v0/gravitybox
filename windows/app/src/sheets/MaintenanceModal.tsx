@@ -17,7 +17,6 @@ import {
   getAntigravityRunning,
   launchAntigravity,
   openFolder,
-  quitAntigravityAndWait,
   revealInExplorer,
 } from '../lib/tauri';
 import type { MaintenanceEntry, MaintenanceScanReply } from '../lib/types';
@@ -46,9 +45,11 @@ export function MaintenanceModal({
     locale,
     reachable,
     maintenanceScan,
+    sshWindowsCount,
     fetchMaintenanceScan,
     fetchDashboard,
     fetchUsage,
+    closeAntigravitySafely,
     showToast,
     askConfirm,
   } = useApp();
@@ -219,10 +220,18 @@ export function MaintenanceModal({
 
       setBusy(true);
       setFeedback({ text: t('maintenance.simple.status_restarting_clean') });
-      const closed = await quitAntigravityAndWait(15_000).catch(() => false);
-      if (!closed) {
+      const closeOutcome = await closeAntigravitySafely(15_000, 'maintenance').catch(() => ({
+        closed: false,
+        reason: 'error',
+      }));
+      if (!closeOutcome.closed) {
         setBusy(false);
-        const msg = t('maintenance.error.quit_first_clear');
+        const msg =
+          closeOutcome.reason === 'visible_window_open'
+            ? locale === 'en'
+              ? 'Visible Antigravity windows are still open. Save and close them before cleaning.'
+              : '检测到 Antigravity 仍有未关闭的可见窗口，请先保存并关闭后再执行清理。'
+            : t('maintenance.error.quit_first_clear');
         setFeedback({ text: msg, error: true });
         showToast(msg, true);
         return;
@@ -261,10 +270,18 @@ export function MaintenanceModal({
 
       setBusy(true);
       setFeedback({ text: t('maintenance.simple.status_restarting_undo') });
-      const closed = await quitAntigravityAndWait(15_000).catch(() => false);
-      if (!closed) {
+      const closeOutcome = await closeAntigravitySafely(15_000, 'maintenance').catch(() => ({
+        closed: false,
+        reason: 'error',
+      }));
+      if (!closeOutcome.closed) {
         setBusy(false);
-        const msg = t('maintenance.restore.quit_body');
+        const msg =
+          closeOutcome.reason === 'visible_window_open'
+            ? locale === 'en'
+              ? 'Visible Antigravity windows are still open. Save and close them before restoring.'
+              : '检测到 Antigravity 仍有未关闭的可见窗口，请先保存并关闭后再执行还原。'
+            : t('maintenance.restore.quit_body');
         setFeedback({ text: msg, error: true });
         showToast(msg, true);
         return;
@@ -342,6 +359,24 @@ export function MaintenanceModal({
             <span>{t('common.refresh')}</span>
           </button>
         </div>
+
+        {/* SSH Remote active windows safety notice */}
+        {sshWindowsCount > 0 && (
+          <div
+            className="gb-subcard"
+            style={{
+              padding: '9px 12px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              fontSize: 11.5,
+              color: 'var(--text-secondary)',
+            }}
+          >
+            <Info size={13} style={{ color: 'var(--blue)', flexShrink: 0 }} />
+            <span>{t('ssh.maintenance.active_windows_note', { count: sshWindowsCount })}</span>
+          </div>
+        )}
 
         {/* Card 1: Hero Reclaimable Space + Tri-color composition bar */}
         <div className="gb-card" style={{ padding: 15, display: 'flex', flexDirection: 'column', gap: 11 }}>

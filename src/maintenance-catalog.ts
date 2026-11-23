@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { bt } from './i18n.js';
 import {
   appProcesses,
@@ -172,32 +172,32 @@ interface CacheCatalogSpec {
 }
 
 const CACHE_CATALOG_SPECS: Record<string, CacheCatalogSpec> = {
-  'Cache': { key: 'cache', icon: 'internaldrive', category: 'safe', section: 'runtime', defaultSelected: true },
-  'Code Cache': { key: 'code_cache', icon: 'cpu', category: 'safe', section: 'runtime', defaultSelected: true },
-  'GPUCache': { key: 'gpu_cache', icon: 'sparkles.rectangle.stack', category: 'safe', section: 'runtime', defaultSelected: true },
+  'Cache': { key: 'cache', icon: 'tray.full', category: 'safe', section: 'runtime', defaultSelected: true },
+  'Code Cache': { key: 'code_cache', icon: 'chevron.left.forwardslash.chevron.right', category: 'safe', section: 'runtime', defaultSelected: true },
+  'GPUCache': { key: 'gpu_cache', icon: 'display', category: 'safe', section: 'runtime', defaultSelected: true },
   'DawnCache': { key: 'dawn_cache', icon: 'cube.transparent', category: 'safe', section: 'runtime', defaultSelected: true },
-  'DawnWebGPUCache': { key: 'dawn_webgpu_cache', icon: 'cube.transparent', category: 'safe', section: 'runtime', defaultSelected: true },
-  'DawnGraphiteCache': { key: 'dawn_graphite_cache', icon: 'cube.transparent', category: 'safe', section: 'runtime', defaultSelected: true },
-  'GraphiteDawnCache': { key: 'graphite_dawn_cache', icon: 'sparkles.rectangle.stack', category: 'safe', section: 'runtime', defaultSelected: true },
-  'ShaderCache': { key: 'shader_cache', icon: 'sparkles.rectangle.stack', category: 'safe', section: 'runtime', defaultSelected: true },
-  'CachedData': { key: 'cached_data', icon: 'memorychip', category: 'safe', section: 'runtime', defaultSelected: true },
-  'CachedExtensionVSIXs': { key: 'cached_vsix', icon: 'shippingbox', category: 'safe', section: 'runtime', defaultSelected: true },
-  'CachedProfilesData': { key: 'cached_profiles', icon: 'doc.badge.gearshape', category: 'safe', section: 'runtime', defaultSelected: true },
-  'Crashpad': { key: 'crashpad', icon: 'exclamationmark.triangle', category: 'safe', section: 'runtime', defaultSelected: true },
+  'DawnWebGPUCache': { key: 'dawn_webgpu_cache', icon: 'cube', category: 'safe', section: 'runtime', defaultSelected: true },
+  'DawnGraphiteCache': { key: 'dawn_graphite_cache', icon: 'paintbrush.pointed', category: 'safe', section: 'runtime', defaultSelected: true },
+  'GraphiteDawnCache': { key: 'graphite_dawn_cache', icon: 'wand.and.rays', category: 'safe', section: 'runtime', defaultSelected: true },
+  'ShaderCache': { key: 'shader_cache', icon: 'circle.hexagongrid', category: 'safe', section: 'runtime', defaultSelected: true },
+  'CachedData': { key: 'cached_data', icon: 'doc.zipper', category: 'safe', section: 'runtime', defaultSelected: true },
+  'CachedExtensionVSIXs': { key: 'cached_vsix', icon: 'puzzlepiece.extension', category: 'safe', section: 'runtime', defaultSelected: true },
+  'CachedProfilesData': { key: 'cached_profiles', icon: 'person.crop.square', category: 'safe', section: 'runtime', defaultSelected: true },
+  'Crashpad': { key: 'crashpad', icon: 'waveform.path.ecg', category: 'safe', section: 'runtime', defaultSelected: true },
   'logs': { key: 'logs', icon: 'doc.text', category: 'safe', section: 'runtime', defaultSelected: true },
   'blob_storage': { key: 'blob_storage', icon: 'archivebox', category: 'safe', section: 'runtime', defaultSelected: true },
   'PartitionsCache': { key: 'partitions_cache', icon: 'square.split.2x2', category: 'safe', section: 'runtime', defaultSelected: true },
-  'AgentBrowserCache': { key: 'agent_browser_cache', icon: 'globe', category: 'safe', section: 'runtime', defaultSelected: true },
+  'AgentBrowserCache': { key: 'agent_browser_cache', icon: 'safari', category: 'safe', section: 'runtime', defaultSelected: true },
   'OrphanAgentData': { key: 'orphan_agent_data', icon: 'trash.slash', category: 'safe', section: 'runtime', defaultSelected: true },
   'AgentTaskStepLogs': { key: 'task_step_logs', icon: 'terminal', category: 'stateful', section: 'history', defaultSelected: false, hasImpact: true },
   'AgentVerboseTranscripts': { key: 'verbose_transcripts', icon: 'doc.on.doc', category: 'stateful', section: 'history', defaultSelected: false, hasImpact: true },
   'AgentSubagentDatabases': { key: 'subagent_dbs', icon: 'arrow.triangle.branch', category: 'stateful', section: 'history', defaultSelected: false, hasImpact: true },
   'Service Worker': { key: 'service_worker', icon: 'gearshape.2', category: 'stateful', defaultSelected: false, hasImpact: true },
   'Session Storage': { key: 'session_storage', icon: 'rectangle.stack', category: 'stateful', defaultSelected: false, hasImpact: true },
-  'WebStorage': { key: 'web_storage', icon: 'globe', category: 'stateful', defaultSelected: false, hasImpact: true },
-  'Local Storage': { key: 'local_storage', icon: 'externaldrive.badge.person.crop', category: 'stateful', defaultSelected: false, hasImpact: true },
-  'Cookies': { key: 'cookies', icon: 'key.horizontal', category: 'stateful', defaultSelected: false, hasImpact: true },
-  'Network Persistent State': { key: 'network_state', icon: 'network', category: 'stateful', defaultSelected: false, hasImpact: true },
+  'WebStorage': { key: 'web_storage', icon: 'externaldrive', category: 'stateful', defaultSelected: false, hasImpact: true },
+  'Local Storage': { key: 'local_storage', icon: 'cylinder', category: 'stateful', defaultSelected: false, hasImpact: true },
+  'Cookies': { key: 'cookies', icon: 'key', category: 'stateful', defaultSelected: false, hasImpact: true },
+  'Network Persistent State': { key: 'network_state', icon: 'antenna.radiowaves.left.and.right', category: 'stateful', defaultSelected: false, hasImpact: true },
 };
 
 export function getCacheMetadata(name: string): CacheItemMetadata | undefined {
@@ -240,116 +240,132 @@ const PROCESS_SNAPSHOT_TTL_MS = 250;
 let cachedProcessCommands: { at: number; commands: string[] | null } | null = null;
 let inFlightProcessCommands: Promise<string[] | null> | null = null;
 
-export async function readProcessCommands(): Promise<string[] | null> {
+function collectWindowsAppRoots(appPath?: string): string[] {
+  const roots = new Set<string>();
+  if (appPath) roots.add(appPath);
+  for (const dir of defaultAntigravityInstallDirs()) {
+    roots.add(join(dir, 'Antigravity'));
+  }
+  return Array.from(roots);
+}
+
+export async function readProcessCommands(appPath?: string): Promise<string[] | null> {
   const now = Date.now();
-  if (cachedProcessCommands && now - cachedProcessCommands.at < PROCESS_SNAPSHOT_TTL_MS) {
+  if (!appPath && cachedProcessCommands && now - cachedProcessCommands.at < PROCESS_SNAPSHOT_TTL_MS) {
     return cachedProcessCommands.commands;
   }
-  if (inFlightProcessCommands) {
+  if (!appPath && inFlightProcessCommands) {
     return inFlightProcessCommands;
   }
   const task = (async (): Promise<string[] | null> => {
     try {
       if (isWindows()) {
-        const procs = await appProcesses([]);
-        const commands: string[] = [];
-        for (const proc of procs) {
-          if (proc.cmdLine.trim()) commands.push(proc.cmdLine.trim());
-          if (proc.exePath.trim() && proc.exePath.trim() !== proc.cmdLine.trim()) {
-            commands.push(proc.exePath.trim());
-          }
-        }
-        cachedProcessCommands = { at: Date.now(), commands };
+        const procs = await appProcesses(collectWindowsAppRoots(appPath));
+        const commands = procs.map((p) => (p.cmdLine || p.exePath || '').trim()).filter(Boolean);
+        if (!appPath) cachedProcessCommands = { at: Date.now(), commands };
         return commands;
       }
       const { stdout } = await execFileAsync('/bin/ps', ['-axo', 'command='], { timeout: 3000 });
       const commands = stdout.split('\n').map(line => line.trim()).filter(Boolean);
-      cachedProcessCommands = { at: Date.now(), commands };
+      if (!appPath) cachedProcessCommands = { at: Date.now(), commands };
       return commands;
     } catch {
-      cachedProcessCommands = null;
+      if (!appPath) cachedProcessCommands = null;
       return null;
     }
   })();
-  inFlightProcessCommands = task;
+  if (!appPath) inFlightProcessCommands = task;
   try {
     return await task;
   } finally {
-    if (inFlightProcessCommands === task) {
+    if (!appPath && inFlightProcessCommands === task) {
       inFlightProcessCommands = null;
     }
   }
 }
 
 export function hasAntigravityCommand(commands: string[], appPath = defaultAntigravityAppPath()): boolean {
-  const winRoots = isWindows()
-    ? defaultAntigravityInstallDirs().map((dir) => join(dir, 'Antigravity'))
-    : [];
-  const appRoots = Array.from(
-    new Set([appPath, ...(isWindows() ? winRoots : ['/Applications/Antigravity.app'])]),
-  );
+  const winMode = !appPath.toLowerCase().endsWith('.app') && (isWindows() || /^[a-zA-Z]:[\\/]/.test(appPath));
+  if (winMode) {
+    const roots = Array.from(
+      new Set(
+        [appPath, ...collectWindowsAppRoots()]
+          .map((p) => normalizePathForCompare(p, 'win32'))
+          .filter(Boolean),
+      ),
+    );
+    return commands.some((trimmed) => {
+      const normalized = trimmed.replaceAll('"', '').replaceAll('\\', '/').toLowerCase();
+      return roots.some(
+        (root) =>
+          normalized.includes(`${root}/antigravity.exe`) ||
+          normalized.includes(`${root}/resources/bin/language_server.exe`) ||
+          normalized.startsWith(`${root}/`),
+      );
+    });
+  }
+  const appRoots = Array.from(new Set([appPath, '/Applications/Antigravity.app']));
   const macOsPrefixes = appRoots.map(p => p + '/Contents/MacOS/');
   const frameworkPrefixes = appRoots.map(p => p + '/Contents/Frameworks/');
   const lsPrefixes = appRoots.map(p => p + '/Contents/Resources/bin/language_server');
-  const winRootPrefixes = appRoots
-    .filter((p) => !p.toLowerCase().endsWith('.app'))
-    .map((p) => {
-      const norm = normalizePathForCompare(p, 'win32');
-      return norm.endsWith('/') ? norm : `${norm}/`;
-    });
-
-  return commands.some((trimmed) => {
-    if (
-      macOsPrefixes.some((prefix) => trimmed.startsWith(prefix)) ||
-      frameworkPrefixes.some((prefix) => trimmed.startsWith(prefix)) ||
-      lsPrefixes.some((prefix) => trimmed.startsWith(prefix) || trimmed.includes(prefix))
-    ) {
-      return true;
-    }
-    if (winRootPrefixes.length > 0) {
-      const unquoted = trimmed.startsWith('"') ? trimmed.slice(1) : trimmed;
-      const normCmd = unquoted.replace(/^\\\\\?\\/, '').replaceAll('\\', '/').toLowerCase();
-      return winRootPrefixes.some((prefix) => normCmd.startsWith(prefix) || normCmd.includes(prefix));
-    }
-    return false;
-  });
+  return commands.some(trimmed =>
+    macOsPrefixes.some(prefix => trimmed.startsWith(prefix)) ||
+    frameworkPrefixes.some(prefix => trimmed.startsWith(prefix)) ||
+    lsPrefixes.some(prefix => trimmed.startsWith(prefix) || trimmed.includes(prefix))
+  );
 }
 
 export function hasBrowserProfileCommand(commands: string[], browserProfileDir: string): boolean {
   if (!browserProfileDir) return false;
-  if (isWindows()) {
-    const normTarget = normalizePathForCompare(browserProfileDir, 'win32');
-    return commands.some((trimmed) => {
-      const normCmd = trimmed.replaceAll('\\', '/').toLowerCase();
-      return normCmd.includes(normTarget);
-    });
+  if (isWindows() || /^[a-zA-Z]:[\\/]/.test(browserProfileDir)) {
+    const needle = normalizePathForCompare(browserProfileDir, 'win32');
+    return commands.some((trimmed) => trimmed.replaceAll('\\', '/').toLowerCase().includes(needle));
   }
   return commands.some(trimmed => trimmed.includes(browserProfileDir) && !trimmed.includes('/bin/ps'));
 }
 
-export async function antigravityRunning(appPath = defaultAntigravityAppPath()) {
-  if (isWindows()) {
-    try {
-      const prefixes = Array.from(
-        new Set([
-          appPath,
-          ...defaultAntigravityInstallDirs().map((dir) => join(dir, 'Antigravity')),
-        ]),
-      );
-      const procs = await appProcesses(prefixes);
-      return procs.length > 0;
-    } catch {
-      return false;
-    }
+export type ProcessProbeState = 'running' | 'stopped' | 'unknown';
+
+export function normalizeProcessProbeState(value: boolean | ProcessProbeState): ProcessProbeState {
+  if (value === 'running' || value === 'stopped' || value === 'unknown') return value;
+  return value ? 'running' : 'stopped';
+}
+
+export async function probeAntigravityRunning(
+  appPath = defaultAntigravityAppPath(),
+  probeCommands?: () => Promise<string[] | null>,
+): Promise<ProcessProbeState> {
+  try {
+    const commands = probeCommands
+      ? await probeCommands()
+      : await readProcessCommands(isWindows() ? appPath : undefined);
+    if (!commands) return 'unknown';
+    return hasAntigravityCommand(commands, appPath) ? 'running' : 'stopped';
+  } catch {
+    return 'unknown';
   }
-  const commands = await readProcessCommands();
-  return commands ? hasAntigravityCommand(commands, appPath) : false;
+}
+
+export async function probeBrowserProfileRunning(
+  browserProfileDir: string,
+  probeCommands: () => Promise<string[] | null> = () => readProcessCommands(),
+): Promise<ProcessProbeState> {
+  if (!browserProfileDir) return 'stopped';
+  try {
+    const commands = await probeCommands();
+    if (!commands) return 'unknown';
+    return hasBrowserProfileCommand(commands, browserProfileDir) ? 'running' : 'stopped';
+  } catch {
+    return 'unknown';
+  }
+}
+
+export async function antigravityRunning(appPath = defaultAntigravityAppPath()) {
+  return (await probeAntigravityRunning(appPath)) !== 'stopped';
 }
 
 export async function browserProfileRunning(browserProfileDir: string): Promise<boolean> {
-  if (!browserProfileDir) return false;
-  const commands = await readProcessCommands();
-  return commands ? hasBrowserProfileCommand(commands, browserProfileDir) : false;
+  return (await probeBrowserProfileRunning(browserProfileDir)) !== 'stopped';
 }
 
 export interface CacheMaintenanceOptions {
@@ -357,10 +373,12 @@ export interface CacheMaintenanceOptions {
   stateDir?: string;
   fallbackTrashDir?: string;
   geminiDir?: string;
-  browserRunning?: () => Promise<boolean>;
+  browserRunning?: () => Promise<boolean | ProcessProbeState>;
+  processProbe?: () => Promise<string[] | null>;
   archiveDatabases?: (dbPaths: string[]) => Promise<unknown>;
   onMutated?: () => void | Promise<void>;
-  moveToSystemTrash?: (paths: string[]) => Promise<{ moved: string[] }>;
+  /** Optional override for tests verifying Windows Recycle Bin vs fallback behavior. */
+  moveToSystemTrash?: (paths: string[]) => Promise<unknown>;
 }
 
 export interface SubTargetSpec {
@@ -397,6 +415,6 @@ export interface ConversationIndexSnapshot {
 }
 
 export function isStrictSubpath(parentDir: string, candidatePath: string): boolean {
-  return isPathUnder(resolve(candidatePath), resolve(parentDir));
+  return isPathUnder(candidatePath, parentDir);
 }
 

@@ -8,6 +8,7 @@ import {
   LayoutDashboard,
   RotateCw,
   Send,
+  Server,
   Sparkles,
   WifiOff,
 } from 'lucide-react';
@@ -31,6 +32,12 @@ import {
   sortModelsByUsage,
 } from '../lib/format';
 import { parseQuotaContract } from '../lib/quota';
+import {
+  normalizeSshEnvironment,
+  sshStateI18nKey,
+  sshStatePillClass,
+  sshStateSortOrder,
+} from '../lib/ssh';
 import { MaintenanceModal } from '../sheets/MaintenanceModal';
 
 export function OverviewPage() {
@@ -43,9 +50,12 @@ export function OverviewPage() {
     dashboard,
     usageByPeriod,
     maintenanceScan,
+    sshEnvironments,
+    remoteSyncing,
     quotaRefreshing,
     relaunching,
     refreshAllQuotas,
+    refreshRemoteEnvironments,
     toggleLocalization,
     toggleHud,
     triggerSafeRelaunch,
@@ -55,6 +65,18 @@ export function OverviewPage() {
 
   const [hoveredPt, setHoveredPt] = useState<TrendBarPoint | null>(null);
   const [maintenanceOpen, setMaintenanceOpen] = useState(false);
+
+  const normalizedSshHosts = useMemo(() => {
+    const fallback = t('ssh.remote_fallback');
+    return sshEnvironments
+      .map((env) => normalizeSshEnvironment(env, fallback))
+      .sort((a, b) => sshStateSortOrder(b.state) - sshStateSortOrder(a.state) || a.hostLabel.localeCompare(b.hostLabel));
+  }, [sshEnvironments, t]);
+  const onlineSshHosts = useMemo(
+    () => normalizedSshHosts.filter((h) => h.state === 'online' || h.state === 'auth_expired'),
+    [normalizedSshHosts],
+  );
+  const offlineSshCount = normalizedSshHosts.length - onlineSshHosts.length;
 
   const dashAccounts = dashboard?.accounts ?? null;
   const dashUsage = dashboard?.usage ?? null;
@@ -229,6 +251,68 @@ export function OverviewPage() {
           busy={relaunching}
           onRelaunch={() => void triggerSafeRelaunch()}
         />
+      )}
+
+      {/* SSH Remote Companion Strip (v1.2.0) */}
+      {normalizedSshHosts.length > 0 && (
+        <div
+          className="gb-card"
+          style={{
+            padding: '10px 14px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 10,
+            flexWrap: 'wrap',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0, flex: 1 }}>
+            <div
+              className="gb-icon-badge gb-icon-badge-sm"
+              style={{
+                background: onlineSshHosts.length > 0 ? 'var(--success-soft)' : 'var(--subcard)',
+                border: `0.5px solid ${onlineSshHosts.length > 0 ? 'var(--success-border)' : 'var(--border-strong)'}`,
+                color: onlineSshHosts.length > 0 ? 'var(--success)' : 'var(--text-secondary)',
+              }}
+            >
+              <Server size={11.5} />
+            </div>
+            <span style={{ fontSize: 12, fontWeight: 600 }}>
+              {onlineSshHosts.length > 0
+                ? t('overview.ssh.companion_summary', { online: onlineSshHosts.length })
+                : t('overview.ssh.local_only_summary')}
+              {offlineSshCount > 0 ? t('overview.ssh.companion_offline_suffix', { count: offlineSshCount }) : ''}
+            </span>
+            {normalizedSshHosts.slice(0, 3).map((host) => (
+              <span key={host.id || host.hostLabel} className={`gb-pill ${sshStatePillClass(host.state)}`}>
+                {host.hostLabel} · {t(sshStateI18nKey(host.state))}
+              </span>
+            ))}
+            {normalizedSshHosts.length > 3 && (
+              <span className="gb-pill gb-pill-neutral">
+                {t('overview.ssh.more_hosts', { count: normalizedSshHosts.length - 3 })}
+              </span>
+            )}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+            <button
+              type="button"
+              className="gb-btn gb-btn-sm"
+              disabled={!reachable || remoteSyncing}
+              onClick={() => void refreshRemoteEnvironments()}
+            >
+              <RotateCw size={11.5} className={remoteSyncing ? 'gb-spin' : undefined} />
+              <span>{t('common.refresh')}</span>
+            </button>
+            <button
+              type="button"
+              className="gb-btn gb-btn-ghost gb-btn-sm"
+              onClick={() => setActivePage('usage')}
+            >
+              <span>{t('overview.ssh.view_btn')}</span>
+            </button>
+          </div>
+        </div>
       )}
 
       {/* Hero Account & Quota Card */}

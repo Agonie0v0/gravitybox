@@ -1,6 +1,6 @@
 use crate::antigravity::{
-    get_antigravity_info, is_antigravity_running, launch_antigravity, quit_antigravity_and_wait,
-    safe_relaunch_antigravity, AntigravityInfo, SafeRelaunchResult,
+    get_antigravity_info, is_antigravity_running, launch_antigravity, quit_antigravity_detailed,
+    safe_relaunch_antigravity, AntigravityInfo, GracefulCloseOutcome, SafeRelaunchResult,
 };
 use crate::autostart;
 use crate::backend::BackendManager;
@@ -52,7 +52,7 @@ pub async fn get_app_info(backend: State<'_, Arc<BackendManager>>) -> Result<App
         AppInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             state_dir: mgr.state_dir.to_string_lossy().to_string(),
-            pipe_name: mgr.pipe_name.clone(),
+            pipe_name: mgr.current_pipe_name(),
             os_label,
             antigravity: ag,
         }
@@ -62,8 +62,11 @@ pub async fn get_app_info(backend: State<'_, Arc<BackendManager>>) -> Result<App
 }
 
 #[tauri::command]
-pub async fn launch_antigravity_cmd() -> Result<(), String> {
-    tokio::task::spawn_blocking(launch_antigravity)
+pub async fn launch_antigravity_cmd(
+    backend: State<'_, Arc<BackendManager>>,
+) -> Result<(), String> {
+    let state_dir = backend.state_dir.clone();
+    tokio::task::spawn_blocking(move || launch_antigravity(Some(state_dir.as_path())))
         .await
         .map_err(|e| format!("启动失败: {}", e))?
 }
@@ -71,23 +74,32 @@ pub async fn launch_antigravity_cmd() -> Result<(), String> {
 #[tauri::command]
 pub async fn safe_relaunch_antigravity_cmd(
     backend: State<'_, Arc<BackendManager>>,
+    confirm_background_exit: Option<bool>,
 ) -> Result<SafeRelaunchResult, String> {
     let res_dir = backend.resource_dir().map(|p| p.to_path_buf());
-    tokio::task::spawn_blocking(move || safe_relaunch_antigravity(res_dir.as_deref()))
-        .await
-        .map_err(|e| format!("安全重启失败: {}", e))?
+    let state_dir = backend.state_dir.clone();
+    let confirmed = confirm_background_exit.unwrap_or(false);
+    tokio::task::spawn_blocking(move || {
+        safe_relaunch_antigravity(res_dir.as_deref(), Some(state_dir.as_path()), confirmed)
+    })
+    .await
+    .map_err(|e| format!("安全重启失败: {}", e))?
 }
 
 #[tauri::command]
 pub async fn quit_antigravity_and_wait_cmd(
     backend: State<'_, Arc<BackendManager>>,
     timeout_ms: Option<u64>,
-) -> Result<bool, String> {
+    confirm_background_exit: Option<bool>,
+) -> Result<GracefulCloseOutcome, String> {
     let res_dir = backend.resource_dir().map(|p| p.to_path_buf());
     let timeout = timeout_ms.unwrap_or(18_000).clamp(1_000, 35_000);
-    tokio::task::spawn_blocking(move || quit_antigravity_and_wait(res_dir.as_deref(), timeout))
-        .await
-        .map_err(|e| format!("等待 Antigravity 退出失败: {}", e))?
+    let confirmed = confirm_background_exit.unwrap_or(false);
+    tokio::task::spawn_blocking(move || {
+        quit_antigravity_detailed(res_dir.as_deref(), timeout, confirmed)
+    })
+    .await
+    .map_err(|e| format!("等待 Antigravity 退出失败: {}", e))?
 }
 
 #[tauri::command]

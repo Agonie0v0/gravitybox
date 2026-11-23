@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BarChart2, Download, FileText, RotateCw, Tag } from 'lucide-react';
+import { BarChart2, Download, FileText, RotateCw, Server, Tag } from 'lucide-react';
 import { DONUT_PALETTE, DonutChart, type DonutSlice } from '../components/DonutChart';
 import { BrandIcons } from '../components/ModelIcon';
 import { TrendChart, type TrendBarPoint } from '../components/TrendChart';
@@ -14,8 +14,12 @@ import {
   sortModelsByUsage,
   usageScopeText,
 } from '../lib/format';
+import {
+  normalizeSshEnvironment,
+  sshStateSortOrder,
+} from '../lib/ssh';
 import { pickSaveJsonPath, saveJsonFile } from '../lib/tauri';
-import type { UsagePeriodKey } from '../lib/types';
+import type { UsagePeriodKey, UsageSummaryReply } from '../lib/types';
 import { PricingSyncModal } from '../sheets/PricingSyncModal';
 import { UsageLogModal } from '../sheets/UsageLogModal';
 
@@ -30,23 +34,61 @@ export function UsagePage() {
     usageByPeriod,
     usageLoading,
     usageErrors,
+    sshEnvironments,
+    remoteSyncing,
     fetchUsage,
+    refreshRemoteEnvironments,
     showToast,
   } = useApp();
 
   const [period, setPeriod] = useState<UsagePeriodKey>('today');
+  const [environmentId, setEnvironmentId] = useState<string>('all');
+  const [scopedReport, setScopedReport] = useState<UsageSummaryReply | null>(null);
   const [chartMetric, setChartMetric] = useState<'tokens' | 'requests' | 'cost'>('tokens');
   const [hoveredPt, setHoveredPt] = useState<TrendBarPoint | null>(null);
   const [logOpen, setLogOpen] = useState(false);
   const [pricingOpen, setPricingOpen] = useState(false);
 
-  useEffect(() => {
-    if (reachable) {
-      void fetchUsage(period, false);
+  const normalizedSshHosts = useMemo(() => {
+    const fallback = t('ssh.remote_fallback');
+    const seen = new Map<string, ReturnType<typeof normalizeSshEnvironment>>();
+    for (const env of sshEnvironments) {
+      const norm = normalizeSshEnvironment(env, fallback);
+      if (norm.id) seen.set(norm.id, norm);
     }
-  }, [period, reachable, fetchUsage]);
+    const baseReport = usageByPeriod[period];
+    for (const av of baseReport?.availableEnvironments ?? []) {
+      const norm = normalizeSshEnvironment(av, fallback);
+      if (norm.id && norm.id !== 'local' && norm.id !== 'all' && !seen.has(norm.id)) {
+        seen.set(norm.id, norm);
+      }
+    }
+    return Array.from(seen.values()).sort(
+      (a, b) => sshStateSortOrder(b.state) - sshStateSortOrder(a.state) || a.hostLabel.localeCompare(b.hostLabel),
+    );
+  }, [period, sshEnvironments, t, usageByPeriod]);
 
-  const report = usageByPeriod[period];
+  useEffect(() => {
+    if (!reachable) return;
+    if (environmentId === 'all') {
+      setScopedReport(null);
+      void fetchUsage(period, false);
+    } else {
+      let active = true;
+      void fetchUsage(period, false, environmentId).then((res) => {
+        if (active && res) setScopedReport(res);
+      });
+      return () => {
+        active = false;
+      };
+    }
+  }, [period, environmentId, reachable, fetchUsage]);
+
+  const report = environmentId === 'all' ? usageByPeriod[period] : (scopedReport ?? usageByPeriod[period]);
+  const selectedSshHost = useMemo(
+    () => normalizedSshHosts.find((h) => h.id === environmentId) ?? null,
+    [environmentId, normalizedSshHosts],
+  );
   const loading = Boolean(usageLoading[period]);
   const readError = usageErrors[period];
   const summary = report?.summary ?? {};
@@ -215,7 +257,15 @@ export function UsagePage() {
             type="button"
             className="gb-btn gb-btn-sm"
             disabled={!reachable || loading}
-            onClick={() => void fetchUsage(period, true)}
+            onClick={() => {
+              if (environmentId === 'all') {
+                void fetchUsage(period, true);
+              } else {
+                void fetchUsage(period, true, environmentId).then((res) => {
+                  if (res) setScopedReport(res);
+                });
+              }
+            }}
           >
             <RotateCw size={12} className={loading ? 'gb-spin' : undefined} />
             <span>{t('common.refresh')}</span>
@@ -231,6 +281,95 @@ export function UsagePage() {
           </button>
         </div>
       </div>
+
+      {/* SSH Environment Scope Filter Bar (v1.2.0) */}
+      {normalizedSshHosts.length > 0 && (
+        <div
+          className="gb-card"
+          style={{
+            padding: '9px 13px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 10,
+            flexWrap: 'wrap',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)' }}>
+              <Server size={12} />
+              <span>{t('usage.env.label')}</span>
+            </span>
+            <div className="gb-segmented" role="tablist" aria-label={t('usage.env.a11y')}>
+              <button
+                type="button"
+                className={`gb-segmented-btn ${environmentId === 'all' ? 'active' : ''}`}
+                onClick={() => setEnvironmentId('all')}
+              >
+                {t('usage.env.all_chip')}
+              </button>
+              <button
+                type="button"
+                className={`gb-segmented-btn ${environmentId === 'local' ? 'active' : ''}`}
+                onClick={() => setEnvironmentId('local')}
+              >
+                {t('usage.env.local_label')}
+              </button>
+              {normalizedSshHosts.slice(0, 4).map((host) => (
+                <button
+                  key={host.id}
+                  type="button"
+                  className={`gb-segmented-btn ${environmentId === host.id ? 'active' : ''}`}
+                  onClick={() => setEnvironmentId(host.id)}
+                >
+                  {host.state === 'offline_recent' || host.state === 'historical_only'
+                    ? t('usage.env.offline_suffix', { label: t('usage.env.ssh_label', { host: host.hostLabel }) })
+                    : t('usage.env.ssh_label', { host: host.hostLabel })}
+                </button>
+              ))}
+            </div>
+            {normalizedSshHosts.length > 4 && (
+              <select
+                className="gb-select"
+                style={{ height: 26, fontSize: 11.5 }}
+                aria-label={t('usage.env.more_hosts_a11y', { count: normalizedSshHosts.length - 4 })}
+                value={normalizedSshHosts.slice(4).some((h) => h.id === environmentId) ? environmentId : ''}
+                onChange={(e) => {
+                  if (e.target.value) setEnvironmentId(e.target.value);
+                }}
+              >
+                <option value="">
+                  {normalizedSshHosts.length - 4 === 1
+                    ? t('usage.env.more_hosts_one')
+                    : t('usage.env.more_hosts_many', { count: normalizedSshHosts.length - 4 })}
+                </option>
+                {normalizedSshHosts.slice(4).map((host) => (
+                  <option key={host.id} value={host.id}>
+                    {t('usage.env.ssh_label', { host: host.hostLabel })}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+          <button
+            type="button"
+            className="gb-btn gb-btn-ghost gb-btn-sm"
+            disabled={!reachable || remoteSyncing}
+            onClick={() => void refreshRemoteEnvironments(environmentId)}
+          >
+            <RotateCw size={11.5} className={remoteSyncing ? 'gb-spin' : undefined} />
+            <span>{locale === 'en' ? 'Sync SSH' : '同步 SSH'}</span>
+          </button>
+        </div>
+      )}
+
+      {selectedSshHost && (selectedSshHost.state === 'offline_recent' || selectedSshHost.state === 'historical_only') && (
+        <div className="gb-subcard" style={{ padding: '8px 12px', fontSize: 11.5, color: 'var(--text-secondary)' }}>
+          {selectedSshHost.state === 'offline_recent'
+            ? t('usage.env.offline_recent_notice', { host: selectedSshHost.hostLabel })
+            : t('usage.env.historical_notice', { host: selectedSshHost.hostLabel })}
+        </div>
+      )}
 
       {/* Full-width Token Usage & Trend Card */}
       <div className="gb-card" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -591,7 +730,12 @@ export function UsagePage() {
         </div>
       )}
 
-      <UsageLogModal open={logOpen} initialPeriod={period} onClose={() => setLogOpen(false)} />
+      <UsageLogModal
+        open={logOpen}
+        initialPeriod={period}
+        initialEnvironmentId={environmentId}
+        onClose={() => setLogOpen(false)}
+      />
       <PricingSyncModal open={pricingOpen} onClose={() => setPricingOpen(false)} />
     </div>
   );
