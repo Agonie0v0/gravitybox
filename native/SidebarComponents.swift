@@ -61,6 +61,7 @@ final class SidebarRowView: NSTableRowView {
 // MARK: - Refined Sidebar Bottom Launcher Button (Matches SidebarRowView geometry & vector SF Symbols)
 final class SidebarLaunchButton: NSButton {
     override var allowsVibrancy: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     private var hoverTracking: NSTrackingArea?
     private let hoverMotion = DesignMotion()
     private let pressMotion = DesignMotion()

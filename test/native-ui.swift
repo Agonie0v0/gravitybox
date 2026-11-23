@@ -6915,6 +6915,66 @@ import Cocoa
             check(slowAccountWaiterCount == 1, "P1-23: original waiter must receive response before queued refetch instead of being dropped")
         }
 
+        // 1.2.0 按钮点击无响应根因回归防护：First-Mouse 全覆盖、PopUpMenu 追踪保护、禁止裸协作激活 NSApp.activate()
+        do {
+            let fmHost = Assistant(state: state.appendingPathComponent("first-mouse-and-activation-regression"))
+            fmHost.configuration = try ConfigurationStore(state: fmHost.state)
+            fmHost.bridge = BackendBridge(resources: state, state: fmHost.state)
+            fmHost.reachable = true
+            fmHost.statusValue = LiveStatus(["mode": "connected", "running": true, "runningChannel": "stable"])
+
+            let fmPrefs = PreferencesController(app: fmHost)
+            check(fmPrefs.languagePopup.acceptsFirstMouse(for: nil), "Regression: Preferences languagePopup must accept first mouse")
+            check(fmPrefs.proxyModePopup.acceptsFirstMouse(for: nil), "Regression: Preferences proxyModePopup must accept first mouse")
+            check(fmPrefs.refresh.acceptsFirstMouse(for: nil), "Regression: Preferences refresh popup must accept first mouse")
+
+            let fmUsage = UsagePage(app: fmHost)
+            check(fmUsage.accountPopup.acceptsFirstMouse(for: nil), "Regression: UsagePage accountPopup must accept first mouse")
+            let fmPeriodSegButtons = findButtons(fmUsage.periodSegment)
+            check(!fmPeriodSegButtons.isEmpty && fmPeriodSegButtons.allSatisfy { $0.acceptsFirstMouse(for: nil) }, "Regression: DesignSegmentedControl SegmentButton must accept first mouse")
+
+            let fmCache = CachePage(app: fmHost)
+            check(fmCache.retentionPopup.acceptsFirstMouse(for: nil), "Regression: CachePage retentionPopup must accept first mouse")
+            check(fmCache.runtimeInfoButton.acceptsFirstMouse(for: nil) && fmCache.historyInfoButton.acceptsFirstMouse(for: nil), "Regression: MaintenanceInfoButton must accept first mouse")
+
+            let fmSshPicker = EnvironmentPickerControl()
+            check(fmSshPicker.popUpButton.acceptsFirstMouse(for: nil), "Regression: EnvironmentPickerControl popUpButton must accept first mouse")
+
+            let fmSidebarBtn = SidebarLaunchButton(title: "打开 Antigravity", target: nil, action: #selector(Assistant.openAntigravity))
+            check(fmSidebarBtn.acceptsFirstMouse(for: nil), "Regression: SidebarLaunchButton must accept first mouse")
+            let fmInlineBtn = DesignInlineButton(title: "查看", target: nil, action: #selector(Assistant.openAntigravity))
+            check(fmInlineBtn.acceptsFirstMouse(for: nil), "Regression: DesignInlineButton must accept first mouse")
+
+            let fmOverview = DashboardPage(app: fmHost)
+            check(fmOverview.companionMoreButton.acceptsFirstMouse(for: nil), "Regression: DashboardPage companionMoreButton must accept first mouse")
+
+            let fmPolicySheet = AccountPolicySheet(app: fmHost, config: [:]) { }
+            check(fmPolicySheet.strategyPopup.acceptsFirstMouse(for: nil) && fmPolicySheet.modelPopup.acceptsFirstMouse(for: nil), "Regression: AccountPolicySheet popups must accept first mouse")
+
+            let fmUsageLog = UsageLogController(app: fmHost, period: "today")
+            check(fmUsageLog.accountPopup.acceptsFirstMouse(for: nil), "Regression: UsageLogController accountPopup must accept first mouse")
+
+            check(!Design.isTrackingPopUpMenu, "Regression: Design.isTrackingPopUpMenu must default to false")
+            check(Assistant.shouldSuppressMenuPopoverDismiss(isTrackingPopUpMenu: true), "Regression: MenuFloatingPanel dismissal must be suppressed while tracking popup menu")
+            check(!Assistant.shouldSuppressMenuPopoverDismiss(isTrackingPopUpMenu: false), "Regression: MenuFloatingPanel dismissal must be allowed when no popup menu is tracking")
+            check(Assistant.shouldSuppressMenuPopoverDismiss() == Design.isTrackingPopUpMenu, "Regression: default shouldSuppressMenuPopoverDismiss must mirror Design.isTrackingPopUpMenu")
+
+            let nativeDir = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("native", isDirectory: true)
+            let nativeFiles = (try? FileManager.default.contentsOfDirectory(at: nativeDir, includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "swift" }) ?? []
+            check(!nativeFiles.isEmpty, "Regression: must locate native/*.swift files for activation guard")
+            for swiftFile in nativeFiles {
+                let source = try String(contentsOf: swiftFile, encoding: .utf8)
+                check(!source.contains("NSApp.activate()"), "Regression: bare cooperative NSApp.activate() is forbidden in \(swiftFile.lastPathComponent); use Design.activateApplicationForcingFront()")
+                if swiftFile.lastPathComponent != "Design.swift" {
+                    check(!source.contains("NSApp.activate(ignoringOtherApps:"), "Regression: direct NSApp.activate(ignoringOtherApps:) outside Design.swift is forbidden in \(swiftFile.lastPathComponent); use Design.activateApplicationForcingFront()")
+                }
+            }
+        }
+
         let result:[String:Any] = ["stableOnlySelectionPassed":true,"nativeLayouts":captures.count,"captures":captures,"enCaptures":enCaptures,"enExtraCaptures":enExtraCaptures,"menuCaptures":6,"safeSwitchSharedFlowPassed":true,"emailWidthPassed":true,"partialPricingPassed":true,"headlessNoVisibleWindowLeaksPassed":true,"nativeAssertions":assertionCount,"scope":"isolated synthetic AppKit fixture; not installed-app acceptance"]
         window.orderOut(nil)
         assertNoVisibleWindowsOnScreen("after-main-window-orderOut")

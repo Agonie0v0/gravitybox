@@ -55,8 +55,8 @@ final class AccountPolicySheet: NSObject {
     unowned let app: Assistant
     let activeAccount: [String: Any]?
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: AccountPolicySheet.sheetWidth, height: 340), styleMask: [.titled], backing: .buffered, defer: false)
-    let strategyPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    let modelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    let strategyPopup = DesignPopUpButton(frame: .zero, pullsDown: false)
+    let modelPopup = DesignPopUpButton(frame: .zero, pullsDown: false)
     let monitoredSubLabel = text("", size: 11, color: Design.secondary, wrap: true)
     let reserve = PolicyNumberField(string: "")
     let candidate = PolicyNumberField(string: "")

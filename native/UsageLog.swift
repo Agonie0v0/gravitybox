@@ -63,7 +63,7 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
     var searchDebounce: DispatchWorkItem?
     let period = DesignSegmentedControl(labels: [L10n.t("usage.period.today"), L10n.t("usage.period.7d"), L10n.t("usage.period.30d"), L10n.t("usage.period.all")], trackingMode: .selectOne, target: nil, action: nil)
     let environmentPill = EnvironmentContextPill(style: .headerPill, compact: false, minWidth: 68, maxWidth: 180, height: 26)
-    let accountPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    let accountPopup = DesignPopUpButton(frame: .zero, pullsDown: false)
     let filterRow: NSStackView
     var selectedEnvironmentId: String
     var selectedAccountId: String

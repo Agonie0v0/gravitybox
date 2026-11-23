@@ -127,6 +127,7 @@ final class CacheCompositionBar: NSView {
 // MARK: - Subtle HIG Info Disclosure Button & Zero-Inset Interactive Trigger Group
 final class MaintenanceInfoButton: NSButton {
     override var allowsVibrancy: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     var isActivePopover: Bool = false {
         didSet {
             if oldValue != isActivePopover { applyTint() }

@@ -432,7 +432,7 @@ final class UsagePage: NSObject {
     private var remoteSessionsObserver: NSObjectProtocol?
     let environmentPill = EnvironmentContextPill(style: .headerPill, compact: false, minWidth: 68, maxWidth: 180, height: 26)
     let shareNoteLabel = text("", size: 11.5, color: .secondaryLabelColor)
-    let accountPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    let accountPopup = DesignPopUpButton(frame: .zero, pullsDown: false)
     let contextBarRow: NSStackView
     let historicalEnvNoticeBox = DesignCardBox()
     let historicalEnvNoticeLabel = text("", size: 11.5, color: .secondaryLabelColor, wrap: true)

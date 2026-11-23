@@ -3,6 +3,7 @@ import Cocoa
 private final class SourceLinkButton: NSButton {
     let sourceURL: URL
     private var hoverTracking: NSTrackingArea?
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     private var hovered = false {
         didSet {
             if oldValue != hovered { updateAppearance() }
@@ -60,6 +61,7 @@ private final class SourceLinkButton: NSButton {
 
 private final class RetiredToggleButton: NSButton {
     override var allowsVibrancy: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     private let labelFont = NSFont.systemFont(ofSize: 11.5, weight: .medium)
     private var hoverTracking: NSTrackingArea?
     private var hovered = false {

@@ -2411,7 +2411,7 @@ final class EnvironmentPickerControl: NSView {
             equalWidthSegments: false,
             maxSegmentWidth: segMaxW
         )
-        self.popUpButton = NSPopUpButton(frame: .zero, pullsDown: false)
+        self.popUpButton = DesignPopUpButton(frame: .zero, pullsDown: false)
 
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false

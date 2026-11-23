@@ -124,7 +124,7 @@
     "proxy.error.missing_port": "Proxy URL is missing a port number. Use host:port",
     "proxy.error.invalid_port": "Invalid proxy port. Enter an integer between 1 and 65535",
     "settings.refresh.title": "Quota Refresh Interval",
-    "settings.refresh.subtitle": "Periodically refresh active & online SSH quotas; standby accounts refresh in background by auth state or update on switch",
+    "settings.refresh.subtitle": "Periodically refresh local & online SSH quotas; standby accounts require switching once token expires",
     "settings.refresh.manual": "Manual",
     "settings.refresh.5m": "Every 5 min",
     "settings.refresh.10m": "Every 10 min",

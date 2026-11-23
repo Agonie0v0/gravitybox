@@ -124,7 +124,7 @@
     "proxy.error.missing_port": "代理地址缺少端口号，请使用 host:port 格式",
     "proxy.error.invalid_port": "代理端口无效，需为 1–65535 之间的整数",
     "settings.refresh.title": "配额刷新间隔",
-    "settings.refresh.subtitle": "定时刷新当前活跃与在线 SSH 账号的配额；备用账号按授权状态在后台轮询或在切换时更新",
+    "settings.refresh.subtitle": "定时刷新本机与 SSH 在线账号配额；备用账号令牌过期后需切换更新",
     "settings.refresh.manual": "手动刷新",
     "settings.refresh.5m": "每 5 分钟",
     "settings.refresh.10m": "每 10 分钟",

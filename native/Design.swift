@@ -269,6 +269,12 @@ enum Design {
     static var isTrackingPopUpMenu: Bool { activePopUpMenuDepth > 0 }
     static let popUpMenuDidCloseNotification = Notification.Name("GravityBox.DesignPopUpMenuDidClose")
 
+    static func activateApplicationForcingFront() {
+        #if !NATIVE_UI_TEST
+        NSApp.activate(ignoringOtherApps: true)
+        #endif
+    }
+
     static func popUpOrigin(below anchor: NSView, spacing: CGFloat = 6) -> NSPoint {
         let yOffset = anchor.isFlipped ? (anchor.bounds.maxY + spacing) : (anchor.bounds.minY - spacing)
         return NSPoint(x: 0, y: yOffset)
@@ -285,7 +291,7 @@ enum Design {
             }
         } else if let hostWindow = anchor.window, hostWindow.canBecomeKey {
             if !NSApp.isActive {
-                NSApp.activate()
+                activateApplicationForcingFront()
             }
             if !hostWindow.isKeyWindow {
                 hostWindow.makeKeyAndOrderFront(nil)

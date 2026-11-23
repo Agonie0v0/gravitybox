@@ -1,6 +1,14 @@
 import Cocoa
 import QuartzCore
 
+class DesignPopUpButton: NSPopUpButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+class DesignInlineButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 class DesignButton: NSButton {
     private var hoverTracking: NSTrackingArea?
     private let hoverMotion = DesignMotion()
@@ -1136,6 +1144,7 @@ final class DesignSegmentedControl: NSControl {
         override func becomeFirstResponder() -> Bool { let result = super.becomeFirstResponder(); needsDisplay = true; return result }
         override func resignFirstResponder() -> Bool { let result = super.resignFirstResponder(); needsDisplay = true; return result }
         override var allowsVibrancy: Bool { false }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
         let index: Int
         let compact: Bool
         weak var owner: DesignSegmentedControl?

@@ -86,7 +86,7 @@ final class CachePage: NSObject, NSPopoverDelegate {
     let runtimeCacheSwitch = DesignSwitch()
 
     let historyTitleLabel = text(L10n.t("maintenance.simple.scope_history_title"), size: 13, weight: .semibold, color: .labelColor)
-    let retentionPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    let retentionPopup = DesignPopUpButton(frame: .zero, pullsDown: false)
     let historyInfoButton: MaintenanceInfoButton
     let historySubtitleLabel = text(L10n.t("maintenance.simple.scope_history_sub", ["days": 7]), size: 11, color: Design.secondary)
     let historySizeLabel = text("0 B", size: 13, weight: .semibold, color: Design.secondary)
@@ -1054,7 +1054,7 @@ final class CachePage: NSObject, NSPopoverDelegate {
                     if let parentWindow, parentWindow.isVisible {
                         confirm.beginSheetModal(for: parentWindow) { handleChoice($0) }
                     } else {
-                        NSApp.activate(ignoringOtherApps: true)
+                        Design.activateApplicationForcingFront()
                         handleChoice(confirm.runModal())
                     }
                 }
@@ -1194,7 +1194,7 @@ final class CachePage: NSObject, NSPopoverDelegate {
                     if let parentWindow, parentWindow.isVisible {
                         alert.beginSheetModal(for: parentWindow) { handleRestoreChoice($0) }
                     } else {
-                        NSApp.activate(ignoringOtherApps: true)
+                        Design.activateApplicationForcingFront()
                         handleRestoreChoice(alert.runModal())
                     }
                 }

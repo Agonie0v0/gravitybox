@@ -692,6 +692,10 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         #if NATIVE_UI_TEST
         Assistant.configureHeadlessWindowIfNeeded(parent)
         Assistant.configureHeadlessWindowIfNeeded(sheetWindow)
+        #else
+        if !NSApp.isActive {
+            Design.activateApplicationForcingFront()
+        }
         #endif
         parent.beginSheet(sheetWindow) { [weak self, weak sheetWindow] response in
             if let sheetWindow {
@@ -840,10 +844,15 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         #endif
     }
 
+    static func shouldSuppressMenuPopoverDismiss(isTrackingPopUpMenu: Bool = Design.isTrackingPopUpMenu) -> Bool {
+        isTrackingPopUpMenu
+    }
+
     private func installPopoverMonitors() {
         removePopoverMonitors()
         popoverGlobalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
             guard let self, self.isMenuPanelShown else { return }
+            if Self.shouldSuppressMenuPopoverDismiss() { return }
             if NSApp.windows.contains(where: { $0.isVisible && $0.level.rawValue >= NSWindow.Level.popUpMenu.rawValue }) { return }
             let mouseLoc = NSEvent.mouseLocation
             if let popWin = self.menuPanel, popWin.frame.contains(mouseLoc) { return }
@@ -852,6 +861,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         }
         popoverLocalClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
             guard let self, self.isMenuPanelShown else { return event }
+            if Self.shouldSuppressMenuPopoverDismiss() { return event }
             if event.window === self.menuPanel { return event }
             if let btnWin = self.item?.button?.window, event.window === btnWin { return event }
             if let win = event.window, win.level.rawValue >= NSWindow.Level.popUpMenu.rawValue { return event }
@@ -912,6 +922,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         popoverWorkspaceObservers = [
             wsCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
                 guard let self, self.isMenuPanelShown else { return }
+                guard !Self.shouldSuppressMenuPopoverDismiss() else { return }
                 let activeApp = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
                 guard let activePid = activeApp?.processIdentifier, activePid != myPid else { return }
                 // Allow non-activating overlay/screenshot capture utilities (WeChat capture, macOS Screenshot, CleanShot, Xnip) to inspect and snap to the menu panel without auto-closing it; real clicks outside are already handled by popoverGlobalClickMonitor.
@@ -1283,18 +1294,20 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         if window?.isMiniaturized == true {
             window?.deminiaturize(nil)
         }
-        NSApp.activate()
+        Design.activateApplicationForcingFront()
         window?.makeKeyAndOrderFront(nil)
         if wasAccessory {
-            DispatchQueue.main.async { [weak self] in
+            let ensureFrontActivation: () -> Void = { [weak self] in
                 guard let self, let win = self.window, win.isVisible, !self.quitting else { return }
                 if !NSApp.isActive {
-                    NSApp.activate()
+                    Design.activateApplicationForcingFront()
                 }
                 if !win.isKeyWindow {
                     win.makeKeyAndOrderFront(nil)
                 }
             }
+            DispatchQueue.main.async(execute: ensureFrontActivation)
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(80), execute: ensureFrontActivation)
         }
         #endif
         configureRefreshTimer()
@@ -2604,7 +2617,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         }
         guard let rootWindow = self.window else {
             #if !NATIVE_UI_TEST
-            NSApp.activate()
+            Design.activateApplicationForcingFront()
             #endif
             completion(alert.runModal())
             return
@@ -2615,7 +2628,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         Assistant.configureHeadlessWindowIfNeeded(parent)
         Assistant.configureHeadlessWindowIfNeeded(alert.window)
         #else
-        NSApp.activate()
+        Design.activateApplicationForcingFront()
         #endif
         alert.beginSheetModal(for: parent, completionHandler: completion)
     }

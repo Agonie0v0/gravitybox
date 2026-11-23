@@ -211,7 +211,7 @@ final class DashboardPage: NSObject {
     let standaloneQuotaStack = NSStackView()
     private let companionDivider = divider()
     private let companionRowsStack = NSStackView()
-    let companionMoreButton = NSButton(title: "", target: nil, action: nil)
+    let companionMoreButton = DesignInlineButton(title: "", target: nil, action: nil)
     private let companionSection = NSStackView()
     private var companionFingerprint = ""
     private var heroCardBox: NSBox?
@@ -1804,7 +1804,7 @@ final class DashboardPage: NSObject {
             .replacingOccurrences(of: " →", with: "")
             .replacingOccurrences(of: "→", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let viewBtn = NSButton(title: cleanViewTitle, target: self, action: #selector(inspectCompanionHost(_:)))
+        let viewBtn = DesignInlineButton(title: cleanViewTitle, target: self, action: #selector(inspectCompanionHost(_:)))
         viewBtn.isBordered = false
         viewBtn.bezelStyle = .inline
         viewBtn.controlSize = .small
