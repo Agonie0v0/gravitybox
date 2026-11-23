@@ -4,6 +4,7 @@ import { existsSync, lstatSync, readFileSync, writeFileSync, chmodSync, mkdirSyn
 import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import type { LedgerEvent } from './usage-ledger.js';
+import { isOwnedByCurrentUser } from './platform/index.js';
 import {
     aggregateLedger,
     bumpAggregateModelCatalogEpoch,
@@ -76,7 +77,7 @@ function compactUnitPrice(price: any) {
 
 function regular(path: string) {
     const stat = lstatSync(path);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid?.())
+    if (!stat.isFile() || stat.isSymbolicLink() || !isOwnedByCurrentUser(stat))
         throw Error(bt('ledger.err.file_identity_mismatch'));
 }
 interface LegacyBaselineCache {
@@ -320,7 +321,7 @@ function readValidatedLegacyEvents(legacyPath: string): LedgerEvent[] {
         return [];
     }
     const stat = lstatSync(legacyPath);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid?.())
+    if (!stat.isFile() || stat.isSymbolicLink() || !isOwnedByCurrentUser(stat))
         throw Error(bt('ledger.err.file_identity_mismatch'));
     if (stat.size > 64 * 1024 * 1024)
         throw Error(bt('ledger.err.legacy_json_budget'));

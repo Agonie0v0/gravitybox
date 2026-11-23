@@ -25,6 +25,7 @@
     "check:swift": "node tools/native-build.mjs --typecheck",
     "check:privacy": "node tools/check-privacy.mjs",
     "start": "node dist/main.js",
+    "dev:backend": "node tools/dev-backend.mjs",
     "verify": "node tools/verify.mjs",
     "verify:strict": "node tools/verify.mjs --strict",
     "package:mac": "npm run verify && node tools/package-mac.mjs",

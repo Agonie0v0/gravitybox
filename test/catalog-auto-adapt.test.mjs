@@ -1,8 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { antigravityLayout } from '../dist/platform/index.js';
+const OPENSSL_BIN = process.platform === 'win32'
+  ? (process.env.OPENSSL_BIN || (existsSync('C:\\Program Files\\Git\\usr\\bin\\openssl.exe') ? 'C:\\Program Files\\Git\\usr\\bin\\openssl.exe' : 'openssl'))
+  : '/usr/bin/openssl';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { createServer as createHttpServer } from 'node:http';
@@ -393,9 +398,10 @@ test('BundleCache.key 包含 Contents/Resources/bin/language_server，噪声过�
   // 1. BundleCache.key() 感知 language_server 变化
   const dir = await mkdtemp(join(tmpdir(), 'gb-cache-ls-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  await mkdir(join(dir, 'Contents/Resources/bin'), { recursive: true });
-  await writeFile(join(dir, 'Contents/Resources/app.asar'), 'same-asar');
-  await writeFile(join(dir, 'Contents/Resources/bin/language_server'), 'ls-v1');
+  const layout = antigravityLayout(dir);
+  await mkdir(dirname(layout.languageServerPath), { recursive: true });
+  await writeFile(layout.asarPath, 'same-asar');
+  await writeFile(layout.languageServerPath, 'ls-v1');
 
   let reads = 0;
   const fetcher = async () => ({ hash: `h-${++reads}`, source: 'body', bytes: 4 });
@@ -406,7 +412,7 @@ test('BundleCache.key 包含 Contents/Resources/bin/language_server，噪声过�
   await cache.read(dir, 100, '2.34.0', 'https://127.0.0.1:443', fetcher);
   assert.equal(reads, 1);
   // 仅更新 language_server（app.asar 未变）必须使缓存失效
-  await writeFile(join(dir, 'Contents/Resources/bin/language_server'), 'ls-v2-updated-payload');
+  await writeFile(layout.languageServerPath, 'ls-v2-updated-payload');
   await cache.read(dir, 100, '2.34.0', 'https://127.0.0.1:443', fetcher);
   assert.equal(reads, 2);
 
@@ -462,7 +468,7 @@ test('Controller 未收录高覆盖率版本（>=85%）自动启用全量翻译�
 
   const keyPath = join(dir, 'key.pem');
   const certPath = join(dir, 'cert.pem');
-  await execFileAsync('/usr/bin/openssl', [
+  await execFileAsync(OPENSSL_BIN, [
     'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
     '-keyout', keyPath, '-out', certPath, '-days', '1', '-subj', '/CN=127.0.0.1',
   ]);

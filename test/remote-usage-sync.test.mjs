@@ -481,7 +481,9 @@ test('本机账号 A 与远端账号 B 独立观测时间线隔离：精准判�
     // 验证磁盘隔离与 0o600 权限
     assert.equal(await readFile(localObsPath, 'utf8'), localObsPayload, '本机观测文件不得被远端 store 污染');
     const remoteObsStat = await stat(join(dir, 'usage-remote-observations.json'));
-    assert.equal(remoteObsStat.mode & 0o777, 0o600);
+    if (process.platform !== 'win32') {
+      assert.equal(remoteObsStat.mode & 0o777, 0o600);
+    }
 
     // 重新从磁盘加载（模拟重启恢复）再验证全部分段判定
     const reloaded = new RemoteAccountObservationStore({ stateDir: dir });
@@ -883,7 +885,7 @@ test('Controller.getConnectedRemoteRpcTargets 只读导出目标并驱动 Coordi
 
   const controller = new Controller({
     appPath: fakeAppPath,
-    profile: '/tmp/nonexistent-profile',
+    profile: join(fakeAppRoot, 'profile'),
     dictionary: dict,
     hudEnabled: false,
     discoverEndpoint: async () => ({

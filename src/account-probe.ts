@@ -3,8 +3,15 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as https from 'node:https';
 import * as http from 'node:http';
-import { applicationTarget, matchingTargetForLanguageServerCommand, type ApplicationTarget } from './application-target.js';
-import { resolveVerifiedLanguageServerPorts } from './discovery.js';
+import {
+  applicationTarget,
+  isLanguageServerCommandForTarget,
+  matchingTargetForLanguageServerCommand,
+  resolveBundleLayout,
+  type ApplicationTarget,
+} from './application-target.js';
+import { inspectBundle, resolveVerifiedLanguageServerPorts } from './discovery.js';
+import { isWindows, lsInspect, pathsEqual, type Win32LsProcess } from './platform/index.js';
 import { SqliteReadSnapshot } from './sqlite-read.js';
 import {
   applyFamilyWindows,
@@ -35,6 +42,7 @@ export type ExecFileLike = (
 export type ProbeLiveLanguageServerOptions = {
   forceRefresh?: boolean;
   execFileImpl?: ExecFileLike;
+  lsInspectImpl?: () => Promise<Win32LsProcess[]>;
 };
 
 export type LanguageServerCandidate = {
@@ -151,17 +159,19 @@ export type CloudProviderContext = { origin: string; userAgent: string; appVersi
 const CLOUD_ORIGINS = new Set(['https://cloudcode-pa.googleapis.com', 'https://daily-cloudcode-pa.googleapis.com', 'https://daily-cloudcode-pa.sandbox.googleapis.com']);
 
 export function cloudOriginFromCommand(command: string, target = applicationTarget()): string | null {
-  if (!command.startsWith(target.appPath + '/Contents/Resources/bin/language_server ')) return null;
-  const dataDirectory = command.match(/(?:^|\s)--app_data_dir(?:=|\s+)([^\s"]+)/)?.[1];
-  if (dataDirectory && dataDirectory !== target.dataDirectoryName) return null;
-  const value = command.match(/(?:^|\s)--cloud_code_endpoint(?:=|\s+)([^\s"]+)/)?.[1];
-  return value && CLOUD_ORIGINS.has(value.replace(/\/$/, '')) ? value.replace(/\/$/, '') : null;
+  if (!isLanguageServerCommandForTarget(command, target)) return null;
+  const value = command.match(/(?:^|\s)--cloud_code_endpoint(?:=|\s+)(?:"([^"]+)"|([^\s"]+))/);
+  const raw = value?.[1] ?? value?.[2];
+  return raw && CLOUD_ORIGINS.has(raw.replace(/\/$/, '')) ? raw.replace(/\/$/, '') : null;
 }
 
 /** The hub component is significant: omitting it makes CCPA return a different model/quota catalogue. */
 export function cloudProviderContextFromCommand(command: string, appVersion: string, target = applicationTarget()): CloudProviderContext | null {
   const origin = cloudOriginFromCommand(command, target);
-  const option = (name: string) => command.match(new RegExp('(?:^|\\s)--' + name + '(?:=|\\s+)([^\\s"]+)'))?.[1];
+  const option = (name: string) => {
+    const m = command.match(new RegExp('(?:^|\\s)--' + name + '(?:=|\\s+)(?:"([^"]+)"|([^\\s"]+))'));
+    return m?.[1] ?? m?.[2];
+  };
   const clientSubType = option('subclient_type') ?? '';
   if (!origin || !/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(appVersion)
     || (clientSubType !== '' && !/^[a-z][a-z0-9_-]{0,31}$/.test(clientSubType))
@@ -180,7 +190,9 @@ export function validCachedCloudProviderContext(value: any, appVersion: string, 
   if (!value || value.identityVersion !== 2 || !CLOUD_ORIGINS.has(value.origin)
     || typeof value.clientSubType !== 'string'
     || (value.clientSubType !== '' && !/^[a-z][a-z0-9_-]{0,31}$/.test(value.clientSubType))) return false;
-  const expected = cloudProviderContextFromCommand(target.appPath + '/Contents/Resources/bin/language_server --cloud_code_endpoint '
+  const lsPath = resolveBundleLayout(target.appPath).languageServerPath;
+  const commandPrefix = /\s/.test(lsPath) ? `"${lsPath}"` : lsPath;
+  const expected = cloudProviderContextFromCommand(commandPrefix + ' --cloud_code_endpoint '
     + value.origin + (value.clientSubType ? ' --subclient_type ' + value.clientSubType : ''), appVersion, target);
   return !!expected && value.appVersion === expected.appVersion && value.userAgent === expected.userAgent;
 }
@@ -650,8 +662,44 @@ export async function probeLiveLanguageServerOnce(
       cachedLiveEndpoint = null;
     }
 
-    const execFileFn = options?.execFileImpl ?? defaultExecFile;
     const useVerifiedBundlePorts = fetchImpl === globalThis.fetch;
+
+    if (options?.lsInspectImpl || (isWindows() && !options?.execFileImpl)) {
+      const inspectFn = options?.lsInspectImpl ?? (() => lsInspect());
+      const layout = resolveBundleLayout(target.appPath);
+      const processes = await inspectFn();
+      const verifiedApps = new Set<string>();
+      for (const proc of processes) {
+        if (!Number.isSafeInteger(proc.pid) || proc.pid <= 0) continue;
+        const matchedTarget = proc.cmdLine
+          ? matchingTargetForLanguageServerCommand(proc.cmdLine, target)
+          : pathsEqual(proc.exePath, layout.languageServerPath, 'win32')
+            ? target
+            : null;
+        if (!matchedTarget) continue;
+        const matchedLayout = resolveBundleLayout(matchedTarget.appPath);
+        if (proc.exePath && !pathsEqual(proc.exePath, matchedLayout.languageServerPath, 'win32')) continue;
+        if (useVerifiedBundlePorts && !verifiedApps.has(matchedTarget.appPath)) {
+          try {
+            await inspectBundle(matchedTarget.appPath);
+            verifiedApps.add(matchedTarget.appPath);
+          } catch {
+            continue;
+          }
+        }
+        const csrfToken = proc.csrfToken?.trim() || extractCsrfTokenFromCommand(proc.cmdLine || '');
+        if (!csrfToken) continue;
+        const ports = Array.from(
+          new Set((proc.ports ?? []).filter((p) => Number.isInteger(p) && p >= 1 && p <= 65535)),
+        );
+        if (ports.length === 0) continue;
+        const liveStatus = await tryPortList(proc.pid, csrfToken, ports);
+        if (liveStatus) return liveStatus;
+      }
+      return null;
+    }
+
+    const execFileFn = options?.execFileImpl ?? defaultExecFile;
     const { stdout: psOut } = await execFileFn('/bin/ps', ['-ax', '-ww', '-o', 'pid=,args='], { timeout: 3000 });
     const candidates = collectLanguageServerCandidates(psOut, target);
 

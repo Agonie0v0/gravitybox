@@ -200,7 +200,12 @@ function createConvSchema(db) {
 
 test('(a) 主对话完全隔离 BTW：即使 BTW 出现在 conversation_parents 中，主对话与 summariesLookup 均不得把 BTW 计入子智能体', async (t) => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-btw-a-'));
-  t.after(() => fs.rmSync(baseDir, { recursive: true, force: true }));
+  const openDbs = [];
+  const trackDb = (p) => { const d = new DatabaseSync(p); openDbs.push(d); return d; };
+  t.after(() => {
+    for (const d of openDbs) { try { d.close(); } catch {} }
+    fs.rmSync(baseDir, { recursive: true, force: true });
+  });
   const convDir = path.join(baseDir, 'conversations');
   fs.mkdirSync(convDir, { recursive: true });
 
@@ -213,8 +218,7 @@ test('(a) 主对话完全隔离 BTW：即使 BTW 出现在 conversation_parents 
 
   // conversation_summaries.db: subagent 在两张表都有；BTW 只在 conversation_parents，不在 conversation_summaries
   const sumDbPath = path.join(baseDir, 'conversation_summaries.db');
-  const sumDb = new DatabaseSync(sumDbPath);
-  t.after(() => { try { sumDb.close(); } catch {} });
+  const sumDb = trackDb(sumDbPath);
   sumDb.exec(`
     CREATE TABLE conversation_parents (conversation_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL);
     CREATE TABLE conversation_summaries (
@@ -241,16 +245,14 @@ test('(a) 主对话完全隔离 BTW：即使 BTW 出现在 conversation_parents 
 
   // 无 conversation_summaries 表时的向后兼容
   const legacySumPath = path.join(baseDir, 'legacy_summaries.db');
-  const legacySumDb = new DatabaseSync(legacySumPath);
-  t.after(() => { try { legacySumDb.close(); } catch {} });
+  const legacySumDb = trackDb(legacySumPath);
   legacySumDb.exec('CREATE TABLE conversation_parents (conversation_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL);');
   legacySumDb.prepare('INSERT INTO conversation_parents VALUES (?, ?)').run(subId, mainId);
   const legacyLookup = await runSummariesLookupInWorker({ dbPath: legacySumPath, parentIds: [mainId] });
   assert.deepEqual(legacyLookup?.childIds, [subId]);
 
   // 主对话 DB
-  const mainDb = new DatabaseSync(path.join(convDir, `${mainId}.db`));
-  t.after(() => { try { mainDb.close(); } catch {} });
+  const mainDb = trackDb(path.join(convDir, `${mainId}.db`));
   createConvSchema(mainDb);
   mainDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?, ?, 1)').run(mainTrajId, mainId, 4);
   mainDb.prepare('INSERT INTO steps VALUES (0, 14, 3, ?, NULL, NULL)').run(
@@ -276,8 +278,7 @@ test('(a) 主对话完全隔离 BTW：即使 BTW 出现在 conversation_parents 
   );
 
   // 真实子智能体 DB
-  const subDb = new DatabaseSync(path.join(convDir, `${subId}.db`));
-  t.after(() => { try { subDb.close(); } catch {} });
+  const subDb = trackDb(path.join(convDir, `${subId}.db`));
   createConvSchema(subDb);
   subDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?, ?, 1)').run(subId, subId, 4);
   subDb.prepare('INSERT INTO trajectory_metadata_blob VALUES (?, ?)').run(
@@ -297,8 +298,7 @@ test('(a) 主对话完全隔离 BTW：即使 BTW 出现在 conversation_parents 
   );
 
   // BTW DB (trajectory_type=22)，包含克隆前缀 + 自身新步骤（巨额 token，绝不能污染主对话）
-  const btwDb = new DatabaseSync(path.join(convDir, `${btwId}.db`));
-  t.after(() => { try { btwDb.close(); } catch {} });
+  const btwDb = trackDb(path.join(convDir, `${btwId}.db`));
   createConvSchema(btwDb);
   btwDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?, ?, 1)').run(btwTrajId, btwId, 22);
   btwDb.prepare('INSERT INTO parent_references VALUES (0, ?)').run(
@@ -350,7 +350,12 @@ test('(a) 主对话完全隔离 BTW：即使 BTW 出现在 conversation_parents 
 
 test('(b) & (c) & (d) BTW 精确切片 idx > forkStepIndex、零新步回退上下文基线、升级后连续以及 BTW 自身子智能体聚合', async (t) => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-btw-bcd-'));
-  t.after(() => fs.rmSync(baseDir, { recursive: true, force: true }));
+  const openDbs = [];
+  const trackDb = (p) => { const d = new DatabaseSync(p); openDbs.push(d); return d; };
+  t.after(() => {
+    for (const d of openDbs) { try { d.close(); } catch {} }
+    fs.rmSync(baseDir, { recursive: true, force: true });
+  });
   const convDir = path.join(baseDir, 'conversations');
   fs.mkdirSync(convDir, { recursive: true });
 
@@ -365,8 +370,7 @@ test('(b) & (c) & (d) BTW 精确切片 idx > forkStepIndex、零新步回退上�
   const nowSec = Math.floor(Date.now() / 1000);
 
   // 辅助子代理 DB：一个挂在 mainId（预分叉克隆），一个挂在 btwActiveId（BTW 自己派生的子代理）
-  const parentSubDb = new DatabaseSync(path.join(convDir, `${parentSubId}.db`));
-  t.after(() => { try { parentSubDb.close(); } catch {} });
+  const parentSubDb = trackDb(path.join(convDir, `${parentSubId}.db`));
   createConvSchema(parentSubDb);
   parentSubDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?, ?, 1)').run(parentSubId, parentSubId, 4);
   parentSubDb.prepare('INSERT INTO trajectory_metadata_blob VALUES (?, ?)').run(
@@ -381,8 +385,7 @@ test('(b) & (c) & (d) BTW 精确切片 idx > forkStepIndex、零新步回退上�
     })
   );
 
-  const btwSubDb = new DatabaseSync(path.join(convDir, `${btwSubId}.db`));
-  t.after(() => { try { btwSubDb.close(); } catch {} });
+  const btwSubDb = trackDb(path.join(convDir, `${btwSubId}.db`));
   createConvSchema(btwSubDb);
   btwSubDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?, ?, 1)').run(btwSubId, btwSubId, 4);
   btwSubDb.prepare('INSERT INTO trajectory_metadata_blob VALUES (?, ?)').run(
@@ -402,8 +405,7 @@ test('(b) & (c) & (d) BTW 精确切片 idx > forkStepIndex、零新步回退上�
 
   // (c) 刚分叉尚未发消息的 BTW (0 post-fork steps):
   // 前缀 idx 0..3 包含 1 个 USER_INPUT、1 个 CHECKPOINT 压缩、1 个模型步 (100k context)、1 个工具步
-  const btwNewDb = new DatabaseSync(path.join(convDir, `${btwNewId}.db`));
-  t.after(() => { try { btwNewDb.close(); } catch {} });
+  const btwNewDb = trackDb(path.join(convDir, `${btwNewId}.db`));
   createConvSchema(btwNewDb);
   btwNewDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?, ?, 1)').run(btwNewTrajId, btwNewId, 22);
   btwNewDb.prepare('INSERT INTO parent_references VALUES (0, ?)').run(
@@ -497,8 +499,7 @@ test('(b) & (c) & (d) BTW 精确切片 idx > forkStepIndex、零新步回退上�
 
   // (b) 有分叉后自身对话轮次/步骤/Token/耗时/费用 + 预分叉父子代理不计入 + BTW 自身子代理计入
   const btwActiveDbPath = path.join(convDir, `${btwActiveId}.db`);
-  const btwActiveDb = new DatabaseSync(btwActiveDbPath);
-  t.after(() => { try { btwActiveDb.close(); } catch {} });
+  const btwActiveDb = trackDb(btwActiveDbPath);
   createConvSchema(btwActiveDb);
   btwActiveDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?, ?, 1)').run(
     btwActiveTrajId,
@@ -645,7 +646,12 @@ test('(b) & (c) & (d) BTW 精确切片 idx > forkStepIndex、零新步回退上�
 
 test('(e) 普通 trajectory_type=4 自引用及 uint64 -1 forkStepIndex 不得被误判为 BTW 或切片', async (t) => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-btw-e-'));
-  t.after(() => fs.rmSync(baseDir, { recursive: true, force: true }));
+  const openDbs = [];
+  const trackDb = (p) => { const d = new DatabaseSync(p); openDbs.push(d); return d; };
+  t.after(() => {
+    for (const d of openDbs) { try { d.close(); } catch {} }
+    fs.rmSync(baseDir, { recursive: true, force: true });
+  });
   const convDir = path.join(baseDir, 'conversations');
   fs.mkdirSync(convDir, { recursive: true });
 
@@ -655,8 +661,7 @@ test('(e) 普通 trajectory_type=4 自引用及 uint64 -1 forkStepIndex 不得�
   const nowSec = Math.floor(Date.now() / 1000);
 
   const dbPath = path.join(convDir, `${normalId}.db`);
-  const db = new DatabaseSync(dbPath);
-  t.after(() => { try { db.close(); } catch {} });
+  const db = trackDb(dbPath);
   createConvSchema(db);
   db.prepare('INSERT INTO trajectory_meta VALUES (?, ?, ?, 1)').run(normalTrajId, normalId, 4);
   // Trap 1a: parentCascadeId === selfCascadeId 且有效 forkStepIndex=1
@@ -738,7 +743,14 @@ test('(e) 普通 trajectory_type=4 自引用及 uint64 -1 forkStepIndex 不得�
 
 test('(f) CdpHudBridge 独立管理 paneKind: "btw" 生命周期与指标隔离 + 远端 BTW 识别隔离', async (t) => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-btw-f-'));
-  t.after(() => fs.rmSync(baseDir, { recursive: true, force: true }));
+  const openDbs = [];
+  let bridge;
+  const trackDb = (p) => { const d = new DatabaseSync(p); openDbs.push(d); return d; };
+  t.after(() => {
+    try { bridge?.dispose(); } catch {}
+    for (const d of openDbs) { try { d.close(); } catch {} }
+    fs.rmSync(baseDir, { recursive: true, force: true });
+  });
   const convDir = path.join(baseDir, 'conversations');
   fs.mkdirSync(convDir, { recursive: true });
 
@@ -746,9 +758,8 @@ test('(f) CdpHudBridge 独立管理 paneKind: "btw" 生命周期与指标隔离 
   const btwId = '20202020-2020-4020-8020-202020202020';
   const nowSec = Math.floor(Date.now() / 1000);
 
-  const mainDb = new DatabaseSync(path.join(convDir, `${mainId}.db`));
-  const btwDb = new DatabaseSync(path.join(convDir, `${btwId}.db`));
-  t.after(() => { try { mainDb.close(); } catch {} try { btwDb.close(); } catch {} });
+  const mainDb = trackDb(path.join(convDir, `${mainId}.db`));
+  const btwDb = trackDb(path.join(convDir, `${btwId}.db`));
   createConvSchema(mainDb);
   createConvSchema(btwDb);
 
@@ -789,8 +800,7 @@ test('(f) CdpHudBridge 独立管理 paneKind: "btw" 生命周期与指标隔离 
 
   const sent = [];
   const engine = new ConversationMetricsEngine({ conversationsDir: convDir });
-  const bridge = new CdpHudBridge({ engine, pollIntervalMs: 0 });
-  t.after(() => bridge.dispose());
+  bridge = new CdpHudBridge({ engine, pollIntervalMs: 0 });
 
   await bridge.attachToTarget(
     'win-1',

@@ -431,7 +431,9 @@ test('syncRemoteSessionUsage 产物零令牌/零 Prompt 脱敏与 0o600 落盘�
 
     const obsPath = join(tempStateDir, 'usage-remote-observations.json');
     const obsStat = await stat(obsPath);
-    assert.equal(obsStat.mode & 0o777, 0o600);
+    if (process.platform !== 'win32') {
+      assert.equal(obsStat.mode & 0o777, 0o600);
+    }
     const obsDiskContent = await readFile(obsPath, 'utf8');
     const serialized = `${JSON.stringify(result)}\n${obsDiskContent}`;
 
