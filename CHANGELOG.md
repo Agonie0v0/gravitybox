@@ -12,14 +12,15 @@
 - **SSH 远程窗口零外部 `ssh` 适配**：通过本机 CDP 通道适配 Antigravity `2.33.0+` SSH 远程窗口（不拉起外部 `ssh` 进程），提供完整双语热适配、实时 HUD（含降级状态）、与本机隔离的 `本机 / SSH: <host>` 只读配额查看及活跃 SSH 保护提醒（`src/ssh-context.ts` / `src/ssh-remote-rpc.ts`）。
 - **本机 + SSH 统一多环境用量账本**：保持 `PRAGMA user_version = 2` 兼容，新增 `sync_receipts` 原子提交与同源 RPC 增量同步（按 `trajectoryId` 去重并基于时间线判定账号归属），上线合并总览、`本机 % · SSH %` 占比与 `environmentId × accountId` 筛选（`src/remote-usage-sync.ts` / `src/usage-ledger.ts`）。
 - **HTTP / HTTPS 网络代理支持**：支持关闭、跟随 macOS 系统代理或手动配置 `http(s)://` 代理，为 Antigravity 注入环境变量并检测运行中进程的代理生效与 Shell 覆盖状态（`src/proxy.ts` / `native/SystemProxy.swift`）。
-- **Antigravity `2.34.0` 正式包与 BTW 侧边提问支持**：收录 `2.34.0` 官方指纹与词典补全（`ui-strings/2.34.0.json`），支持 BTW 侧边提问独立分栏 HUD 观测与克隆前缀去重计费。
+- **Antigravity `2.34.0` 收录、BTW 分栏与目录更新**：收录 `2.34.0` 官方指纹与词典（`ui-strings/2.34.0.json`），支持 BTW 侧边提问分栏 HUD 观测与克隆前缀去重计费；为 `gemini-2.5-pro` 补全 `> 200K` 上下文阶梯定价、移除 `gpt-oss-120b`，并放宽未来模型前缀识别与过滤非商业订阅等级标签（`src/pricing.ts` / `assets/model-catalog.json`）。
 
 ### Changed
-- **SSH 多主机 UI 优化**：总览页新增伴生 SSH 主机列表与下钻顶栏、菜单栏支持可展开范围切换胶囊、用量页内嵌环境占比条、账号页新增远端只读卡片（`native/`）。
+- **启动方式重构为「启动时自动打开 Antigravity」**：因新版 Antigravity 官方应用默认不再开启调试端口（且本工具坚持不修改官方安装包），原「跟随 Antigravity 启停」已替换为 **「启动时自动打开 Antigravity」**（打开 GravityBox 时自动驻留菜单栏并拉起带调试端口的 Antigravity），同时将安全重启等待放宽至 15 秒并防止重复触发（`native/Configuration.swift` / `native/AssistantProcessLifecycle.swift` / `native/Preferences.swift`）。
+- **SSH 多主机 UI 与用量展示统一**：总览页新增伴生 SSH 主机列表与下钻顶栏、菜单栏支持可展开范围切换胶囊、用量页内嵌环境占比条、账号页新增远端只读卡片，并统一主界面与菜单栏的「部分计价 / 未计价」及「缓存命中率」展示口径（`native/Presentation.swift`）。
 
 ### Fixed
 - **`sqlite-worker` 稳定性修复（`#26`，致谢 `@Agonie0v0`）**：修复无活跃事务关闭连接时的句柄泄漏，并优化中等 BLOB 的单次切片读取（`src/sqlite-worker.ts`）。
-- **原生交互与本地化/安全加固**：完善 `firstMouse` 首次点击响应、`NSMenu` 弹窗锚定与收起行为；隔离 IDE 内联/非内联翻译模板并新增组合式回退，同时加固切号回滚与维护进程守卫。
+- **原生交互与本地化/安全加固**：完善 `firstMouse` 首次点击响应、`NSMenu` 弹窗锚定与收起行为；隔离 IDE 内联/非内联翻译模板并新增组合式回退，同时加固切号回滚与维护进程守卫（进程探测为 `unknown` 时拒绝清理）。
 
 ## [1.1.3] - 2026-11-21
 
