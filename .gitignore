@@ -6,7 +6,6 @@
 *~
 .env
 .env.*
-!.env.example
 
 # Regenerable dependencies, builds and verification output
 /node_modules/
