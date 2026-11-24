@@ -2146,6 +2146,187 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
     assert.equal(await text(main, '#p0-reuse-link'), 'Settings');
     await main.evaluate('document.querySelector("#p0-reuse-wrap")?.remove()');
   });
+  await check('本地权限四档体系化翻译与默认徽章隔离', async () => {
+    const tree = await main.send('Page.getFrameTree');
+    const ctx = await main.send('Page.createIsolatedWorld', { frameId: tree.frameTree.frame.id, worldName: 'GRAVITYBOX-localization-v1' });
+    await main.evaluate(`(() => {
+      document.body.insertAdjacentHTML('beforeend',
+        '<div id="perm-preset-test">' +
+          '<button id="perm-trigger-turbo" aria-label="Agent permissions preset selector, current: Turbo"><span>Turbo</span></button>' +
+          '<button id="perm-trigger-default" aria-label="Agent permissions preset selector, current: Default"><span>Default</span></button>' +
+          '<button id="perm-outside-default">Default</button>' +
+          '<button id="perm-outside-review">Request Review</button>' +
+          '<div role="menu" aria-label="Local Permissions">' +
+            '<div>Local Permissions</div>' +
+            '<div role="menuitem">' +
+              '<div><span id="perm-title-review">Request Review</span></div>' +
+              '<div id="perm-sub-review">Every command requires approval.</div>' +
+            '</div>' +
+            '<div role="menuitem">' +
+              '<div><span id="perm-title-default">Default</span><span class="badge"><span id="perm-badge-on-default">Default</span><svg width="10" height="10"></svg></span></div>' +
+              '<div id="perm-sub-default">Ask before sensitive operations.</div>' +
+            '</div>' +
+            '<div role="menuitem">' +
+              '<div><span id="perm-title-auto">Auto</span></div>' +
+              '<div id="perm-sub-auto">Automatically decide if commands run.</div>' +
+            '</div>' +
+            '<div role="menuitem">' +
+              '<div><span id="perm-title-turbo">Turbo</span><span class="badge"><span id="perm-badge-on-turbo">Default</span><svg width="10" height="10"></svg></span></div>' +
+              '<div id="perm-sub-turbo">Run all commands without restrictions.</div>' +
+            '</div>' +
+          '</div>' +
+        '</div>');
+    })()`);
+    await until(async () =>
+      (await text(main, '#perm-title-review')) === '每次询问' &&
+      (await text(main, '#perm-title-default')) === '按需询问' &&
+      (await text(main, '#perm-title-auto')) === '自动审批' &&
+      (await text(main, '#perm-title-turbo')) === '跳过审批' &&
+      (await text(main, '#perm-badge-on-default')) === '默认' &&
+      (await text(main, '#perm-badge-on-turbo')) === '默认' &&
+      (await text(main, '#perm-trigger-turbo')) === '跳过审批' &&
+      (await text(main, '#perm-trigger-default')) === '按需询问'
+    , 8000, 'local permissions zh-Hans');
+
+    assert.equal(await text(main, '#perm-sub-review'), '每条命令均需批准。');
+    assert.equal(await text(main, '#perm-sub-default'), '仅在执行敏感操作前询问。');
+    assert.equal(await text(main, '#perm-sub-auto'), '自动判断是否直接运行命令。');
+    assert.equal(await text(main, '#perm-sub-turbo'), '免审批无限制运行所有命令。');
+    assert.equal(await text(main, '#perm-outside-default'), '默认');
+    assert.equal(await text(main, '#perm-outside-review'), '请求审查');
+    assert.equal(
+      await main.evaluate('document.querySelector("#perm-trigger-turbo").getAttribute("aria-label")'),
+      '智能体权限预设选择器，当前：跳过审批 (Turbo)'
+    );
+    assert.equal(
+      await main.evaluate('document.querySelector("#perm-trigger-default").getAttribute("aria-label")'),
+      '智能体权限预设选择器，当前：按需询问'
+    );
+
+    // 切回英文后必须全部恢复原文，切回中文后再次成体系生效
+    await main.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.toggleLanguage("en")', ctx.executionContextId);
+    assert.equal(await text(main, '#perm-title-review'), 'Request Review');
+    assert.equal(await text(main, '#perm-title-default'), 'Default');
+    assert.equal(await text(main, '#perm-title-auto'), 'Auto');
+    assert.equal(await text(main, '#perm-title-turbo'), 'Turbo');
+    assert.equal(await text(main, '#perm-badge-on-turbo'), 'Default');
+    assert.equal(
+      await main.evaluate('document.querySelector("#perm-trigger-turbo").getAttribute("aria-label")'),
+      'Agent permissions preset selector, current: Turbo'
+    );
+
+    await main.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.toggleLanguage("zh")', ctx.executionContextId);
+    await until(async () =>
+      (await text(main, '#perm-title-default')) === '按需询问' &&
+      (await text(main, '#perm-title-turbo')) === '跳过审批' &&
+      (await text(main, '#perm-badge-on-turbo')) === '默认'
+    , 8000, 'local permissions re-apply zh-Hans');
+
+    await main.evaluate('document.querySelector("#perm-preset-test")?.remove()');
+  });
+  await check('代码查看面板、Diff、CSV 视口与 LSP 引用隔离保护', async () => {
+    const tree = await main.send('Page.getFrameTree');
+    const ctx = await main.send('Page.createIsolatedWorld', { frameId: tree.frameTree.frame.id, worldName: 'GRAVITYBOX-localization-v1' });
+    await main.evaluate(`(() => {
+      document.body.insertAdjacentHTML('beforeend',
+        '<div id="issue33-code-viewer-test">' +
+          '<div role="region" aria-label="Side Panel">' +
+            '<div class="toolbar">' +
+              '<button id="cv-toolbar-export">Export</button>' +
+              '<button id="cv-toolbar-split">Split</button>' +
+              '<button id="cv-toolbar-filter">Filter</button>' +
+            '</div>' +
+            '<div class="file-viewer-root">' +
+              '<div class="code-line" data-line-number="1">' +
+                '<div data-testid="code-gutter">1</div>' +
+                '<div class="line-content">' +
+                  '<div data-line-tokens="">' +
+                    '<span>' +
+                      '<span id="cv-tok-export">export</span>' +
+                      '<span> const parts = raw.</span>' +
+                      '<span id="cv-tok-split">split</span>' +
+                      '<span>(",").</span>' +
+                      '<span id="cv-tok-filter">filter</span>' +
+                      '<span>(Boolean); const x = </span>' +
+                      '<span id="cv-tok-unknown">untranslatedTsIdentifier</span>' +
+                    '</span>' +
+                  '</div>' +
+                '</div>' +
+              '</div>' +
+              '<div data-testid="comment-box-row">' +
+                '<button id="cv-comment-cancel">Cancel</button>' +
+              '</div>' +
+            '</div>' +
+            '<div class="code-line" data-diff-type="1">' +
+              '<div class="line-content">' +
+                '<span id="cv-diff-export">export</span>' +
+                '<span id="cv-diff-split">split</span>' +
+              '</div>' +
+            '</div>' +
+            '<div class="code-block">' +
+              '<div class="code-line">' +
+                '<div class="line-content"><span id="cv-block-filter">filter</span></div>' +
+              '</div>' +
+            '</div>' +
+            '<div class="notebook-cell notebook-code-cell">' +
+              '<div class="notebook-code-input"><span id="cv-nb-export">export</span></div>' +
+              '<div class="notebook-output-text"><span id="cv-nb-filter">filter</span></div>' +
+            '</div>' +
+            '<div data-testid="csv-file-viewer">' +
+              '<button id="cv-csv-clear" data-testid="csv-filter-clear">Clear</button>' +
+              '<div data-testid="csv-scroll-viewport" role="grid">' +
+                '<button id="cv-csv-header" data-testid="csv-header-0"><span>Export</span></button>' +
+                '<div id="cv-csv-cell">Filter</div>' +
+              '</div>' +
+            '</div>' +
+            '<div data-testid="lsp-peek-references-panel" role="region" aria-label="References">' +
+              '<button id="cv-lsp-item" data-testid="lsp-reference-item">' +
+                '<span>a.ts:1:1</span>' +
+                '<span id="cv-lsp-code">export</span>' +
+              '</button>' +
+            '</div>' +
+            '<div id="cv-dyn-class-wrap"><span id="cv-dyn-class">Export</span></div>' +
+            '<div id="cv-dyn-attr-wrap"><span id="cv-dyn-attr">Filter</span></div>' +
+          '</div>' +
+        '</div>');
+      document.querySelector('#issue33-code-viewer-test')?.scrollIntoView({ block: 'center' });
+    })()`);
+    await until(async () =>
+      (await text(main, '#cv-toolbar-export')) === '导出' &&
+      (await text(main, '#cv-toolbar-split')) === '分屏' &&
+      (await text(main, '#cv-toolbar-filter')) === '筛选' &&
+      (await text(main, '#cv-comment-cancel')) === '取消' &&
+      (await text(main, '#cv-csv-clear')) !== 'Clear' &&
+      (await text(main, '#cv-dyn-class')) === '导出' &&
+      (await text(main, '#cv-dyn-attr')) === '筛选'
+    , 8000, 'issue33 code viewer zh-Hans');
+
+    assert.equal(await text(main, '#cv-tok-export'), 'export');
+    assert.equal(await text(main, '#cv-tok-split'), 'split');
+    assert.equal(await text(main, '#cv-tok-filter'), 'filter');
+    assert.equal(await text(main, '#cv-diff-export'), 'export');
+    assert.equal(await text(main, '#cv-diff-split'), 'split');
+    assert.equal(await text(main, '#cv-block-filter'), 'filter');
+    assert.equal(await text(main, '#cv-nb-export'), 'export');
+    assert.equal(await text(main, '#cv-nb-filter'), 'filter');
+    assert.equal(await text(main, '#cv-csv-header'), 'Export');
+    assert.equal(await text(main, '#cv-csv-cell'), 'Filter');
+    assert.equal(await text(main, '#cv-lsp-code'), 'export');
+
+    const collected = await main.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.collectUntranslated({ fullScan: true })', ctx.executionContextId);
+    assert.equal(collected.some(item => item.key === 'untranslatedTsIdentifier'), false);
+
+    await main.evaluate(`(() => {
+      document.querySelector('#cv-dyn-class-wrap').classList.add('code-line');
+      document.querySelector('#cv-dyn-attr-wrap').setAttribute('data-line-tokens', '');
+    })()`);
+    await until(async () =>
+      (await text(main, '#cv-dyn-class')) === 'Export' &&
+      (await text(main, '#cv-dyn-attr')) === 'Filter'
+    , 8000, 'issue33 dynamic code protection restore');
+
+    await main.evaluate('document.querySelector("#issue33-code-viewer-test")?.remove()');
+  });
   const resources = (await execute('/bin/ps', ['-p', String(backend.pid), '-o', 'rss=,%cpu=,time='])).stdout.trim();
   const finalStatus = await status();
   const finalHeap = await main.send('Runtime.getHeapUsage');
