@@ -68,6 +68,12 @@ npm run verify
    - 提取文案统一沉淀在 `ui-strings/` 下，由官方发布指纹（SHA256）与分层词典（`dict/`）驱动门禁校验。
 4. **非侵入式热注入**：
    - 汉化与界面增强基于 CDP 页面调试接口与 DOM 观察器运行，不得修改或重签名官方应用。
+5. **进程安全与零外部 `ssh` 约束**：
+   - 严禁在后台强杀官方 Antigravity 进程（需通过安全重启引导并等待优雅退出）；维护清理在进程状态探测为 `unknown` 时必须拒绝执行。
+   - SSH 远程窗口适配全程走本机 CDP 与同源 RPC，禁止拉起外部 `ssh` 进程。
+6. **跨平台与同仓隔离原则**：
+   - 当前主线以 macOS 原生体验（`native/`）为核心；跨平台后端抽象统一收口于 `src/platform/`，不侵入 `native/`、`runtime/`、`dict/`、`ui-strings/` 与 `assets/`。
+   - 非 macOS 端发布指纹与 CI/打包流水线须与 macOS `sourceDigest` 及发版门禁解耦；大型跨平台改动请按「后端抽象 → 系统 Helper 安全边界 → 桌面端与独立 CI」拆分为可独立审查的小 PR，避免引入多套割裂桌面栈。
 
 ---
 
@@ -98,7 +104,7 @@ macOS ARM64 开发环境与 CI 使用固定版本的 Chrome Headless Shell，下
 ```bash
 npm run verify
 ```
-完整发布门禁流水线包含：清理孤儿构建产物、编译 TypeScript、合并运行时、核对价格资产、单元/集成及小型原生行为测试（`npm test` 聚焦这部分日常开发验证）、无头浏览器测试（`npm run test:browser`）、发行版 Swift 原生编译（`-O`）以及全部受支持版本的词典覆盖率门禁。可通过 `node tools/verify.mjs --target-app-version <x.y.z>` 做单版本定向验证，或默认自动对历史冻结版本启用免 vendor 校验。通过后可直接运行 `node tools/package-mac.mjs`（或 `npm run package:mac`），打包器会再次核对源码与产物指纹。
+完整发布门禁流水线包含：隐私门禁检查（`npm run check:privacy`，也可单独运行）、清理孤儿构建产物、编译 TypeScript、合并运行时、核对价格资产、单元/集成及小型原生行为测试（`npm test` 聚焦这部分日常开发验证）、无头浏览器测试（`npm run test:browser`）、发行版 Swift 原生编译（`-O`）以及全部受支持版本的词典覆盖率门禁；可使用 `npm run verify:strict` 执行严格门禁。可通过 `node tools/verify.mjs --target-app-version <x.y.z>` 做单版本定向验证，或默认自动对历史冻结版本启用免 vendor 校验。通过后可直接运行 `node tools/package-mac.mjs`（或 `npm run package:mac`），打包器会再次核对源码与产物指纹。
 
 ---
 
