@@ -43,9 +43,10 @@ function seededQuota(nowMs, { percentage = 80, gemini = true, claude = false } =
 // ---------- C02：投影函数边界 ----------
 
 test('C02: projectAccountForIpc 去 token 且保留原生所需字段', async () => {
+  const nowMs = Date.now();
   const account = {
     id: 'acc-1', email: 'a@example.test', name: 'A', token: { access_token: 'SECRET_A', refresh_token: 'SECRET_R', id_token: 'SECRET_I' },
-    quota: seededQuota(Date.now()), subscription_tier: 'PRO', quota_refresh_error: null,
+    quota: seededQuota(nowMs), subscription_tier: 'PRO', quota_refresh_error: null,
     quota_last_updated: 123, disabled: false, protected_models: [], validation_blocked: false,
     created_at: 1, last_used: 2, custom_label: null,
   };
@@ -59,7 +60,7 @@ test('C02: projectAccountForIpc 去 token 且保留原生所需字段', async ()
     assert.ok(key in projected, `投影必须保留 ${key}`);
   }
   assert.equal(projected.subscription_tier, 'PRO');
-  assert.equal(projected.quota.last_updated, Math.floor(Date.now() / 1000));
+  assert.equal(projected.quota.last_updated, Math.floor(nowMs / 1000));
   assert.equal(projectAccountForIpc(null), null);
   void root;
 });
