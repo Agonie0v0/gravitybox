@@ -22,10 +22,10 @@ GravityBox 致力于为 macOS 用户提供优雅、原生且注重隐私安全�
 
 ## 1. 开发环境要求
 
-- **操作系统**：macOS 14 (Sonoma) 或更高版本（推荐 Apple Silicon 芯片）
-- **Node.js**：`>=22.15.0 <23`（推荐使用 nvm 或 fnm 管理）
+- **操作系统**：macOS 14 (Sonoma) 或更高版本，Apple Silicon (`arm64`) 与 Intel (`x86_64`) 均支持；原生编译目标与发行包架构按宿主自动选择
+- **Node.js**：`>=22.15.0 <23`，需与宿主架构一致（自包含包会校验内置 `runtime/node` 与主程序架构相同）
 - **Swift / Xcode CLI Tools**：系统自带 `swiftc`（Xcode Command Line Tools）
-- **Google Chrome**：用于运行基于 CDP 的无头浏览器回归套件（`/Applications/Google Chrome.app`）
+- **Google Chrome**：用于运行基于 CDP 的无头浏览器回归套件；`node tools/setup-test-browser.mjs` 会按宿主架构下载 chrome-headless-shell（`mac-arm64` / `mac-x64`），也可用 `CHROME_BIN` 覆盖
 
 运行以下命令可自动诊断本地环境是否满足要求：
 ```bash

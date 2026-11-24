@@ -62,7 +62,7 @@
 
 ## Quick Start
 
-1. **Install**: Download `GravityBox-<version>-arm64.dmg` from [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest), drag **GravityBox.app** into **Applications**, and clear Gatekeeper quarantine once (or click **Open Anyway** in **System Settings → Privacy & Security**; open-source builds are not Apple-notarized):
+1. **Install**: Download `GravityBox-<version>-<arch>.dmg` (`arm64` for Apple Silicon, `x86_64` for Intel) from [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest), drag **GravityBox.app** into **Applications**, and clear Gatekeeper quarantine once (or click **Open Anyway** in **System Settings → Privacy & Security**; open-source builds are not Apple-notarized):
    ```bash
    xattr -cr /Applications/GravityBox.app
    ```
@@ -237,10 +237,10 @@ Hover over or click any capsule to inspect its breakdown (`Esc` or click outside
 
 ## Installation
 
-- **Requirements**: macOS 14 (Sonoma) or macOS 15+ (Sequoia), Apple Silicon (`arm64`), official stable `/Applications/Antigravity.app` (Insiders is neither supported nor altered), and zero external runtime dependencies.
+- **Requirements**: macOS 14 (Sonoma) or macOS 15+ (Sequoia), Apple Silicon (`arm64`) or Intel (`x86_64`), official stable `/Applications/Antigravity.app` (Insiders is neither supported nor altered), and zero external runtime dependencies.
 - **Verify Checksum (optional)**:
   ```bash
-  shasum -a 256 -c GravityBox-<version>-arm64.dmg.sha256
+  shasum -a 256 -c GravityBox-<version>-<arch>.dmg.sha256
   ```
 - **Non-Destructive Upgrades**: Quit GravityBox and drag the new app over `/Applications/GravityBox.app`, or enable **Auto-Check Updates** in **About** (off by default). Accounts, ledgers, custom dictionary overrides, and cleanup recovery points live in `~/Library/Application Support/GravityBox`.
 
@@ -288,7 +288,7 @@ npm ci
 npm test                # Build TS, verify pricing parity, and run unit/integration suites
 npm run check:swift     # Typecheck Swift 6 AppKit UI and test harness
 npm run verify          # Full gate: TS, tests, headless browser CDP E2E, Swift -O, dict gates
-npm run package:mac     # Build arm64 .app and distributable .dmg
+npm run package:mac     # Build .app and .dmg for the host architecture (arm64 / x86_64)
 ```
 
 <details>

@@ -62,7 +62,7 @@
 
 ## 快速上手
 
-1. **下载与安装**：前往 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 获取最新 `GravityBox-<version>-arm64.dmg`，将 **GravityBox.app** 拖入 **Applications**。因开源版本未经过 Apple 付费公证，首次运行前在终端执行一次放行命令即可（也可在「系统设置 → 隐私与安全性」点击仍要打开）：
+1. **下载与安装**：前往 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 获取最新 `GravityBox-<version>-<arch>.dmg`（Apple Silicon 为 `arm64`，Intel 为 `x86_64`），将 **GravityBox.app** 拖入 **Applications**。因开源版本未经过 Apple 付费公证，首次运行前在终端执行一次放行命令即可（也可在「系统设置 → 隐私与安全性」点击仍要打开）：
    ```bash
    xattr -cr /Applications/GravityBox.app
    ```
@@ -237,10 +237,10 @@ HUD 挂载于每个 Antigravity 对话输入框下方（含 `2.34.0+` 的 BTW �
 
 ## 安装与升级
 
-- **运行环境**：macOS 14 (Sonoma) 或 macOS 15+ (Sequoia)、Apple Silicon (`arm64`)、官方正式版 `/Applications/Antigravity.app`（不支持也不干扰 Insiders 预览版），安装包内置运行环境、零外部依赖。
+- **运行环境**：macOS 14 (Sonoma) 或 macOS 15+ (Sequoia)、Apple Silicon (`arm64`) 或 Intel (`x86_64`)、官方正式版 `/Applications/Antigravity.app`（不支持也不干扰 Insiders 预览版），安装包内置运行环境、零外部依赖。
 - **SHA-256 校验（可选）**：
   ```bash
-  shasum -a 256 -c GravityBox-<version>-arm64.dmg.sha256
+  shasum -a 256 -c GravityBox-<version>-<arch>.dmg.sha256
   ```
 - **覆盖无损升级**：退出旧版 GravityBox 后将新版拖入 `/Applications` 替换，或在 **关于** 页检查更新（默认关闭后台检查）。账号库、历史账单、个人词典与恢复点均独立保存在 `~/Library/Application Support/GravityBox`。
 

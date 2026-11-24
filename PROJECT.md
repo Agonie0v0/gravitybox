@@ -1,7 +1,7 @@
 # GravityBox 工程架构总览
 
 ## 核心定位
-GravityBox (`1.2.0`) 是面向 macOS 14+ (Apple Silicon `arm64`) 的轻量级 Google Antigravity 正式版伴侣工具箱，提供**原生 AppKit / Node 后端 / HUD 全链路中英双语界面（跟随系统 / 简体中文 / English）**、零侵入式 IDE 双语热适配、输入框实时会话遥测 HUD、双周期配额监控、多账号四阶段原子切换、只读 SQLite 用量与时序计费核算及非破坏性缓存维护。
+GravityBox (`1.2.0`) 是面向 macOS 14+ (Apple Silicon `arm64` / Intel `x86_64`) 的轻量级 Google Antigravity 正式版伴侣工具箱，提供**原生 AppKit / Node 后端 / HUD 全链路中英双语界面（跟随系统 / 简体中文 / English）**、零侵入式 IDE 双语热适配、输入框实时会话遥测 HUD、双周期配额监控、多账号四阶段原子切换、只读 SQLite 用量与时序计费核算及非破坏性缓存维护。
 
 ## 目录与模块分工
 - `native/`：macOS 原生 AppKit 前端（常驻菜单栏面板、5 页主控制台 `Overview / Accounts / Usage / Settings / About`、`L10n.swift` 本地化运行时、进程守护与自更新校验）
