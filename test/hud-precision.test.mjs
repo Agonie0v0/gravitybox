@@ -2989,10 +2989,12 @@ test('Orchestrator 规划模型中途从 Neon 换成 Opus 后，历史 Neon 仍�
 
 test('sqlite-worker 增量扫描 executor_metadata 历史行：首次 full、追加 append 与损坏/无 idx 表降级', async (t) => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-hud-exechist-'));
-  t.after(() => fs.rmSync(baseDir, { recursive: true, force: true }));
   const dbPath = path.join(baseDir, 'exec-hist.db');
   const db = new DatabaseSync(dbPath);
-  t.after(() => { try { db.close(); } catch {} });
+  t.after(() => {
+    try { db.close(); } catch {}
+    fs.rmSync(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  });
   db.exec(`
     CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER NOT NULL, status INTEGER NOT NULL, metadata BLOB);
     CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB, size INTEGER NOT NULL DEFAULT 0);

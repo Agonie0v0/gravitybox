@@ -173,28 +173,55 @@ test('AccountSwitchService.guardStopped 区分 UI 运行、仅残留守护进程
 });
 
 test('hasAntigravityCommand 排除 chrome_crashpad_handler 同时保留 Helper (GPU) 与 language_server 保护', () => {
+  const macAppPath = '/Applications/Antigravity.app';
   assert.equal(
     hasAntigravityCommand([
       '/Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/chrome_crashpad_handler --monitor-self',
-    ]),
+    ], macAppPath),
     false,
   );
   assert.equal(
     hasAntigravityCommand([
       '/Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper (GPU).app/Contents/MacOS/Antigravity Helper (GPU)',
-    ]),
+    ], macAppPath),
     true,
   );
   assert.equal(
     hasAntigravityCommand([
       '/Applications/Antigravity.app/Contents/Resources/bin/language_server --standalone',
-    ]),
+    ], macAppPath),
     true,
   );
   assert.equal(
     hasAntigravityCommand([
       '/bin/zsh -c ls /Applications/Antigravity.app/Contents/Resources/bin/language_server',
-    ]),
+    ], macAppPath),
+    false,
+  );
+
+  const winAppPath = 'C:\\Users\\user\\AppData\\Local\\Programs\\Antigravity';
+  assert.equal(
+    hasAntigravityCommand([
+      'C:\\Users\\user\\AppData\\Local\\Programs\\Antigravity\\chrome_crashpad_handler.exe --monitor-self',
+    ], winAppPath),
+    false,
+  );
+  assert.equal(
+    hasAntigravityCommand([
+      '"C:\\Users\\user\\AppData\\Local\\Programs\\Antigravity\\Antigravity.exe" --remote-debugging-port=0',
+    ], winAppPath),
+    true,
+  );
+  assert.equal(
+    hasAntigravityCommand([
+      '"C:\\Users\\user\\AppData\\Local\\Programs\\Antigravity\\resources\\bin\\language_server.exe" --standalone',
+    ], winAppPath),
+    true,
+  );
+  assert.equal(
+    hasAntigravityCommand([
+      'C:\\Windows\\System32\\cmd.exe /c echo Antigravity',
+    ], winAppPath),
     false,
   );
 });

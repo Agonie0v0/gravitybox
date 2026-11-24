@@ -89,7 +89,7 @@ test('F04: failed manifest creation precedes every move; a prepared crash plan c
   assert.equal(await readFile(join(f.profile, 'Cache', 'sample'), 'utf8'), 'cache');
   const source = join(f.dir, 'source'), target = join(f.dir, 'target'), journal = join(f.dir, 'journal.json');
   await writeFile(source, 'original');
-  const stat = await lstat(source); const identity = `${stat.dev}:${stat.ino}`;
+  const stat = await (process.platform === 'win32' ? lstat(source, { bigint: true }) : lstat(source)); const identity = `${stat.dev}:${stat.ino}`;
   await writeFile(journal, JSON.stringify({ transaction: { phase: 'prepared', purpose: 'clear', moves: [{ from: source, to: target, identity }] } }));
   await rename(source, target);
   await reconcileMoves(journal, await readMaintenanceManifest(journal), async () => {});
