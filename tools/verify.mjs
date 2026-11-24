@@ -358,7 +358,7 @@ async function main() {
 
       const winNativeChecks = (async () => {
         if (existsSync(winHelperManifest)) {
-          await step('WinHelper-Cargo测试', 'cargo', ['test', '--manifest-path', winHelperManifest]);
+          await step('WinHelper-Cargo测试', 'cargo', ['test'], { cwd: join(root, 'windows', 'win-helper') });
         }
         if (existsSync(join(winAppDir, 'package.json'))) {
           if (!existsSync(join(winAppDir, 'node_modules'))) {
@@ -368,7 +368,7 @@ async function main() {
           await step('Windows桌面端-前端构建', npmBuild.binary, npmBuild.args, { cwd: winAppDir });
         }
         if (existsSync(winAppCargo)) {
-          await step('Windows桌面端-Cargo测试', 'cargo', ['test', '--manifest-path', winAppCargo]);
+          await step('Windows桌面端-Cargo测试', 'cargo', ['test'], { cwd: join(winAppDir, 'src-tauri') });
         }
       })();
       parallelChecks.push(winNativeChecks);

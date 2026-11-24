@@ -115,10 +115,15 @@ pub async fn get_antigravity_running(
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
     let trimmed = url.trim();
-    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
-        return Err("仅允许打开 http:// 或 https:// 链接".to_string());
-    }
-    if trimmed.contains('\0') || trimmed.contains('\r') || trimmed.contains('\n') {
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .ok_or_else(|| "仅允许打开 http:// 或 https:// 链接".to_string())?;
+    if rest.is_empty()
+        || trimmed
+            .bytes()
+            .any(|b| b < 0x20 || b == 0x7f)
+    {
         return Err("链接格式无效".to_string());
     }
     #[cfg(windows)]
@@ -152,12 +157,41 @@ pub fn open_external_url(url: String) -> Result<(), String> {
     }
 }
 
-fn validate_dir_path(raw: &str) -> Result<PathBuf, String> {
+fn is_safe_local_windows_path(raw: &str) -> Option<PathBuf> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.contains('\0') || trimmed.starts_with('/') {
-        return Err("无效的目录路径".to_string());
+    if trimmed.is_empty() || trimmed.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return None;
     }
-    let p = strip_verbatim_prefix(std::path::Path::new(trimmed));
+    // Reject UNC/device prefixes (including case-insensitive `\\?\UNC\`) to avoid SMB NTLM leaks
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with(r"\\?\unc\") || lower.starts_with(r"\\.\") || lower.starts_with("//") {
+        return None;
+    }
+    let stripped = strip_verbatim_prefix(std::path::Path::new(trimmed));
+    let s = stripped.to_string_lossy();
+    if s.starts_with(r"\\") || s.starts_with('/') {
+        return None;
+    }
+    // Require explicit local drive root `X:\` or `X:/` and reject `..` traversal components
+    let bytes = s.as_bytes();
+    if bytes.len() < 3
+        || !bytes[0].is_ascii_alphabetic()
+        || bytes[1] != b':'
+        || (bytes[2] != b'\\' && bytes[2] != b'/')
+    {
+        return None;
+    }
+    if stripped
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    Some(stripped)
+}
+
+fn validate_dir_path(raw: &str) -> Result<PathBuf, String> {
+    let p = is_safe_local_windows_path(raw).ok_or_else(|| "无效的目录路径".to_string())?;
     if !p.is_dir() {
         return Err(format!("目标不是有效目录: {}", p.display()));
     }
@@ -165,11 +199,7 @@ fn validate_dir_path(raw: &str) -> Result<PathBuf, String> {
 }
 
 fn validate_json_save_path(raw: &str) -> Result<PathBuf, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.contains('\0') || trimmed.starts_with('/') {
-        return Err("保存路径无效".to_string());
-    }
-    let p = strip_verbatim_prefix(std::path::Path::new(trimmed));
+    let p = is_safe_local_windows_path(raw).ok_or_else(|| "保存路径无效".to_string())?;
     let is_json = p
         .extension()
         .and_then(|ext| ext.to_str())
@@ -206,11 +236,7 @@ pub fn open_folder(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn reveal_in_explorer(path: String) -> Result<(), String> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() || trimmed.contains('\0') || trimmed.starts_with('/') {
-        return Err("无效的文件或目录路径".to_string());
-    }
-    let p = strip_verbatim_prefix(std::path::Path::new(trimmed));
+    let p = is_safe_local_windows_path(&path).ok_or_else(|| "无效的文件或目录路径".to_string())?;
     if !p.exists() {
         if let Some(parent) = p.parent() {
             if parent.is_dir() {
@@ -397,19 +423,24 @@ mod tests {
         let fake_exe = tmp_dir.join("calc.exe");
         std::fs::write(&fake_exe, b"stub").unwrap();
 
-        // open_folder validator accepts directories and rejects files, leading '/', and NUL
+        // open_folder validator accepts local directories and rejects files, UNC, traversal, leading '/', and control chars
         assert!(validate_dir_path(&tmp_dir.to_string_lossy()).is_ok());
         assert!(validate_dir_path(&fake_exe.to_string_lossy()).is_err());
         assert!(validate_dir_path("/select,C:\\Windows").is_err());
         assert!(validate_dir_path("C:\\Temp\0evil").is_err());
+        assert!(validate_dir_path(r"\\attacker\share").is_err());
+        assert!(validate_dir_path(r"\\?\UNC\attacker\share").is_err());
+        assert!(validate_dir_path(r"C:\Temp\..\Windows").is_err());
 
-        // save_json_file validator accepts .json/.JSON and rejects executables/non-json/NUL
+        // save_json_file validator accepts .json/.JSON and rejects executables/non-json/UNC/traversal/NUL
         let ok_json = tmp_dir.join("backup.JSON");
         assert!(validate_json_save_path(&ok_json.to_string_lossy()).is_ok());
         assert!(validate_json_save_path(&fake_exe.to_string_lossy()).is_err());
         assert!(validate_json_save_path(&tmp_dir.join("run.bat").to_string_lossy()).is_err());
         assert!(validate_json_save_path("C:\\Temp\\bad\0.json").is_err());
         assert!(validate_json_save_path("/weird.json").is_err());
+        assert!(validate_json_save_path(r"\\attacker\share\leak.json").is_err());
+        assert!(validate_json_save_path(r"C:\Temp\..\leak.json").is_err());
 
         // Atomic JSON save roundtrip
         let out_file = tmp_dir.join("accounts-export.json");

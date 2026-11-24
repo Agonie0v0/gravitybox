@@ -63,7 +63,7 @@ impl BackendManager {
         read_ipc_session(&self.state_dir)
             .ok()
             .flatten()
-            .map(|s| s.pipe_name)
+            .map(|s| s.pipe_name.clone())
             .unwrap_or_default()
     }
 

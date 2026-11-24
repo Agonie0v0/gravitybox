@@ -34,6 +34,13 @@ pub struct WindowsIpcSession {
     pub created_at: String,
 }
 
+impl Drop for WindowsIpcSession {
+    fn drop(&mut self) {
+        let mut bytes = std::mem::take(&mut self.auth_token).into_bytes();
+        zeroize_bytes(&mut bytes);
+    }
+}
+
 impl fmt::Debug for WindowsIpcSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WindowsIpcSession")
@@ -256,7 +263,10 @@ pub fn read_ipc_session(state_dir: &Path) -> Result<Option<WindowsIpcSession>, P
         Ok(s) => s,
         Err(_) => return Ok(None),
     };
-    let parsed: Value = match serde_json::from_str(&raw) {
+    let parsed_res = serde_json::from_str::<Value>(&raw);
+    let mut raw_bytes = raw.into_bytes();
+    zeroize_bytes(&mut raw_bytes);
+    let parsed: Value = match parsed_res {
         Ok(v) => v,
         Err(_) => return Ok(None),
     };
@@ -328,8 +338,8 @@ mod win_impl {
     };
     use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, WaitNamedPipeW};
     use windows_sys::Win32::System::Threading::{
-        CreateEventW, GetCurrentProcess, OpenProcess, OpenProcessToken, WaitForSingleObject,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        CreateEventW, GetCurrentProcess, OpenProcess, OpenProcessToken, ResetEvent,
+        WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows_sys::Win32::System::IO::{CancelIo, GetOverlappedResult, OVERLAPPED};
 
@@ -584,6 +594,9 @@ mod win_impl {
             }
             let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
             ov.hEvent = event.0;
+            unsafe {
+                ResetEvent(event.0);
+            }
             let mut written: u32 = 0;
             let chunk = &data[offset..];
             let to_write = chunk.len().min(u32::MAX as usize) as u32;
@@ -652,6 +665,9 @@ mod win_impl {
             }
             let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
             ov.hEvent = event.0;
+            unsafe {
+                ResetEvent(event.0);
+            }
             let mut read_bytes: u32 = 0;
             let ok = unsafe {
                 ReadFile(
@@ -666,7 +682,8 @@ mod win_impl {
                 if read_bytes == 0 {
                     break;
                 }
-                reply.extend_from_slice(&buf[..read_bytes as usize]);
+                let n = (read_bytes as usize).min(buf.len());
+                reply.extend_from_slice(&buf[..n]);
                 if reply.len() > MAX_REPLY_BYTES {
                     return Err(PipeError {
                         message: "后台响应超出大小限制".to_string(),
@@ -681,7 +698,8 @@ mod win_impl {
             let err = unsafe { GetLastError() };
             if err == ERROR_MORE_DATA {
                 if read_bytes > 0 {
-                    reply.extend_from_slice(&buf[..read_bytes as usize]);
+                    let n = (read_bytes as usize).min(buf.len());
+                    reply.extend_from_slice(&buf[..n]);
                 }
                 if reply.len() > MAX_REPLY_BYTES {
                     return Err(PipeError {
@@ -714,7 +732,14 @@ mod win_impl {
                 if res == 0 {
                     let ov_err = unsafe { GetLastError() };
                     if ov_err == ERROR_MORE_DATA && read_bytes > 0 {
-                        reply.extend_from_slice(&buf[..read_bytes as usize]);
+                        let n = (read_bytes as usize).min(buf.len());
+                        reply.extend_from_slice(&buf[..n]);
+                        if reply.len() > MAX_REPLY_BYTES {
+                            return Err(PipeError {
+                                message: "后台响应超出大小限制".to_string(),
+                                retryable: false,
+                            });
+                        }
                         if reply.contains(&b'\n') {
                             break;
                         }
@@ -731,7 +756,8 @@ mod win_impl {
                 if read_bytes == 0 {
                     break;
                 }
-                reply.extend_from_slice(&buf[..read_bytes as usize]);
+                let n = (read_bytes as usize).min(buf.len());
+                reply.extend_from_slice(&buf[..n]);
                 if reply.len() > MAX_REPLY_BYTES {
                     return Err(PipeError {
                         message: "后台响应超出大小限制".to_string(),
@@ -783,7 +809,12 @@ mod win_impl {
             Value::String(session.auth_token.clone()),
         );
 
-        let mut encoded = serde_json::to_vec(&authed).map_err(|_| PipeError {
+        let encoded_res = serde_json::to_vec(&authed);
+        if let Some(Value::String(tok)) = authed.as_object_mut().and_then(|m| m.remove("authToken")) {
+            let mut tok_bytes = tok.into_bytes();
+            zeroize_bytes(&mut tok_bytes);
+        }
+        let mut encoded = encoded_res.map_err(|_| PipeError {
             message: "请求序列化失败".to_string(),
             retryable: false,
         })?;

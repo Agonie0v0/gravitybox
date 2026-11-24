@@ -237,8 +237,8 @@ async function main() {
 
   if (!skipBuild || !existsSync(winHelperBin)) {
     process.stdout.write('[package-win] 构建 gravitybox-win-helper.exe (release)...\n');
-    await run('cargo', ['build', '--release', '--manifest-path', winHelperManifest], {
-      cwd: root,
+    await run('cargo', ['build', '--release'], {
+      cwd: dirname(winHelperManifest),
       maxBuffer: 16e6,
       windowsHide: true,
     });

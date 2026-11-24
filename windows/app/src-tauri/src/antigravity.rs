@@ -208,6 +208,13 @@ pub fn is_local_tcp_port_listening(port: u16) -> bool {
 
 pub fn has_live_devtools_port() -> bool {
     let path = resolve_devtools_active_port_path();
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() || meta.len() > 4096 {
+        return false;
+    }
     let contents = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(_) => return false,
@@ -273,6 +280,174 @@ pub fn get_antigravity_info(resource_dir: Option<&Path>) -> AntigravityInfo {
         running,
         debug_port_ready,
     }
+}
+
+fn has_control_or_whitespace(s: &str) -> bool {
+    s.chars()
+        .any(|c| c.is_whitespace() || (c as u32) < 0x20 || (c as u32) == 0x7f)
+}
+
+fn is_valid_proxy_host(host: &str) -> bool {
+    if host.is_empty() || host.len() > 255 || has_control_or_whitespace(host) {
+        return false;
+    }
+    if host.starts_with('[') && host.ends_with(']') {
+        let inner = &host[1..host.len() - 1];
+        return !inner.is_empty()
+            && inner
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.');
+    }
+    host.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+}
+
+/// Strictly validate and normalize an HTTP/HTTPS proxy URL (for both registry and manual config).
+/// Rejects control chars (CRLF/NUL), whitespace, non-HTTP(S) schemes (e.g. socks/ftp/file),
+/// path/query/fragment suffixes, and missing/out-of-range ports.
+pub(crate) fn normalize_and_validate_http_proxy_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 2048 || has_control_or_whitespace(trimmed) {
+        return None;
+    }
+
+    let (scheme, rest) = if let Some(idx) = trimmed.find("://") {
+        let s = trimmed[..idx].to_ascii_lowercase();
+        if s != "http" && s != "https" {
+            return None;
+        }
+        (s, &trimmed[idx + 3..])
+    } else {
+        // Reject bare disallowed schemes like "socks5:...", "file:...", "javascript:..."
+        let lower = trimmed.to_ascii_lowercase();
+        if [
+            "socks:",
+            "socks4:",
+            "socks4a:",
+            "socks5:",
+            "ftp:",
+            "file:",
+            "javascript:",
+            "data:",
+            "ws:",
+            "wss:",
+        ]
+        .iter()
+        .any(|p| lower.starts_with(p))
+        {
+            return None;
+        }
+        ("http".to_string(), trimmed)
+    };
+
+    let mut remainder = rest;
+    if let Some(stripped) = remainder.strip_suffix('/') {
+        remainder = stripped;
+    }
+    if remainder.is_empty()
+        || remainder.contains('/')
+        || remainder.contains('?')
+        || remainder.contains('#')
+    {
+        return None;
+    }
+
+    let (userinfo_prefix, host_port) = if let Some(at_idx) = remainder.rfind('@') {
+        let userinfo = &remainder[..at_idx];
+        if userinfo.is_empty() || has_control_or_whitespace(userinfo) {
+            return None;
+        }
+        (format!("{}@", userinfo), &remainder[at_idx + 1..])
+    } else {
+        (String::new(), remainder)
+    };
+
+    let (host, port_str) = if host_port.starts_with('[') {
+        let close = host_port.find(']')?;
+        let h = &host_port[..=close];
+        let after = &host_port[close + 1..];
+        let port = after.strip_prefix(':')?;
+        (h, port)
+    } else {
+        let colon = host_port.rfind(':')?;
+        let h = &host_port[..colon];
+        if h.contains(':') {
+            return None;
+        }
+        (h, &host_port[colon + 1..])
+    };
+
+    if !is_valid_proxy_host(host) {
+        return None;
+    }
+    if port_str.is_empty() || !port_str.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let port: u16 = port_str.parse().ok()?;
+    if port == 0 {
+        return None;
+    }
+
+    Some(format!(
+        "{}://{}{}:{}",
+        scheme,
+        userinfo_prefix,
+        host.to_ascii_lowercase(),
+        port
+    ))
+}
+
+pub(crate) fn sanitize_no_proxy_list(raw_override: &str) -> String {
+    let mut no_proxy_entries: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for entry in ["127.0.0.1", "localhost", "::1"]
+        .into_iter()
+        .chain(raw_override.split(';').map(str::trim))
+    {
+        if entry.is_empty()
+            || entry.eq_ignore_ascii_case("<local>")
+            || entry.contains(',')
+            || has_control_or_whitespace(entry)
+        {
+            continue;
+        }
+        let key = entry.to_ascii_lowercase();
+        if seen.insert(key) {
+            no_proxy_entries.push(entry.to_string());
+        }
+    }
+    no_proxy_entries.join(",")
+}
+
+pub(crate) fn parse_windows_proxy_server_value(
+    raw_server: &str,
+    raw_override: &str,
+) -> Option<(String, String, String)> {
+    let trimmed = raw_server.trim();
+    if trimmed.is_empty() || has_control_or_whitespace(trimmed) {
+        return None;
+    }
+    let mut http_url: Option<String> = None;
+    let mut https_url: Option<String> = None;
+    if trimmed.contains('=') {
+        for part in trimmed.split(';') {
+            if let Some((proto, target)) = part.split_once('=') {
+                let p = proto.trim().to_ascii_lowercase();
+                if p == "http" {
+                    http_url = normalize_and_validate_http_proxy_url(target);
+                } else if p == "https" {
+                    https_url = normalize_and_validate_http_proxy_url(target);
+                }
+            }
+        }
+    } else if let Some(ep) = normalize_and_validate_http_proxy_url(trimmed) {
+        http_url = Some(ep.clone());
+        https_url = Some(ep);
+    }
+
+    let final_http = http_url.clone().or_else(|| https_url.clone())?;
+    let final_https = https_url.or_else(|| http_url)?;
+    Some((final_http, final_https, sanitize_no_proxy_list(raw_override)))
 }
 
 #[cfg(windows)]
@@ -356,6 +531,7 @@ fn read_windows_system_proxy_env() -> Option<(String, String, String)> {
             return None;
         }
         let mut buf = vec![0u16; (len as usize).div_ceil(2)];
+        let mut actual_len: u32 = (buf.len() * 2) as u32;
         let res = unsafe {
             RegQueryValueExW(
                 guard.0,
@@ -363,73 +539,24 @@ fn read_windows_system_proxy_env() -> Option<(String, String, String)> {
                 null_mut(),
                 &mut reg_type,
                 buf.as_mut_ptr() as *mut u8,
-                &mut len,
+                &mut actual_len,
             )
         };
-        if res != ERROR_SUCCESS {
+        if res != ERROR_SUCCESS || reg_type != REG_SZ {
             return None;
         }
-        let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-        Some(String::from_utf16_lossy(&buf[..end]).trim().to_string())
+        let valid_u16s = ((actual_len as usize) / 2).min(buf.len());
+        let slice = &buf[..valid_u16s];
+        let end = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
+        Some(String::from_utf16_lossy(&slice[..end]).trim().to_string())
     };
 
     if read_dword("ProxyEnable").unwrap_or(0) != 1 {
         return None;
     }
     let raw_server = read_sz("ProxyServer").unwrap_or_default();
-    if raw_server.is_empty() {
-        return None;
-    }
-
-    let format_http_endpoint = |raw: &str| -> Option<String> {
-        let t = raw.trim();
-        if t.is_empty() || t.to_ascii_lowercase().starts_with("socks") {
-            return None;
-        }
-        if t.starts_with("http://") || t.starts_with("https://") {
-            Some(t.trim_end_matches('/').to_string())
-        } else {
-            Some(format!("http://{}", t.trim_end_matches('/')))
-        }
-    };
-
-    let mut http_url: Option<String> = None;
-    let mut https_url: Option<String> = None;
-    if raw_server.contains('=') {
-        for part in raw_server.split(';') {
-            if let Some((proto, target)) = part.split_once('=') {
-                let p = proto.trim().to_ascii_lowercase();
-                if p == "http" {
-                    http_url = format_http_endpoint(target);
-                } else if p == "https" {
-                    https_url = format_http_endpoint(target);
-                }
-            }
-        }
-    } else if let Some(ep) = format_http_endpoint(&raw_server) {
-        http_url = Some(ep.clone());
-        https_url = Some(ep);
-    }
-
-    let final_http = http_url.clone().or_else(|| https_url.clone())?;
-    let final_https = https_url.or_else(|| http_url)?;
-
     let raw_override = read_sz("ProxyOverride").unwrap_or_default();
-    let mut no_proxy_entries: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    for entry in ["127.0.0.1", "localhost", "::1"]
-        .into_iter()
-        .chain(raw_override.split(';').map(str::trim))
-    {
-        if entry.is_empty() || entry.eq_ignore_ascii_case("<local>") {
-            continue;
-        }
-        let key = entry.to_ascii_lowercase();
-        if seen.insert(key) {
-            no_proxy_entries.push(entry.to_string());
-        }
-    }
-    Some((final_http, final_https, no_proxy_entries.join(",")))
+    parse_windows_proxy_server_value(&raw_server, &raw_override)
 }
 
 #[cfg(not(windows))]
@@ -443,23 +570,15 @@ fn resolve_launch_proxy_env(state_dir: Option<&Path>) -> Vec<(&'static str, Stri
     };
     let cfg = load_config(dir);
     let resolved = match cfg.antigravity_proxy_mode.as_str() {
-        "manual" => {
-            let trimmed = cfg.antigravity_proxy_manual_url.trim();
-            if trimmed.is_empty() || trimmed.contains('\0') || trimmed.contains('\r') || trimmed.contains('\n') {
-                None
-            } else {
-                let normalized = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-                    trimmed.trim_end_matches('/').to_string()
-                } else {
-                    format!("http://{}", trimmed.trim_end_matches('/'))
-                };
-                Some((
+        "manual" => normalize_and_validate_http_proxy_url(&cfg.antigravity_proxy_manual_url).map(
+            |normalized| {
+                (
                     normalized.clone(),
                     normalized,
                     "127.0.0.1,localhost,::1".to_string(),
-                ))
-            }
-        }
+                )
+            },
+        ),
         "system" => read_windows_system_proxy_env(),
         _ => None,
     };
@@ -723,5 +842,43 @@ mod tests {
         assert!(tmp.is_dir());
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn proxy_url_and_override_validation_rejects_injection_and_non_http_schemes() {
+        assert_eq!(
+            normalize_and_validate_http_proxy_url("127.0.0.1:7890").as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+        assert_eq!(
+            normalize_and_validate_http_proxy_url("HTTPS://Proxy.Local:8443/").as_deref(),
+            Some("https://proxy.local:8443")
+        );
+        assert_eq!(
+            normalize_and_validate_http_proxy_url("http://[::1]:7890").as_deref(),
+            Some("http://[::1]:7890")
+        );
+        // Reject CRLF, NUL, whitespace, non-HTTP schemes, missing/invalid port, path/query
+        assert!(normalize_and_validate_http_proxy_url("http://127.0.0.1:7890\r\nEVIL=1").is_none());
+        assert!(normalize_and_validate_http_proxy_url("http://127.0.0.1:7890\0").is_none());
+        assert!(normalize_and_validate_http_proxy_url("http://127.0.0.1:7890 extra").is_none());
+        assert!(normalize_and_validate_http_proxy_url("socks5://127.0.0.1:7891").is_none());
+        assert!(normalize_and_validate_http_proxy_url("ftp://127.0.0.1:21").is_none());
+        assert!(normalize_and_validate_http_proxy_url("http://127.0.0.1:0").is_none());
+        assert!(normalize_and_validate_http_proxy_url("http://127.0.0.1:70000").is_none());
+        assert!(normalize_and_validate_http_proxy_url("http://127.0.0.1/path").is_none());
+
+        // Windows ProxyServer parsing & NO_PROXY sanitization
+        let (h, hs, np) = parse_windows_proxy_server_value(
+            "http=127.0.0.1:7890;https=127.0.0.1:7891;socks=127.0.0.1:7892",
+            "*.corp.local;<local>;bad\r\nline;a,b;10.*",
+        )
+        .expect("valid windows proxy server string");
+        assert_eq!(h, "http://127.0.0.1:7890");
+        assert_eq!(hs, "http://127.0.0.1:7891");
+        assert_eq!(np, "127.0.0.1,localhost,::1,*.corp.local,10.*");
+
+        assert!(parse_windows_proxy_server_value("socks=127.0.0.1:7892", "").is_none());
+        assert!(parse_windows_proxy_server_value("127.0.0.1:7890\nINJECT=1", "").is_none());
     }
 }

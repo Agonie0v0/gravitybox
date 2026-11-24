@@ -92,8 +92,18 @@ impl Default for UiConfig {
     }
 }
 
+const MAX_CONFIG_BYTES: u64 = 1_048_576;
+
 pub fn load_config(state_dir: &Path) -> UiConfig {
     let config_path = state_dir.join("config.json");
+    let meta = match fs::symlink_metadata(&config_path) {
+        Ok(m) => m,
+        Err(_) => return UiConfig::default(),
+    };
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() || meta.len() > MAX_CONFIG_BYTES
+    {
+        return UiConfig::default();
+    }
     let raw = match fs::read_to_string(&config_path) {
         Ok(s) => s,
         Err(_) => return UiConfig::default(),
@@ -121,11 +131,19 @@ pub fn load_config(state_dir: &Path) -> UiConfig {
 /// Atomically save `UiConfig` while preserving any external fields in `config.json`
 /// (matching macOS `ConfigurationStore.save()`).
 pub fn save_config(state_dir: &Path, cfg: &UiConfig) -> Result<(), String> {
+    use std::io::Write;
     fs::create_dir_all(state_dir).map_err(|e| format!("无法创建数据目录: {}", e))?;
     let config_path = state_dir.join("config.json");
+    if let Ok(meta) = fs::symlink_metadata(&config_path) {
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            return Err("配置文件路径异常（符号链接或目录），已拒绝写入".to_string());
+        }
+    }
 
-    let mut merged: Map<String, Value> = fs::read_to_string(&config_path)
+    let mut merged: Map<String, Value> = fs::symlink_metadata(&config_path)
         .ok()
+        .filter(|m| m.file_type().is_file() && m.len() <= MAX_CONFIG_BYTES)
+        .and_then(|_| fs::read_to_string(&config_path).ok())
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
@@ -157,7 +175,19 @@ pub fn save_config(state_dir: &Path, cfg: &UiConfig) -> Result<(), String> {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let tmp_path = state_dir.join(format!("config-{}-{}.tmp", std::process::id(), stamp));
-    fs::write(&tmp_path, payload.as_bytes()).map_err(|e| format!("无法写入临时配置: {}", e))?;
+    let write_res = (|| -> std::io::Result<()> {
+        let mut f = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)?;
+        f.write_all(payload.as_bytes())?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = write_res {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("无法写入临时配置: {}", e));
+    }
 
     // Windows atomic rename with short retry on EPERM/EBUSY
     let mut last_err = None;
