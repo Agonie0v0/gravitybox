@@ -1,7 +1,15 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { join, relative, resolve, sep } from 'node:path';
+import { join, resolve } from 'node:path';
 import { bt } from './i18n.js';
+import {
+  appProcesses,
+  defaultAntigravityAppPath,
+  defaultAntigravityInstallDirs,
+  isPathUnder,
+  isWindows,
+  normalizePathForCompare,
+} from './platform/index.js';
 
 export type CacheCategory = 'safe' | 'stateful';
 export type CacheSection = 'runtime' | 'history';
@@ -232,6 +240,15 @@ const PROCESS_SNAPSHOT_TTL_MS = 250;
 let cachedProcessCommands: { at: number; commands: string[] | null } | null = null;
 let inFlightProcessCommands: Promise<string[] | null> | null = null;
 
+function collectWindowsAppRoots(appPath?: string): string[] {
+  const roots = new Set<string>();
+  if (appPath) roots.add(appPath);
+  for (const dir of defaultAntigravityInstallDirs()) {
+    roots.add(join(dir, 'Antigravity'));
+  }
+  return Array.from(roots);
+}
+
 export async function readProcessCommands(): Promise<string[] | null> {
   const now = Date.now();
   if (cachedProcessCommands && now - cachedProcessCommands.at < PROCESS_SNAPSHOT_TTL_MS) {
@@ -242,6 +259,14 @@ export async function readProcessCommands(): Promise<string[] | null> {
   }
   const task = (async (): Promise<string[] | null> => {
     try {
+      if (isWindows()) {
+        // Enumerate all running processes (matching `/bin/ps -axo command=` on macOS) so both
+        // custom Antigravity install paths and external browser_profile Chromium processes are visible.
+        const procs = await appProcesses([]);
+        const commands = procs.map((p) => (p.cmdLine || p.exePath || '').trim()).filter(Boolean);
+        cachedProcessCommands = { at: Date.now(), commands };
+        return commands;
+      }
       const { stdout } = await execFileAsync('/bin/ps', ['-axo', 'command='], { timeout: 3000 });
       const commands = stdout.split('\n').map(line => line.trim()).filter(Boolean);
       cachedProcessCommands = { at: Date.now(), commands };
@@ -261,7 +286,26 @@ export async function readProcessCommands(): Promise<string[] | null> {
   }
 }
 
-export function hasAntigravityCommand(commands: string[], appPath = '/Applications/Antigravity.app'): boolean {
+export function hasAntigravityCommand(commands: string[], appPath = defaultAntigravityAppPath()): boolean {
+  const winMode = !appPath.toLowerCase().endsWith('.app') && (isWindows() || /^[a-zA-Z]:[\\/]/.test(appPath));
+  if (winMode) {
+    const roots = Array.from(
+      new Set(
+        [appPath, ...collectWindowsAppRoots()]
+          .map((p) => normalizePathForCompare(p, 'win32'))
+          .filter(Boolean),
+      ),
+    );
+    return commands.some((trimmed) => {
+      const normalized = trimmed.replaceAll('"', '').replaceAll('\\', '/').toLowerCase();
+      return roots.some(
+        (root) =>
+          normalized.includes(`${root}/antigravity.exe`) ||
+          normalized.includes(`${root}/resources/bin/language_server.exe`) ||
+          normalized.startsWith(`${root}/`),
+      );
+    });
+  }
   const appRoots = Array.from(new Set([appPath, '/Applications/Antigravity.app']));
   const macOsPrefixes = appRoots.map(p => p + '/Contents/MacOS/');
   const frameworkPrefixes = appRoots.map(p => p + '/Contents/Frameworks/');
@@ -275,6 +319,10 @@ export function hasAntigravityCommand(commands: string[], appPath = '/Applicatio
 
 export function hasBrowserProfileCommand(commands: string[], browserProfileDir: string): boolean {
   if (!browserProfileDir) return false;
+  if (isWindows() || /^[a-zA-Z]:[\\/]/.test(browserProfileDir)) {
+    const needle = normalizePathForCompare(browserProfileDir, 'win32');
+    return commands.some((trimmed) => trimmed.replaceAll('\\', '/').toLowerCase().includes(needle));
+  }
   return commands.some(trimmed => trimmed.includes(browserProfileDir) && !trimmed.includes('/bin/ps'));
 }
 
@@ -286,7 +334,7 @@ export function normalizeProcessProbeState(value: boolean | ProcessProbeState): 
 }
 
 export async function probeAntigravityRunning(
-  appPath = '/Applications/Antigravity.app',
+  appPath = defaultAntigravityAppPath(),
   probeCommands: () => Promise<string[] | null> = readProcessCommands,
 ): Promise<ProcessProbeState> {
   try {
@@ -312,7 +360,7 @@ export async function probeBrowserProfileRunning(
   }
 }
 
-export async function antigravityRunning(appPath = '/Applications/Antigravity.app') {
+export async function antigravityRunning(appPath = defaultAntigravityAppPath()) {
   return (await probeAntigravityRunning(appPath)) !== 'stopped';
 }
 
@@ -329,6 +377,8 @@ export interface CacheMaintenanceOptions {
   processProbe?: () => Promise<string[] | null>;
   archiveDatabases?: (dbPaths: string[]) => Promise<unknown>;
   onMutated?: () => void | Promise<void>;
+  /** Optional override for tests verifying Windows Recycle Bin vs fallback behavior. */
+  moveToSystemTrash?: (paths: string[]) => Promise<unknown>;
 }
 
 export interface SubTargetSpec {
@@ -365,7 +415,6 @@ export interface ConversationIndexSnapshot {
 }
 
 export function isStrictSubpath(parentDir: string, candidatePath: string): boolean {
-  const rel = relative(resolve(parentDir), resolve(candidatePath));
-  return Boolean(rel && !rel.startsWith('..') && !rel.includes(`..${sep}`) && rel !== '.');
+  return isPathUnder(resolve(candidatePath), resolve(parentDir));
 }
 

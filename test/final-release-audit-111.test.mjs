@@ -36,9 +36,22 @@ function seconds(field, value) {
   return message(field, [...scalar(1, whole), ...scalar(2, Math.round((value - whole) * 1e9))]);
 }
 
+const openDbsByTest = new WeakMap();
+function trackDb(t, db) {
+  let list = openDbsByTest.get(t);
+  if (!list) { list = []; openDbsByTest.set(t, list); }
+  list.push(db);
+  return db;
+}
+function closeTrackedDbs(t) {
+  const list = openDbsByTest.get(t);
+  if (!list) return;
+  for (const db of list.splice(0)) { try { db.close(); } catch {} }
+}
+
 function createConvDb(t, dir, id, parentId) {
   const dbPath = path.join(dir, `${id}.db`);
-  const db = new DatabaseSync(dbPath);
+  const db = trackDb(t, new DatabaseSync(dbPath));
   t.after(() => {
     try {
       db.close();
@@ -79,14 +92,14 @@ function createConvDb(t, dir, id, parentId) {
 
 test('OPT-01: 子智能体分栏在步间 status=3 空档期借助 conversation_summaries.db RUNNING 保持 HUD 流式计时与父会话活跃计数', async (t) => {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-opt01-'));
-  t.after(() => fs.rmSync(baseDir, { recursive: true, force: true }));
+  t.after(() => { closeTrackedDbs(t); fs.rmSync(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }); });
   const convDir = path.join(baseDir, 'conversations');
   fs.mkdirSync(convDir, { recursive: true });
 
   const mainId = '11111111-aaaa-4111-8111-111111111111';
   const childId = '22222222-bbbb-4222-8222-222222222222';
 
-  const summariesDb = new DatabaseSync(path.join(baseDir, 'conversation_summaries.db'));
+  const summariesDb = trackDb(t, new DatabaseSync(path.join(baseDir, 'conversation_summaries.db')));
   t.after(() => {
     try {
       summariesDb.close();

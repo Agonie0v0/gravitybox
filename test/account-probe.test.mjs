@@ -13,7 +13,7 @@ import {
 
 const LS_BIN = '/Applications/Antigravity.app/Contents/Resources/bin/language_server';
 const INSIDERS_LS_BIN = '/Applications/Antigravity - Insiders.app/Contents/Resources/bin/language_server';
-const testTarget = () => applicationTarget('stable', '/Users/test');
+const testTarget = () => applicationTarget('stable', '/Users/test', { appPath: '/Applications/Antigravity.app' });
 const testMappers = { modelQuotaFromNormalized, groupToQuotaGroup };
 
 function makeFetchMock({

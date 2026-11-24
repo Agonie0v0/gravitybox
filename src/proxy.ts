@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as net from 'node:net';
-import { join } from 'node:path';
+import { join, win32 as win32Path } from 'node:path';
 import * as tls from 'node:tls';
 import { promisify } from 'node:util';
 import { bt } from './i18n.js';
@@ -250,6 +250,200 @@ export function parseScutilProxyOutput(stdout: string): SystemProxySnapshot {
   };
 }
 
+function parseProxyEndpointUrl(
+  defaultScheme: 'http' | 'socks5',
+  rawValue: string | undefined
+): { scheme: 'http' | 'https' | 'socks'; url: string } | null {
+  const trimmed = (rawValue ?? '').trim();
+  if (!trimmed) return null;
+  if (/^socks(?:4a?|5h?)?:\/\//i.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      if (!parsed.hostname || !parsed.port) return null;
+      return { scheme: 'socks', url: `${parsed.protocol}//${parsed.hostname}:${parsed.port}` };
+    } catch {
+      return null;
+    }
+  }
+  const hasHttpScheme = /^https?:\/\//i.test(trimmed);
+  const candidate = hasHttpScheme ? trimmed : `${defaultScheme}://${trimmed}`;
+  try {
+    const parsed = new URL(candidate);
+    if (!parsed.hostname) return null;
+    const port = parsed.port
+      ? Number.parseInt(parsed.port, 10)
+      : parsed.protocol === 'https:'
+        ? 443
+        : parsed.protocol === 'http:'
+          ? 80
+          : 0;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+    const authPrefix = parsed.username
+      ? `${parsed.username}${parsed.password ? `:${parsed.password}` : ''}@`
+      : '';
+    const url = `${parsed.protocol}//${authPrefix}${parsed.hostname}:${port}`;
+    if (parsed.protocol === 'https:') return { scheme: 'https', url };
+    if (parsed.protocol === 'http:') return { scheme: 'http', url };
+    return { scheme: 'socks', url };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse Windows `reg.exe query "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings"` output.
+ */
+export function parseWindowsInternetSettingsOutput(stdout: string): SystemProxySnapshot {
+  const values = new Map<string, string>();
+  for (const rawLine of String(stdout ?? '').split(/\r?\n/)) {
+    const match = rawLine.match(/^\s*(\S+)\s+REG_[A-Z0-9_]+\s+(.*)$/i);
+    if (!match || !match[1]) continue;
+    values.set(match[1].toLowerCase(), (match[2] ?? '').trim());
+  }
+
+  const rawEnable = (values.get('proxyenable') ?? '').toLowerCase();
+  const proxyEnabled = rawEnable === '0x1' || rawEnable === '1';
+  const rawServer = (values.get('proxyserver') ?? '').trim();
+  const rawOverride = (values.get('proxyoverride') ?? '').trim();
+  const rawPacUrl = (values.get('autoconfigurl') ?? '').trim();
+
+  const exceptions: string[] = [];
+  const seenExceptions = new Set<string>();
+  if (rawOverride) {
+    for (const part of rawOverride.split(';')) {
+      const entry = part.trim();
+      if (entry && !seenExceptions.has(entry)) {
+        seenExceptions.add(entry);
+        exceptions.push(entry);
+      }
+    }
+  }
+
+  let httpUrl: string | null = null;
+  let httpsUrl: string | null = null;
+  let socksUrl: string | null = null;
+
+  if (proxyEnabled && rawServer) {
+    const entries = rawServer.includes('=')
+      ? rawServer.split(';').map(s => s.trim()).filter(Boolean)
+      : [rawServer];
+
+    if (rawServer.includes('=')) {
+      for (const item of entries) {
+        const eqIdx = item.indexOf('=');
+        if (eqIdx <= 0) continue;
+        const proto = item.slice(0, eqIdx).trim().toLowerCase();
+        const target = item.slice(eqIdx + 1).trim();
+        if (!target) continue;
+        if (proto === 'http') {
+          const parsed = parseProxyEndpointUrl('http', target);
+          if (parsed && parsed.scheme !== 'socks') httpUrl = parsed.url;
+        } else if (proto === 'https') {
+          const parsed = parseProxyEndpointUrl('http', target);
+          if (parsed && parsed.scheme !== 'socks') httpsUrl = parsed.url;
+        } else if (proto === 'socks' || proto === 'socks4' || proto === 'socks5') {
+          const parsed = parseProxyEndpointUrl('socks5', target);
+          if (parsed) socksUrl = parsed.url;
+        }
+      }
+    } else {
+      const parsed = parseProxyEndpointUrl('http', rawServer);
+      if (parsed) {
+        if (parsed.scheme === 'socks') {
+          socksUrl = parsed.url;
+        } else {
+          httpUrl = parsed.url;
+          httpsUrl = parsed.url;
+        }
+      }
+    }
+  }
+
+  const pacUrl = rawPacUrl || null;
+  return {
+    httpEnabled: httpUrl !== null,
+    httpUrl,
+    httpsEnabled: httpsUrl !== null,
+    httpsUrl,
+    socksEnabled: socksUrl !== null,
+    socksUrl,
+    pacEnabled: pacUrl !== null,
+    pacUrl,
+    exceptions,
+  };
+}
+
+/**
+ * Build a SystemProxySnapshot from standard proxy environment variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`).
+ */
+export function parseEnvProxySnapshot(env: NodeJS.ProcessEnv = process.env): SystemProxySnapshot {
+  const rawHttp = (env.HTTP_PROXY ?? env.http_proxy ?? '').trim();
+  const rawHttps = (env.HTTPS_PROXY ?? env.https_proxy ?? '').trim();
+  const rawAll = (env.ALL_PROXY ?? env.all_proxy ?? '').trim();
+  const rawNoProxy = (env.NO_PROXY ?? env.no_proxy ?? '').trim();
+
+  let httpUrl: string | null = null;
+  let httpsUrl: string | null = null;
+  let socksUrl: string | null = null;
+
+  const parsedHttp = parseProxyEndpointUrl('http', rawHttp);
+  if (parsedHttp) {
+    if (parsedHttp.scheme === 'socks') socksUrl = parsedHttp.url;
+    else httpUrl = parsedHttp.url;
+  }
+
+  const parsedHttps = parseProxyEndpointUrl('http', rawHttps);
+  if (parsedHttps) {
+    if (parsedHttps.scheme === 'socks') socksUrl ??= parsedHttps.url;
+    else httpsUrl = parsedHttps.url;
+  }
+
+  if (!httpUrl && !httpsUrl && !socksUrl && rawAll) {
+    const parsedAll = parseProxyEndpointUrl('http', rawAll);
+    if (parsedAll) {
+      if (parsedAll.scheme === 'socks') {
+        socksUrl = parsedAll.url;
+      } else {
+        httpUrl = parsedAll.url;
+        httpsUrl = parsedAll.url;
+      }
+    }
+  }
+
+  const exceptions: string[] = [];
+  const seen = new Set<string>();
+  if (rawNoProxy) {
+    for (const part of rawNoProxy.split(',')) {
+      const entry = part.trim();
+      if (entry && !seen.has(entry)) {
+        seen.add(entry);
+        exceptions.push(entry);
+      }
+    }
+  }
+
+  return {
+    httpEnabled: httpUrl !== null,
+    httpUrl,
+    httpsEnabled: httpsUrl !== null,
+    httpsUrl,
+    socksEnabled: socksUrl !== null,
+    socksUrl,
+    pacEnabled: false,
+    pacUrl: null,
+    exceptions,
+  };
+}
+
+function hasAnyConfiguredProxy(snapshot: SystemProxySnapshot): boolean {
+  return snapshot.httpEnabled || snapshot.httpsEnabled || snapshot.socksEnabled || snapshot.pacEnabled;
+}
+
+export function resolveWindowsRegExePath(env: NodeJS.ProcessEnv = process.env): string {
+  const systemRoot = (env.SystemRoot || env.WINDIR || 'C:\\Windows').trim() || 'C:\\Windows';
+  return win32Path.join(systemRoot, 'System32', 'reg.exe');
+}
+
 export function clearSystemProxyCache(): void {
   systemProxyCache = null;
 }
@@ -257,6 +451,8 @@ export function clearSystemProxyCache(): void {
 export async function readSystemProxySnapshot(options?: {
   forceRefresh?: boolean;
   execScutil?: () => Promise<string>;
+  execWinReg?: () => Promise<string>;
+  env?: NodeJS.ProcessEnv;
 }): Promise<SystemProxySnapshot> {
   if (options?.execScutil) {
     try {
@@ -267,8 +463,26 @@ export async function readSystemProxySnapshot(options?: {
     }
   }
 
-  if (process.platform !== 'darwin') {
-    return { ...EMPTY_SYSTEM_SNAPSHOT, exceptions: [] };
+  if (options?.execWinReg) {
+    try {
+      const stdout = await options.execWinReg();
+      const regSnap = parseWindowsInternetSettingsOutput(stdout);
+      if (hasAnyConfiguredProxy(regSnap)) return regSnap;
+      const envSnap = parseEnvProxySnapshot(options.env ?? {});
+      if (hasAnyConfiguredProxy(envSnap)) {
+        return {
+          ...envSnap,
+          exceptions: Array.from(new Set([...regSnap.exceptions, ...envSnap.exceptions])),
+        };
+      }
+      return regSnap;
+    } catch {
+      return options.env ? parseEnvProxySnapshot(options.env) : { ...EMPTY_SYSTEM_SNAPSHOT, exceptions: [] };
+    }
+  }
+
+  if (process.platform !== 'darwin' && process.platform !== 'win32') {
+    return parseEnvProxySnapshot(options?.env ?? process.env);
   }
 
   const now = Date.now();
@@ -286,23 +500,44 @@ export async function readSystemProxySnapshot(options?: {
 
   const task = (async (): Promise<SystemProxySnapshot> => {
     try {
-      const { stdout } = await execFileAsync('/usr/sbin/scutil', ['--proxy'], {
-        encoding: 'utf8',
-        timeout: 2000,
-      });
-      const parsed = parseScutilProxyOutput(stdout);
+      let parsed: SystemProxySnapshot;
+      if (process.platform === 'win32') {
+        const { stdout } = await execFileAsync(
+          resolveWindowsRegExePath(),
+          ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'],
+          { encoding: 'utf8', timeout: 2000, windowsHide: true }
+        );
+        const regSnap = parseWindowsInternetSettingsOutput(stdout);
+        if (hasAnyConfiguredProxy(regSnap)) {
+          parsed = regSnap;
+        } else {
+          const envSnap = parseEnvProxySnapshot(options?.env ?? process.env);
+          parsed = hasAnyConfiguredProxy(envSnap)
+            ? { ...envSnap, exceptions: Array.from(new Set([...regSnap.exceptions, ...envSnap.exceptions])) }
+            : regSnap;
+        }
+      } else {
+        const { stdout } = await execFileAsync('/usr/sbin/scutil', ['--proxy'], {
+          encoding: 'utf8',
+          timeout: 2000,
+        });
+        parsed = parseScutilProxyOutput(stdout);
+      }
       systemProxyCache = {
         snapshot: parsed,
         expiresAt: Date.now() + SYSTEM_PROXY_CACHE_TTL_MS,
       };
       return parsed;
     } catch {
-      const empty: SystemProxySnapshot = { ...EMPTY_SYSTEM_SNAPSHOT, exceptions: [] };
+      const fallback: SystemProxySnapshot =
+        process.platform === 'win32'
+          ? parseEnvProxySnapshot(options?.env ?? process.env)
+          : { ...EMPTY_SYSTEM_SNAPSHOT, exceptions: [] };
       systemProxyCache = {
-        snapshot: empty,
+        snapshot: fallback,
         expiresAt: Date.now() + SYSTEM_PROXY_CACHE_TTL_MS,
       };
-      return empty;
+      return fallback;
     }
   })();
 
@@ -510,6 +745,9 @@ function matchesBypassPattern(
   const pattern = rawPattern.trim().toLowerCase();
   if (!pattern) return false;
   if (pattern === '*') return true;
+  if (pattern === '<local>') {
+    return !unbracketedHost.includes('.') && targetIpv4 === null && !unbracketedHost.includes(':');
+  }
 
   if (pattern.includes('/')) {
     if (targetIpv4 === null) return false;

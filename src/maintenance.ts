@@ -1,6 +1,5 @@
 import { lstat, readdir, mkdir, readFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { ReentrantMutex } from './mutex.js';
 import { executeMoves, reconcileMoves, readMaintenanceManifest, type JournalMove } from './maintenance-journal.js';
@@ -30,6 +29,13 @@ import {
   type SubTargetSpec,
 } from './maintenance-catalog.js';
 import { bt } from './i18n.js';
+import {
+  defaultGravityBoxCacheDir,
+  defaultTrashDir,
+  isWindows,
+  moveToSystemTrash,
+  pathsEqual,
+} from './platform/index.js';
 import {
   checkRunningConversation,
   collectAgentConversationTargets,
@@ -91,13 +97,17 @@ export class CacheMaintenance {
   };
 
   private useDefaultRunningProbe = false;
+  private readonly trash: string;
+  private readonly useSystemTrash: boolean;
 
   constructor(
     private profile: string,
-    private trash = join(homedir(), '.Trash'),
+    trash?: string,
     private running: () => Promise<boolean | ProcessProbeState> = antigravityRunning,
     private options: CacheMaintenanceOptions = {},
   ) {
+    this.useSystemTrash = trash === undefined && isWindows();
+    this.trash = trash ?? defaultTrashDir();
     this.useDefaultRunningProbe = running === antigravityRunning;
   }
 
@@ -121,14 +131,18 @@ export class CacheMaintenance {
     if (this.options.stateDir) {
       return join(resolve(this.options.stateDir), 'maintenance-trash');
     }
-    return join(homedir(), 'Library', 'Caches', 'GravityBox', 'maintenance-trash');
+    return join(defaultGravityBoxCacheDir(), 'maintenance-trash');
   }
 
   private candidateTrashDirs(): string[] {
+    if (this.useSystemTrash) {
+      return [this.fallbackTrashDir()];
+    }
     return Array.from(new Set([resolve(this.trash), this.fallbackTrashDir()]));
   }
 
   private async isPrimaryTrashAccessible(): Promise<boolean> {
+    if (this.useSystemTrash) return true;
     try {
       await readdir(resolve(this.trash));
       return true;
@@ -716,8 +730,12 @@ export class CacheMaintenance {
       };
 
       const { running, browserBusy, hostState, browserState, processProbeUnknown } = procState;
-      const usingFallbackTrash = !primaryAccessible;
-      const trashDir = primaryAccessible ? resolve(this.trash) : this.fallbackTrashDir();
+      const usingFallbackTrash = this.useSystemTrash ? false : !primaryAccessible;
+      const trashDir = this.useSystemTrash
+        ? 'Recycle Bin'
+        : primaryAccessible
+          ? resolve(this.trash)
+          : this.fallbackTrashDir();
 
       const entries = fullEntries.map(({ isSingleLegacyRoot: _legacy, subTargets: _subs, ...publicEntry }) => publicEntry);
       const safeBytes = entries.filter(e => e.category === 'safe').reduce((n, e) => n + e.bytes, 0);
@@ -807,17 +825,21 @@ export class CacheMaintenance {
     const usesMultiSchema = activeRows.some(row => !row.isSingleLegacyRoot);
     const stamp = Date.now();
     const snapshotFolderName = `GravityBox-缓存-${stamp}`;
-    const primaryRoot = resolve(this.trash);
+    const primaryRoot = this.useSystemTrash ? this.fallbackTrashDir() : resolve(this.trash);
     let vaultRoot = primaryRoot;
     let primaryUsable = true;
-    try {
-      await mkdir(primaryRoot, { recursive: true });
-      await readdir(primaryRoot);
-    } catch (error) {
-      if (isTrashPermissionError(error)) {
-        primaryUsable = false;
-      } else {
-        throw error;
+    if (this.useSystemTrash) {
+      await mkdir(vaultRoot, { recursive: true, mode: 0o700 });
+    } else {
+      try {
+        await mkdir(primaryRoot, { recursive: true });
+        await readdir(primaryRoot);
+      } catch (error) {
+        if (isTrashPermissionError(error)) {
+          primaryUsable = false;
+        } else {
+          throw error;
+        }
       }
     }
     let target = join(vaultRoot, snapshotFolderName);
@@ -825,7 +847,7 @@ export class CacheMaintenance {
       try {
         await mkdir(target, { recursive: true, mode: 0o700 });
       } catch (error) {
-        if (isTrashPermissionError(error)) {
+        if (!this.useSystemTrash && isTrashPermissionError(error)) {
           primaryUsable = false;
         } else {
           throw error;
@@ -888,7 +910,31 @@ export class CacheMaintenance {
       await this.options.onMutated();
     }
 
-    const usingFallbackTrash = vaultRoot !== primaryRoot;
+    let movedToSystemTrash = false;
+    let usingFallbackTrash = vaultRoot !== primaryRoot;
+    let finalTrashDir = vaultRoot;
+    let finalRestorePath = target;
+    let restorableInApp = true;
+
+    if (this.useSystemTrash) {
+      const trashMover = this.options.moveToSystemTrash ?? moveToSystemTrash;
+      try {
+        await trashMover([target]);
+        movedToSystemTrash = true;
+        usingFallbackTrash = false;
+        finalTrashDir = 'Recycle Bin';
+        finalRestorePath = '';
+        restorableInApp = false;
+      } catch {
+        // 系统回收站不可用时，保留已落盘的 fallbackTrashDir 快照与恢复清单，支持应用内可撤回恢复
+        movedToSystemTrash = false;
+        usingFallbackTrash = true;
+        finalTrashDir = vaultRoot;
+        finalRestorePath = target;
+        restorableInApp = true;
+      }
+    }
+
     const supersededSnapshotPaths = usingFallbackTrash
       ? await this.collectSupersededFallbackSnapshots(snapshotFolderName, options.keepLocalSnapshots)
       : [];
@@ -909,9 +955,11 @@ export class CacheMaintenance {
       clearedBytes,
       clearedFiles,
       snapshotId: snapshotFolderName,
-      restorePath: target,
-      trashDir: vaultRoot,
+      restorePath: finalRestorePath,
+      trashDir: finalTrashDir,
       usingFallbackTrash,
+      movedToSystemTrash,
+      restorableInApp,
       supersededSnapshotPaths,
     };
   }
@@ -982,8 +1030,8 @@ export class CacheMaintenance {
           clearedFiles: 0,
           snapshotId: '',
           restorePath: '',
-          trashDir: primaryAccessible ? resolve(this.trash) : this.fallbackTrashDir(),
-          usingFallbackTrash: !primaryAccessible,
+          trashDir: this.useSystemTrash ? 'Recycle Bin' : primaryAccessible ? resolve(this.trash) : this.fallbackTrashDir(),
+          usingFallbackTrash: this.useSystemTrash ? false : !primaryAccessible,
           supersededSnapshotPaths: [] as string[],
         };
       }
@@ -1064,8 +1112,8 @@ export class CacheMaintenance {
           clearedFiles: 0,
           snapshotId: '',
           restorePath: '',
-          trashDir: primaryAccessible ? resolve(this.trash) : this.fallbackTrashDir(),
-          usingFallbackTrash: !primaryAccessible,
+          trashDir: this.useSystemTrash ? 'Recycle Bin' : primaryAccessible ? resolve(this.trash) : this.fallbackTrashDir(),
+          usingFallbackTrash: this.useSystemTrash ? false : !primaryAccessible,
           supersededSnapshotPaths: [] as string[],
         };
       }
@@ -1146,7 +1194,7 @@ export class CacheMaintenance {
           seenToPaths.add(name);
           const expectedTo = join(dir, name);
           const expectedFrom = join(this.profile, name);
-          if (toPath !== expectedTo) throw Error(bt('maintenance.err.snapshot_path_invalid'));
+          if (!pathsEqual(toPath, expectedTo)) throw Error(bt('maintenance.err.snapshot_path_invalid'));
           plans.push({
             label: name,
             entryName: name,

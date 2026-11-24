@@ -34,7 +34,7 @@ import {
 } from './ipc-projections.js';
 export { mergeLiveQuotaWithSaved, normalizeSubscriptionTier, projectQuotaContract };
 import { CacheMaintenance } from './maintenance.js';
-import { mkdir, lstat, chmod, unlink, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, lstat, chmod, readFile, readdir, writeFile } from 'node:fs/promises';
 import { realpathSync, readFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -64,6 +64,27 @@ import { createHash } from 'node:crypto';
 import { IdempotencyStore, canonicalPayload } from './ipc-idempotency.js';
 export { canonicalPayload } from './ipc-idempotency.js';
 import { loadProxyConfigFromStateDir, redactProxyUrl, resolveEffectiveProxy, setRuntimeProxyConfig } from './proxy.js';
+import {
+  appProcesses,
+  cleanupIpcEndpoint,
+  cleanupIpcSession,
+  defaultAntigravityInstallDirs,
+  defaultAppSupportDir,
+  defaultGravityBoxStateDir,
+  finalizeIpcEndpointAfterListen,
+  isOwnedByCurrentUser,
+  isPathUnder,
+  isWindows,
+  pathsEqual,
+  prepareIpcEndpointForListen,
+  prepareWindowsIpcForListen,
+  resolveClientIpcTarget,
+  resolveIpcEndpoint,
+  validateIpcEndpointForClient,
+  verifyIpcAuthToken,
+  writeIpcSession,
+  type WindowsIpcSession,
+} from './platform/index.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -76,7 +97,9 @@ function sanitizeErrorMessage(err: unknown): string {
   if (!(err instanceof Error)) return bt('common.action_incomplete');
   const msg = err.message || '';
   const redacted = sanitizeError(msg);
-  const sanitized = redacted.replace(/\/(?:Users|private|var|tmp|Volumes)\/[^\s'"]+/g, bt('common.path_token'));
+  const sanitized = redacted
+    .replace(/\/(?:Users|private|var|tmp|Volumes)\/[^\s'"]+/g, bt('common.path_token'))
+    .replace(/[A-Za-z]:\\(?:Users|ProgramData|Windows\\Temp)\\[^\s'"]+/gi, bt('common.path_token'));
   return sanitized.slice(0, 200);
 }
 
@@ -399,20 +422,18 @@ export async function buildDashboardAggregate(deps: DashboardAggregateDeps): Pro
 
 export async function request(command: string): Promise<any> {
   const argv = process.argv.slice(2);
-  const targetStateDir = resolve(cliOption(argv, '--state-dir', join(homedir(), 'Library', 'Application Support', 'GravityBox'))!);
-  const targetSocketPath = join(targetStateDir, 'control.sock');
-  const sockInfo = await lstat(targetSocketPath).catch((err: NodeJS.ErrnoException) => {
-    if (err?.code === 'ENOENT') throw new Error(bt('main.assistant_not_running'));
-    throw err;
-  });
-  if (!sockInfo.isSocket() || sockInfo.isSymbolicLink() || sockInfo.uid !== process.getuid?.()) {
-    throw new Error(bt('main.socket_mismatch'));
+  const targetStateDir = resolve(cliOption(argv, '--state-dir', defaultGravityBoxStateDir())!);
+  const target = await resolveClientIpcTarget(targetStateDir);
+  if (!target) {
+    throw new Error(bt('main.assistant_not_running'));
   }
+  await validateIpcEndpointForClient(target.endpoint);
+  const requestPayload = target.authToken ? { command, authToken: target.authToken } : { command };
   return new Promise((resolveReply, reject) => {
-    const client = createConnection(targetSocketPath); let buffer = ''; let received = 0;
+    const client = createConnection(target.endpoint); let buffer = ''; let received = 0;
     const decoder = new StringDecoder('utf8');
     client.setTimeout(['status', 'ping', 'task_list', 'proxy_get'].includes(command) ? 8000 : 120000, () => { client.destroy(); reject(new Error(bt('main.request_timeout'))); });
-    client.on('connect', () => client.write(JSON.stringify({ command }) + '\n'));
+    client.on('connect', () => client.write(JSON.stringify(requestPayload) + '\n'));
     client.on('data', bytes => {
       // CLI 必须与 socket 服务端一样按 UTF-8 流解码：多字节中文可能跨 chunk 边界，
       // 逐 chunk toString() 会产生 U+FFFD 并损坏 coverage_report/dictionary_export 的 JSON。
@@ -426,10 +447,10 @@ export async function request(command: string): Promise<any> {
 }
 async function run() {
   const projectRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
-  if (process.cwd() !== '/' && resolve(process.cwd()) === projectRoot) {
+  if (process.cwd() !== '/' && pathsEqual(resolve(process.cwd()), projectRoot)) {
     const cwdEnvPath = join(projectRoot, '.env');
     const cwdEnvInfo = await lstat(cwdEnvPath).catch(() => null);
-    if (cwdEnvInfo && cwdEnvInfo.isFile() && !cwdEnvInfo.isSymbolicLink() && cwdEnvInfo.uid === process.getuid?.()) {
+    if (cwdEnvInfo && cwdEnvInfo.isFile() && !cwdEnvInfo.isSymbolicLink() && isOwnedByCurrentUser(cwdEnvInfo)) {
       try {
         process.loadEnvFile?.(cwdEnvPath);
       } catch (error: any) {
@@ -444,14 +465,14 @@ async function run() {
   const command = option('--command');
   if (command) { console.log(JSON.stringify(await request(command))); return; }
   if (args.includes('--heal')) throw new Error(bt('main.heal_unsupported'));
-  const stateDir = resolve(option('--state-dir', join(homedir(), 'Library', 'Application Support', 'GravityBox'))!);
+  const stateDir = resolve(option('--state-dir', defaultGravityBoxStateDir())!);
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   const stateInfo = await lstat(stateDir);
-  if (!stateInfo.isDirectory() || stateInfo.isSymbolicLink() || stateInfo.uid !== process.getuid?.()) throw new Error(bt('main.state_dir_mismatch'));
-  await chmod(stateDir, 0o700);
+  if (!stateInfo.isDirectory() || stateInfo.isSymbolicLink() || !isOwnedByCurrentUser(stateInfo)) throw new Error(bt('main.state_dir_mismatch'));
+  if (!isWindows()) await chmod(stateDir, 0o700);
   const envPath = join(stateDir, '.env');
   const envInfo = await lstat(envPath).catch(() => null);
-  if (envInfo && envInfo.isFile() && !envInfo.isSymbolicLink() && envInfo.uid === process.getuid?.()) {
+  if (envInfo && envInfo.isFile() && !envInfo.isSymbolicLink() && isOwnedByCurrentUser(envInfo)) {
     try {
       process.loadEnvFile?.(envPath);
     } catch (error: any) {
@@ -460,7 +481,8 @@ async function run() {
       }
     }
   }
-  const socketPath = join(stateDir, 'control.sock');
+  let windowsIpcSession: WindowsIpcSession | null = null;
+  let socketPath = resolveIpcEndpoint(stateDir);
   let configuredChannel: unknown;
   let configuredHudEnabled: unknown;
   let configuredAppLanguage: unknown;
@@ -498,7 +520,7 @@ async function run() {
     console.log(JSON.stringify(endpoint ? { found: true, pid: endpoint.pid, appVersion: endpoint.appVersion, legacyPatch: endpoint.legacyPatch, loopback: true } : { found: false })); return;
   }
   const geminiDir = option('--gemini-dir', process.env.GRAVITYBOX_GEMINI_DIR || process.env.GEMINI_DIR || join(homedir(), '.gemini'))!;
-  const cacheMaintenance = new CacheMaintenance(profile, join(homedir(), '.Trash'), undefined, { stateDir: channelStateDir, geminiDir, appPath });
+  const cacheMaintenance = new CacheMaintenance(profile, isWindows() ? undefined : join(homedir(), '.Trash'), undefined, { stateDir: channelStateDir, geminiDir, appPath });
   const accountsManager = new AccountsManager(stateDir, { target });
   const liveIdeModelsPath = join(stateDir, 'live-ide-models.json');
   let liveSnapshotWriteChain = Promise.resolve();
@@ -529,7 +551,7 @@ async function run() {
   }
   const accountLogin = new GoogleAccountLogin((token, signal) => accountsManager.addAccountFromOAuth(token, signal));
   const homeDir = option('--home-dir', process.env.GRAVITYBOX_HOME_DIR || homedir())!;
-  const appSupportDir = option('--app-support-dir', process.env.GRAVITYBOX_APP_SUPPORT_DIR || join(homedir(), 'Library', 'Application Support'))!;
+  const appSupportDir = option('--app-support-dir', process.env.GRAVITYBOX_APP_SUPPORT_DIR || defaultAppSupportDir())!;
   const switchService = new AccountSwitchService(accountsManager, { stateDir, profile, channel, homeDir, geminiDir });
   const usageManager = new UsageStatsManager({ stateDir, geminiDir });
   cacheMaintenance.setHooks({
@@ -664,28 +686,23 @@ async function run() {
       await atomicJson(configPath, { ...document, applicationChannel: 'stable' });
     }
   }
-  try {
-    const info = await lstat(socketPath);
-    if (!info.isSocket() || info.uid !== process.getuid?.()) throw new Error(bt('main.socket_mismatch'));
-    // Connection acceptance proves a live server even if a long operation delays its reply.
-    const live = await new Promise<boolean>((resolveLive, reject) => {
-      const client = createConnection(socketPath);
-      client.once('connect', () => { client.destroy(); resolveLive(true); });
-      client.once('error', (error: NodeJS.ErrnoException) => {
-        if (['ECONNREFUSED', 'ENOENT'].includes(error.code ?? '')) resolveLive(false);
-        else reject(new Error(bt('main.socket_unconfirmed')));
-      });
-      client.setTimeout(1500, () => { client.destroy(); reject(new Error(bt('main.socket_busy'))); });
-    });
-    if (live) throw new Error(bt('main.assistant_already_running'));
-    const current = await lstat(socketPath);
-    if (current.ino !== info.ino || current.dev !== info.dev) throw new Error(bt('main.socket_changed'));
-    await unlink(socketPath);
-  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  if (isWindows()) {
+    windowsIpcSession = await prepareWindowsIpcForListen(stateDir);
+    socketPath = windowsIpcSession.pipeName;
+  } else {
+    await prepareIpcEndpointForListen(socketPath);
+  }
+  const cleanupIpc = async () => {
+    if (windowsIpcSession) {
+      await cleanupIpcSession(stateDir, process.pid).catch(() => {});
+    } else {
+      await cleanupIpcEndpoint(socketPath).catch(() => {});
+    }
+  };
   await mkdir(channelStateDir, { recursive: true, mode: 0o700 });
   const userDir = join(stateDir, '词典'); await mkdir(userDir, { recursive: true, mode: 0o700 });
   const userInfo = await lstat(userDir);
-  if (userInfo.isSymbolicLink() || !userInfo.isDirectory() || userInfo.uid !== process.getuid?.()) throw new Error(bt('main.dict_dir_mismatch'));
+  if (userInfo.isSymbolicLink() || !userInfo.isDirectory() || !isOwnedByCurrentUser(userInfo)) throw new Error(bt('main.dict_dir_mismatch'));
   const personalPath = join(userDir, '个人覆盖.json');
   try { await lstat(personalPath); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') await atomicJson(personalPath, {}); else throw error; }
   const baseDir = fileURLToPath(new URL('../dict/', import.meta.url));
@@ -1251,6 +1268,10 @@ async function run() {
       client.setTimeout(120_000, () => client.destroy());
       try { parsed = JSON.parse(input.split('\n')[0]!); } catch { reply({ ok: false, error: bt('main.request_invalid_format') }); return; }
       if(!parsed||typeof parsed!=='object'||Array.isArray(parsed)){reply({ok:false,error:bt('main.request_invalid_format')});return;}
+      if (windowsIpcSession && !verifyIpcAuthToken(parsed.authToken, windowsIpcSession.authToken)) {
+        reply({ ok: false, error: bt('main.socket_mismatch') });
+        return;
+      }
       const command = parsed.command;
       if (stopping && command !== 'stop') {
         reply({ ok: false, error: bt('main.assistant_not_running') });
@@ -1602,24 +1623,46 @@ async function run() {
           const insidersPrefix = '/Applications/Antigravity - Insiders.app/Contents/';
           const stablePrefix = `${target.appPath}/Contents/`;
           try {
-            const { stdout: psOut } = await execFileAsync('/bin/ps', ['-ax', '-ww', '-o', 'pid=,pcpu=,args='], { timeout: 3000 });
-            for (const line of psOut.split('\n')) {
-              const m = line.trim().match(/^(\d+)\s+([\d.]+)\s+(.*)$/);
-              if (!m) continue;
-              const cpu = parseFloat(m[2] || '0');
-              const args = m[3] || '';
-              if (args.startsWith(insidersPrefix)) {
-                // Align with AccountSwitchService.guardStopped(): block any Insiders process sharing official credentials.
-                appRunning = true;
-                insidersRunning = true;
-              } else if (args.startsWith(stablePrefix)) {
-                appRunning = true;
-                stableRunning = true;
-              } else {
-                continue;
+            if (isWindows()) {
+              const stableRoots = new Set<string>([target.appPath]);
+              const insidersRoots = new Set<string>();
+              for (const dir of defaultAntigravityInstallDirs()) {
+                stableRoots.add(join(dir, 'Antigravity'));
+                insidersRoots.add(join(dir, 'Antigravity - Insiders'));
+                insidersRoots.add(join(dir, 'Antigravity Insiders'));
+                insidersRoots.add(join(dir, 'Antigravity-Insiders'));
               }
-              if (/language_server/i.test(args) && cpu > maxLsCpu) {
-                maxLsCpu = cpu;
+              const procs = await appProcesses([...stableRoots, ...insidersRoots]);
+              for (const proc of procs) {
+                const isInsiders = Array.from(insidersRoots).some(root => isPathUnder(proc.exePath, root, 'win32'));
+                if (isInsiders) {
+                  appRunning = true;
+                  insidersRunning = true;
+                } else if (Array.from(stableRoots).some(root => isPathUnder(proc.exePath, root, 'win32'))) {
+                  appRunning = true;
+                  stableRunning = true;
+                }
+              }
+            } else {
+              const { stdout: psOut } = await execFileAsync('/bin/ps', ['-ax', '-ww', '-o', 'pid=,pcpu=,args='], { timeout: 3000 });
+              for (const line of psOut.split('\n')) {
+                const m = line.trim().match(/^(\d+)\s+([\d.]+)\s+(.*)$/);
+                if (!m) continue;
+                const cpu = parseFloat(m[2] || '0');
+                const args = m[3] || '';
+                if (args.startsWith(insidersPrefix)) {
+                  // Align with AccountSwitchService.guardStopped(): block any Insiders process sharing official credentials.
+                  appRunning = true;
+                  insidersRunning = true;
+                } else if (args.startsWith(stablePrefix)) {
+                  appRunning = true;
+                  stableRunning = true;
+                } else {
+                  continue;
+                }
+                if (/language_server/i.test(args) && cpu > maxLsCpu) {
+                  maxLsCpu = cpu;
+                }
               }
             }
           } catch {}
@@ -2145,7 +2188,7 @@ async function run() {
               await cacheChain.catch(() => {});
               reply({ ok: true, status: controller.snapshot() });
             } finally {
-              await unlink(socketPath).catch(() => {});
+              await cleanupIpc();
               await backendLease?.release().catch(() => {});
               setTimeout(() => process.exit(0), 100);
             }
@@ -2310,16 +2353,24 @@ async function run() {
   }, 45_000);
   periodicRemoteSyncTimer.unref();
   server.maxConnections = 64;
-  const previousUmask = process.umask(0o177);
-  try {
+  if (isWindows()) {
     await new Promise<void>((resolveListen, reject) => { server.once('error', reject); server.listen(socketPath, resolveListen); });
-  } finally {
-    process.umask(previousUmask);
+  } else {
+    const previousUmask = process.umask(0o177);
+    try {
+      await new Promise<void>((resolveListen, reject) => { server.once('error', reject); server.listen(socketPath, resolveListen); });
+    } finally {
+      process.umask(previousUmask);
+    }
   }
   server.on('error', error => {
     console.error(`[GravityBox] ${sanitizeError(error?.message ?? bt('main.uncaught_exception'))}`);
   });
-  await chmod(socketPath, 0o600);
+  if (windowsIpcSession) {
+    await writeIpcSession(stateDir, windowsIpcSession);
+  } else {
+    await finalizeIpcEndpointAfterListen(socketPath);
+  }
   const stop = async (code = 0) => {
     if (stopping) return; stopping = true;
     clearTimeout(startupPricingSyncTimer);
@@ -2337,7 +2388,7 @@ async function run() {
       await writeChain.catch(() => {});
       await cacheChain.catch(() => {});
     } finally {
-      await unlink(socketPath).catch(() => {});
+      await cleanupIpc();
       await backendLease?.release().catch(() => {});
       process.exit(code);
     }
@@ -2385,6 +2436,9 @@ async function run() {
   await controller.start();
   void syncActiveAccountToUsageManager(true).catch(() => {});
   } catch (error) {
+    if (windowsIpcSession) {
+      await cleanupIpcSession(stateDir, process.pid).catch(() => {});
+    }
     await backendLease?.release().catch(() => {});
     throw error;
   }
@@ -2395,8 +2449,8 @@ function isDirectEntry(): boolean {
   const entry = process.argv[1];
   if (!entry) return false;
   const modulePath = fileURLToPath(import.meta.url);
-  if (resolve(entry) === modulePath) return true;
-  try { return realpathSync(entry) === realpathSync(modulePath); } catch { return false; }
+  if (pathsEqual(resolve(entry), modulePath)) return true;
+  try { return pathsEqual(realpathSync(entry), realpathSync(modulePath)); } catch { return false; }
 }
 if (process.env.GRAVITYBOX_IMPORT_ONLY !== '1' && isDirectEntry()) {
   run().catch(error => { console.error(`[GravityBox] ${sanitizeError((error as Error)?.message ?? bt('main.startup_failed'))}`); process.exitCode = 1; });

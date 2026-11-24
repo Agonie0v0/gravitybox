@@ -2,16 +2,27 @@ import { type ApplicationChannel, type ApplicationTarget, applicationTarget } fr
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile, mkdir, lstat, unlink, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { createRequire } from 'node:module';
+import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
+import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID, createHash } from 'node:crypto';
 import { atomicJson, atomicText, sanitizeError } from './files.js';
 import { withProcessLease } from './process-lock.js';
-import { AccountsManager, SystemKeychainAdapter, buildGoOauthPayload, syncAccountToKeychain, type KeychainAdapter, type Account } from './accounts.js';
+import { AccountsManager, SystemKeychainAdapter, buildGoOauthPayload, decodeKeychainOauthPayload, syncAccountToKeychain, type KeychainAdapter, type Account } from './accounts.js';
 import { ProtobufWriter as Writer } from './protobuf.js';
 import { removeTopicRow, replaceTopicRow } from './account-state.js';
 export { removeTopicRow, replaceTopicRow } from './account-state.js';
 import { bt } from './i18n.js';
+import {
+  appProcesses,
+  defaultAntigravityInstallDirs,
+  defaultGravityBoxStateDir,
+  isOwnedByCurrentUser,
+  isPathUnder,
+  isWindows,
+  pathsEqual,
+} from './platform/index.js';
 
 const run = promisify(execFile);
 const TOKEN = 'antigravityUnifiedStateSync.oauthToken';
@@ -64,9 +75,29 @@ function rowsDigest(rows: Rows): string {
   return sha256(JSON.stringify(Object.entries(rows || {}).sort()));
 }
 
+const requireForSqlite = createRequire(import.meta.url);
+let cachedDatabaseSyncCtor: (new (location: string) => DatabaseSyncType) | null = null;
+function loadDatabaseSync(): new (location: string) => DatabaseSyncType {
+  if (!cachedDatabaseSyncCtor) {
+    const mod = requireForSqlite('node:sqlite') as { DatabaseSync: new (location: string) => DatabaseSyncType };
+    cachedDatabaseSyncCtor = mod.DatabaseSync;
+  }
+  return cachedDatabaseSyncCtor;
+}
+
+interface DatabaseTransactionBackend {
+  sql?(sql: string): Promise<string>;
+  begin(): Promise<void>;
+  rows(): Promise<Rows>;
+  replace(rows: Rows): Promise<void>;
+  finish(commit: boolean): Promise<void>;
+  close(): Promise<void>;
+}
+
+// macOS / POSIX path: unchanged upstream sqlite3 CLI transaction.
 // sqlite3 stays in BEGIN IMMEDIATE while the other resources are committed. SQL goes through
 // stdin, so neither tokens nor database values appear in command arguments or diagnostics.
-export class DatabaseTransaction {
+class PosixSqliteCliTransaction implements DatabaseTransactionBackend {
   private child;
   private output = '';
   private pending?: { marker: string; resolve: (s: string) => void; reject: (e: Error) => void };
@@ -113,6 +144,149 @@ export class DatabaseTransaction {
     this.child.stdin.end();
     const timer = setTimeout(() => this.child.kill(), 1500);
     try { await this.exited; } finally { clearTimeout(timer); }
+  }
+}
+
+// Windows path: in-process node:sqlite BEGIN IMMEDIATE write transaction (loaded lazily so macOS
+// never loads node:sqlite or emits ExperimentalWarning on stderr).
+class WindowsNodeSqliteTransaction implements DatabaseTransactionBackend {
+  private db: DatabaseSyncType | null = null;
+  private inTransaction = false;
+  private closed = false;
+  private initError: Error | null = null;
+
+  constructor(private readonly dbPath: string) {
+    try {
+      const DatabaseSync = loadDatabaseSync();
+      this.db = new DatabaseSync(this.dbPath);
+      this.db.exec('PRAGMA busy_timeout = 3000;');
+    } catch (error) {
+      this.initError = this.wrapError(error);
+      this.closed = true;
+    }
+  }
+
+  private wrapError(error: unknown): Error {
+    const msg = error instanceof Error ? error.message : String(error ?? '');
+    if (/SQLITE_BUSY|database is locked|locked/i.test(msg)) {
+      return new Error(bt('switch.err.db_busy'));
+    }
+    return new Error(bt('switch.err.db_tx_failed'));
+  }
+
+  private requireDb(): DatabaseSyncType {
+    if (this.initError) throw this.initError;
+    if (this.closed || !this.db) throw new Error(bt('switch.err.db_closed'));
+    return this.db;
+  }
+
+  private closeSync(): void {
+    if (this.closed) return;
+    this.closed = true;
+    const conn = this.db;
+    this.db = null;
+    if (!conn) return;
+    if (this.inTransaction) {
+      try { conn.exec('ROLLBACK;'); } catch {}
+      this.inTransaction = false;
+    }
+    try { conn.close(); } catch {}
+  }
+
+  async begin(): Promise<void> {
+    const db = this.requireDb();
+    try {
+      db.exec('BEGIN IMMEDIATE;');
+      this.inTransaction = true;
+    } catch (error) {
+      throw this.wrapError(error);
+    }
+  }
+
+  async rows(): Promise<Rows> {
+    const db = this.requireDb();
+    try {
+      const placeholders = KEYS.map(() => '?').join(',');
+      const rawRows = db
+        .prepare(`SELECT key, value FROM ItemTable WHERE key IN (${placeholders})`)
+        .all(...KEYS) as Array<{ key?: unknown; value?: unknown }>;
+      const result: Rows = {};
+      for (const row of rawRows) {
+        if (typeof row.key === 'string' && typeof row.value === 'string') {
+          result[row.key] = row.value;
+        }
+      }
+      return result;
+    } catch (error) {
+      throw this.wrapError(error);
+    }
+  }
+
+  async replace(rows: Rows): Promise<void> {
+    const db = this.requireDb();
+    try {
+      const placeholders = KEYS.map(() => '?').join(',');
+      db.prepare(`DELETE FROM ItemTable WHERE key IN (${placeholders})`).run(...KEYS);
+      const insertStmt = db.prepare('INSERT INTO ItemTable(key, value) VALUES(?, ?)');
+      for (const [k, v] of Object.entries(rows)) {
+        insertStmt.run(k, v);
+      }
+    } catch (error) {
+      throw this.wrapError(error);
+    }
+  }
+
+  async finish(commit: boolean): Promise<void> {
+    const db = this.requireDb();
+    try {
+      if (this.inTransaction) {
+        db.exec(commit ? 'COMMIT;' : 'ROLLBACK;');
+        this.inTransaction = false;
+      }
+    } catch (error) {
+      throw this.wrapError(error);
+    } finally {
+      this.closeSync();
+    }
+  }
+
+  async close(): Promise<void> {
+    this.closeSync();
+  }
+}
+
+export class DatabaseTransaction {
+  private readonly backend: DatabaseTransactionBackend;
+
+  constructor(path: string) {
+    this.backend = isWindows()
+      ? new WindowsNodeSqliteTransaction(path)
+      : new PosixSqliteCliTransaction(path);
+  }
+
+  async sql(sql: string): Promise<string> {
+    if (!this.backend.sql) throw new Error(bt('switch.err.db_tx_failed'));
+    return await this.backend.sql(sql);
+  }
+
+  async begin(): Promise<void> {
+    await this.backend.begin();
+  }
+
+  async rows(): Promise<Rows> {
+    return await this.backend.rows();
+  }
+
+  async replace(rows: Rows): Promise<void> {
+    await this.backend.replace(rows);
+  }
+
+  async finish(commit: boolean): Promise<void> {
+    await this.backend.finish(commit);
+  }
+
+  async close(): Promise<void> {
+    await this.backend.close();
   }
 }
 
@@ -171,7 +345,7 @@ function sanitizeJournalRows(rows: Rows): Rows {
  * 一律视为可能包含 OAuth 凭据并彻底脱敏。
  */
 function isNonSensitiveIndexFile(filePath: string): boolean {
-  return filePath.endsWith('/accounts.json') || filePath === 'accounts.json';
+  return basename(filePath.replaceAll('\\', '/')) === 'accounts.json';
 }
 
 function sanitizeJournalFiles(files: SavedFile[]): SavedFile[] {
@@ -290,7 +464,7 @@ export class AccountSwitchService {
   private getCliCredentialPaths(): string[] {
     const baseGeminiDir = this.options.geminiDir
       ?? (this.options.homeDir ? join(this.options.homeDir, '.gemini') : undefined)
-      ?? (this.options.stateDir === join(homedir(), 'Library', 'Application Support', 'GravityBox') ? join(homedir(), '.gemini') : undefined);
+      ?? (pathsEqual(this.options.stateDir, defaultGravityBoxStateDir()) ? join(homedir(), '.gemini') : undefined);
     if (!baseGeminiDir) return [];
     return [
       join(baseGeminiDir, 'antigravity-cli', 'antigravity-oauth-token'),
@@ -312,7 +486,7 @@ export class AccountSwitchService {
           throw err;
         });
         if (!info) continue;
-        if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid?.()) {
+        if (!info.isFile() || info.isSymbolicLink() || !isOwnedByCurrentUser(info)) {
           warnings.push(`${cliPath}: skipped non-regular or non-user file`);
           continue;
         }
@@ -326,10 +500,10 @@ export class AccountSwitchService {
   }
 
   private async resolveRollbackCliPayload(journal: Journal): Promise<string | null> {
-    if (typeof journal.keychainBefore === 'string' && journal.keychainBefore.startsWith('go-keyring-base64:')) {
+    const decodedBefore = decodeKeychainOauthPayload(journal.keychainBefore);
+    if (decodedBefore) {
       try {
-        const raw = Buffer.from(journal.keychainBefore.slice('go-keyring-base64:'.length), 'base64').toString('utf8');
-        const parsed = JSON.parse(raw);
+        const parsed = JSON.parse(decodedBefore);
         if (parsed && typeof parsed === 'object' && parsed.token && typeof parsed.token.refresh_token === 'string' && parsed.token.refresh_token) {
           return JSON.stringify(parsed);
         }
@@ -372,7 +546,7 @@ export class AccountSwitchService {
         throw err;
       });
       if (!info) continue;
-      if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid?.()) continue;
+      if (!info.isFile() || info.isSymbolicLink() || !isOwnedByCurrentUser(info)) continue;
       const before = await readFile(cliPath, 'utf8');
       snapshots.push({
         path: cliPath,
@@ -410,7 +584,7 @@ export class AccountSwitchService {
           warnings.push(`${snap.path}: skipped restore (file missing)`);
           continue;
         }
-        if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid?.()) {
+        if (!info.isFile() || info.isSymbolicLink() || !isOwnedByCurrentUser(info)) {
           warnings.push(`${snap.path}: skipped non-regular or non-user file`);
           continue;
         }
@@ -463,10 +637,16 @@ export class AccountSwitchService {
     try { await this.regular(this.rollbackPath); record = JSON.parse(await readFile(this.rollbackPath, 'utf8')); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'none'; throw error; }
     const dbPath = join(this.options.profile, 'User', 'globalStorage', 'state.vscdb');
-    const allowed = new Set([join(this.options.stateDir, 'accounts.json')]);
-    if (record.version !== 1 || !['prepared', 'committed'].includes(record.phase) || record.databasePath !== dbPath ||
-        !Array.isArray(record.files) || record.files.some(f => !allowed.has(f.path) &&
-          !(f.path.startsWith(join(this.options.stateDir, 'accounts') + '/') && /^[a-zA-Z0-9_-]+\.json$/.test(f.path.slice(join(this.options.stateDir, 'accounts').length + 1))))) {
+    const accountsIndexPath = join(this.options.stateDir, 'accounts.json');
+    const accountsDirPath = join(this.options.stateDir, 'accounts');
+    const isAllowedRollbackFile = (filePath: string): boolean => {
+      if (pathsEqual(filePath, accountsIndexPath)) return true;
+      if (!isPathUnder(filePath, accountsDirPath)) return false;
+      const name = basename(filePath.replaceAll('\\', '/'));
+      return /^[a-zA-Z0-9_-]+\.json$/.test(name) && pathsEqual(filePath, join(accountsDirPath, name));
+    };
+    if (record.version !== 1 || !['prepared', 'committed'].includes(record.phase) || !pathsEqual(record.databasePath, dbPath) ||
+        !Array.isArray(record.files) || record.files.some(f => !isAllowedRollbackFile(f.path))) {
       throw new Error(bt('switch.err.rollback_identity'));
     }
     const currentJournal = JSON.parse(await readFile(this.journalPath, 'utf8')) as Journal;
@@ -515,15 +695,30 @@ export class AccountSwitchService {
     } finally { await tx?.close(); }
   }
   private async guardStopped() {
+    if (this.options.isRunning) {
+      if (await this.options.isRunning()) throw new Error(bt('switch.err.stop_app_first'));
+      return;
+    }
+    if (isWindows()) {
+      const candidateRoots = new Set<string>([this.target.appPath]);
+      for (const dir of defaultAntigravityInstallDirs()) {
+        candidateRoots.add(join(dir, 'Antigravity'));
+        candidateRoots.add(join(dir, 'Antigravity - Insiders'));
+        candidateRoots.add(join(dir, 'Antigravity Insiders'));
+        candidateRoots.add(join(dir, 'Antigravity-Insiders'));
+      }
+      const procs = await appProcesses(Array.from(candidateRoots));
+      if (procs.length > 0) throw new Error(bt('switch.err.stop_app_first'));
+      return;
+    }
     const candidatePrefixes = Array.from(
       // Insiders shares official credentials: block switching while it runs, without managing it.
       new Set([this.target.appPath, '/Applications/Antigravity.app', '/Applications/Antigravity - Insiders.app']),
     ).map(p => p + '/Contents/');
-    const running = this.options.isRunning ? await this.options.isRunning() :
-      (await run('/bin/ps', ['-ax', '-ww', '-o', 'args='], { timeout: 3000 })).stdout.split('\n').some(line => {
-        const trimmed = line.trim();
-        return candidatePrefixes.some(prefix => trimmed.startsWith(prefix));
-      });
+    const running = (await run('/bin/ps', ['-ax', '-ww', '-o', 'args='], { timeout: 3000 })).stdout.split('\n').some(line => {
+      const trimmed = line.trim();
+      return candidatePrefixes.some(prefix => trimmed.startsWith(prefix));
+    });
     if (running) throw new Error(bt('switch.err.stop_app_first'));
   }
   private async archivePreviousJournal(previous: Journal) {
@@ -558,7 +753,7 @@ export class AccountSwitchService {
 
   private async regular(path: string) {
     const info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid?.()) throw new Error(bt('switch.err.invalid_login_file'));
+    if (!info.isFile() || info.isSymbolicLink() || !isOwnedByCurrentUser(info)) throw new Error(bt('switch.err.invalid_login_file'));
   }
   private async optionalRegular(path: string): Promise<boolean> {
     try {
@@ -637,7 +832,7 @@ export class AccountSwitchService {
         const keychainBefore = await this.keychain.readPassword('gemini', 'antigravity');
         // Build the exact intended value with an in-memory adapter; no system write yet.
         let keychainAfter = '';
-        await syncAccountToKeychain(acc, { readPassword: async () => null, deletePassword: async () => {}, writePassword: async (_s, _a, value) => { keychainAfter = value; } });
+        await syncAccountToKeychain(acc, { payloadEncoding: this.keychain.payloadEncoding, readPassword: async () => null, deletePassword: async () => {}, writePassword: async (_s, _a, value) => { keychainAfter = value; } });
         const afterDigest = rowsDigest(after);
         const keychainAfterDigest = sha256(keychainAfter);
         const filesWithDigest: SavedFile[] = files.map(f => ({ ...f, afterDigest: sha256(f.after) }));

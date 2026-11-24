@@ -11,6 +11,8 @@ import { AccountsManager } from "../dist/accounts.js";
 import { canonicalPayload, IdempotencyStore } from "../dist/ipc-idempotency.js";
 import { promisify } from "node:util";
 import { ProtobufWriter } from "../dist/protobuf.js";
+import { resolveClientIpcTarget } from "../dist/platform/ipc.js";
+import { sendBackendRpc, sqliteExec, stopBackendChild } from "./test-ipc.mjs";
 
 // Fixture state and hooks are scoped to this group; child cases run serially.
 describeContractGroup("IPC 契约 · audit-p1-backend", { concurrency: false }, async () => {
@@ -46,13 +48,16 @@ async function makeManager() {
 
 // ---------- C01/C02：IPC 只读推荐不切号，且返回体不含 token ----------
 
-function exchange(directory, request, { timeout = 8000 } = {}) {
+async function exchange(directory, request, { timeout = 8000 } = {}) {
+  const target = await resolveClientIpcTarget(directory);
+  if (!target) throw new Error('IPC target unavailable');
+  const payload = target.authToken ? { ...request, authToken: target.authToken } : request;
   return new Promise((resolve, reject) => {
-    const socket = createConnection(join(directory, 'control.sock'));
+    const socket = createConnection(target.endpoint);
     let value = '';
     const timer = setTimeout(() => { socket.destroy(); reject(new Error('IPC 超时')); }, timeout);
     const finish = error => { clearTimeout(timer); socket.destroy(); error ? reject(error) : resolve(value); };
-    socket.on('connect', () => socket.write(JSON.stringify(request) + '\n'));
+    socket.on('connect', () => socket.write(JSON.stringify(payload) + '\n'));
     socket.on('data', chunk => { value += chunk; if (value.includes('\n')) finish(); });
     socket.on('error', finish);
   });
@@ -149,11 +154,10 @@ test('C01/C02: auto_switch_best 默认只读、execute 需确认，IPC 响应不
       assert.equal(replyGet.account.token, undefined);
       assert.equal(replyGet.account.email, 'active@example.test');
     } finally {
-      backend.child.kill();
-      await sleep(250);
+      await stopBackendChild(backend.child);
     }
   } finally {
-    await rm(dir, { recursive: true, force: true }).catch(() => {});
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {});
   }
 });
 });
@@ -207,27 +211,7 @@ async function until(fn, timeoutMs = 6000) {
 }
 
 function rpc(directory, payload) {
-  return new Promise((resolve, reject) => {
-    const socket = createConnection(join(directory, 'control.sock'));
-    let value = '';
-    socket.setTimeout(4000, () => {
-      socket.destroy();
-      reject(new Error('IPC 超时'));
-    });
-    socket.on('connect', () => socket.write(JSON.stringify(payload) + '\n'));
-    socket.on('error', reject);
-    socket.on('data', chunk => {
-      value += chunk;
-      if (value.includes('\n')) {
-        socket.end();
-        try {
-          resolve(JSON.parse(value.split('\n')[0]));
-        } catch (e) {
-          reject(e);
-        }
-      }
-    });
-  });
+  return sendBackendRpc(directory, payload, { timeoutMs: 8000 });
 }
 
 // -------------------------------------------------------------
@@ -262,12 +246,12 @@ test('Main IPC 集成测试: 0.9.0 账号管理、额度策略、Token 用量与
   const f9 = ProtobufWriter.encodeLengthDelimited(9, tInner);
   const genBlob = ProtobufWriter.encodeLengthDelimited(1, Buffer.concat([f19, f4, f9]));
 
-  await execFileAsync('/usr/bin/sqlite3', [
+  sqliteExec(
     mockDbPath,
     `CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB, status INTEGER, step_payload BLOB);
      CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);
-     INSERT INTO gen_metadata (idx, data) VALUES (1, X'${genBlob.toString('hex')}');`,
-  ]);
+     INSERT INTO gen_metadata (idx, data) VALUES (1, X'${genBlob.toString('hex')}');`
+  );
 
   // 2. 注入沙箱独立凭据，供 account_save_current 提取
   const standaloneDir = join(mockHomeDir, '.gemini');
@@ -448,7 +432,7 @@ test('Main IPC 集成测试: 0.9.0 账号管理、额度策略、Token 用量与
     await until(async () => child.exitCode === 0);
     await sleep(50);
   } finally {
-    if (child.exitCode === null) child.kill('SIGTERM');
+    await stopBackendChild(child);
     await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
@@ -613,7 +597,7 @@ test('P0-02/P1-15/P1-17/P1-19/P1-20: 维护目录动态双语、resume切回中�
     await until(async () => child.exitCode === 0, 10000);
     await sleep(50);
   } finally {
-    if (child.exitCode === null) child.kill('SIGTERM');
+    await stopBackendChild(child);
     await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });

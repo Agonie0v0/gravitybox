@@ -22,6 +22,8 @@ import {
   refreshStandbyAccountViaRemoteSsh,
 } from '../dist/main.js';
 import { AccountsManager } from '../dist/accounts.js';
+import { resolveClientIpcTarget } from '../dist/platform/ipc.js';
+import { stopBackendChild } from './test-ipc.mjs';
 
 function startMockCdpServer({ dictVersion = 'test-dict', onEvaluate } = {}) {
   let targets = [];
@@ -88,6 +90,7 @@ function startMockCdpServer({ dictVersion = 'test-dict', onEvaluate } = {}) {
 
   server.on('upgrade', (req, socket) => {
     sockets.add(socket);
+    socket.on('error', () => {});
     socket.on('close', () => sockets.delete(socket));
     const key = req.headers['sec-websocket-key'];
     const accept = createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
@@ -185,13 +188,16 @@ function startMockCdpServer({ dictVersion = 'test-dict', onEvaluate } = {}) {
   };
 }
 
-function exchange(directory, request, { timeout = 8000 } = {}) {
+async function exchange(directory, request, { timeout = 8000 } = {}) {
+  const target = await resolveClientIpcTarget(directory);
+  if (!target) throw new Error('IPC target unavailable');
+  const payload = target.authToken ? { ...request, authToken: target.authToken } : request;
   return new Promise((resolve, reject) => {
-    const socket = createConnection(join(directory, 'control.sock'));
+    const socket = createConnection(target.endpoint);
     let value = '';
     const timer = setTimeout(() => { socket.destroy(); reject(new Error('IPC 超时')); }, timeout);
     const finish = error => { clearTimeout(timer); socket.destroy(); error ? reject(error) : resolve(value); };
-    socket.on('connect', () => socket.write(JSON.stringify(request) + '\n'));
+    socket.on('connect', () => socket.write(JSON.stringify(payload) + '\n'));
     socket.on('data', chunk => { value += chunk; if (value.includes('\n')) finish(); });
     socket.on('error', finish);
   });
@@ -200,8 +206,8 @@ function exchange(directory, request, { timeout = 8000 } = {}) {
 async function createMockAppPath(t) {
   const root = await mkdtemp(join(tmpdir(), 'gb-ssh-ipc-app-'));
   const appPath = join(root, 'Antigravity.app');
-  await mkdir(join(appPath, 'Contents/Resources'), { recursive: true });
-  await writeFile(join(appPath, 'Contents/Resources/app.asar'), 'mock-asar');
+  await mkdir(join(appPath, 'Contents', 'Resources'), { recursive: true });
+  await writeFile(join(appPath, 'Contents', 'Resources', 'app.asar'), 'mock-asar');
   t.after(() => rm(root, { recursive: true, force: true }));
   return appPath;
 }
@@ -428,8 +434,8 @@ test('dist/main.js IPC 契约：status / dashboard_summary / remote_quota_refres
     assert.equal(typeof usageRes.remoteSyncRevision, 'number');
   } finally {
     try { await exchange(dir, { command: 'stop' }); } catch {}
-    child.kill('SIGTERM');
-    await rm(dir, { recursive: true, force: true });
+    await stopBackendChild(child);
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
