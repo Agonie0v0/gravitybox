@@ -16,9 +16,9 @@ permissions:
 
 jobs:
   verify:
-    name: Build, Privacy & Unit Tests (Windows x64)
+    name: Build, Privacy, Rust & Unit Tests (Windows x64)
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     defaults:
       run:
         shell: pwsh
@@ -31,10 +31,27 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            windows/app/package-lock.json
+
+      - name: Cache Cargo registry & build outputs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            windows/win-helper/target
+            windows/app/src-tauri/target
+          key: cargo-win-${{ hashFiles('windows/win-helper/Cargo.lock', 'windows/app/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-win-
 
       - name: Install Node dependencies
-        run: npm ci --ignore-scripts --no-audit --no-fund
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm --prefix windows/app ci --no-audit --no-fund
 
       - name: Build TypeScript backend
         run: npm run build
@@ -49,6 +66,13 @@ jobs:
       - name: Build Win32 helper release binary
         working-directory: windows/win-helper
         run: cargo build --release
+
+      - name: Build Windows desktop frontend
+        run: npm --prefix windows/app run build
+
+      - name: Run Windows desktop Tauri Rust tests
+        working-directory: windows/app/src-tauri
+        run: cargo test
 
       - name: Run unit & integration tests
         run: npm run test:unit
