@@ -1,0 +1,56 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "GravityBox",
+  "version": "1.2.0",
+  "identifier": "local.gravitybox.windows",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "GravityBox",
+        "url": "index.html#main",
+        "width": 1000,
+        "height": 700,
+        "minWidth": 860,
+        "minHeight": 580,
+        "resizable": true,
+        "center": true,
+        "visible": false,
+        "decorations": true
+      },
+      {
+        "label": "tray",
+        "title": "GravityBox",
+        "url": "index.html#tray",
+        "width": 424,
+        "height": 535,
+        "resizable": false,
+        "decorations": false,
+        "shadow": true,
+        "visible": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: asset: http://asset.localhost https://asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ]
+  }
+}
