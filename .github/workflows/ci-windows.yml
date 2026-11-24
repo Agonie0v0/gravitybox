@@ -42,5 +42,11 @@ jobs:
       - name: Run privacy gate
         run: npm run check:privacy
 
+      - name: Run Win32 helper Rust tests
+        run: cargo test --manifest-path windows/win-helper/Cargo.toml
+
+      - name: Build Win32 helper release binary
+        run: cargo build --release --manifest-path windows/win-helper/Cargo.toml
+
       - name: Run unit & integration tests
         run: npm run test:unit

@@ -32,6 +32,7 @@ export interface Win32AppProcess {
 
 export type Win32GracefulCloseReason =
   | 'clean_exit'
+  | 'background_resident'
   | 'background_terminated'
   | 'visible_window_open'
   | 'timeout'
@@ -45,8 +46,38 @@ export interface Win32GracefulCloseResult {
 
 export interface Win32GracefulCloseOptions extends Win32HelperOptions {
   closeTimeoutMs?: number;
+  /**
+   * Explicit user-confirmed opt-in to terminate headless/background processes
+   * remaining after all visible windows have closed (`--confirm-background-exit`).
+   * Default `false`: strictly graceful WM_CLOSE only, zero TerminateProcess.
+   */
+  confirmBackgroundExit?: boolean;
+  /**
+   * @deprecated Use `confirmBackgroundExit` instead (kept for backwards compatibility).
+   */
   terminateBackground?: boolean;
   graceMs?: number;
+}
+
+export type Win32PipeVerifyReason =
+  | 'pid_mismatch'
+  | 'sid_mismatch'
+  | 'exe_mismatch'
+  | 'pipe_not_found'
+  | (string & {});
+
+export interface Win32VerifyPipeServerOptions extends Win32HelperOptions {
+  expectedPid?: number;
+  expectedExe?: string;
+}
+
+export interface Win32VerifyPipeServerResult {
+  verified: boolean;
+  pipeName: string;
+  serverPid: number | null;
+  sameUserSid: boolean;
+  exePath: string;
+  reason: Win32PipeVerifyReason | null;
 }
 
 export interface Win32PeVersion {
@@ -420,17 +451,21 @@ export async function appProcesses(
  * Gracefully close all processes under `prefix` using progressive staged shutdown:
  * 1. Send WM_CLOSE to visible top-level windows (never force-kills while any visible window remains open).
  * 2. Once no visible windows remain, send WM_CLOSE to hidden/tray top-level windows and wait `graceMs`.
- * 3. Only when `terminateBackground` is explicitly enabled and 0 visible windows are re-confirmed,
- *    terminate remaining headless/background processes under `prefix`.
+ *    In default mode (`confirmBackgroundExit !== true`), zero `TerminateProcess` calls are ever made;
+ *    any remaining headless/tray processes return `{ closed: false, reason: 'background_resident' }`.
+ * 3. Only when `confirmBackgroundExit` (or legacy alias `terminateBackground`) is explicitly `true`
+ *    and 0 visible windows are re-confirmed, terminate remaining headless/background processes under `prefix`.
  */
 export async function appGracefulClose(
   prefix: string,
   options?: Win32GracefulCloseOptions,
 ): Promise<Win32GracefulCloseResult> {
   const closeTimeoutMs = Math.max(200, Math.floor(options?.closeTimeoutMs ?? 8_000));
+  const confirmBackgroundExit =
+    options?.confirmBackgroundExit === true || options?.terminateBackground === true;
   const args = ['app-graceful-close', '--prefix', prefix, '--timeout-ms', String(closeTimeoutMs)];
-  if (options?.terminateBackground === true) {
-    args.push('--terminate-background');
+  if (confirmBackgroundExit) {
+    args.push('--confirm-background-exit');
   }
   const graceMs =
     typeof options?.graceMs === 'number' && Number.isFinite(options.graceMs)
@@ -439,7 +474,7 @@ export async function appGracefulClose(
   if (graceMs !== undefined) {
     args.push('--grace-ms', String(graceMs));
   }
-  const stageOverheadMs = (options?.terminateBackground === true ? 8_000 : 4_000) + (graceMs ?? 0);
+  const stageOverheadMs = (confirmBackgroundExit ? 8_000 : 4_000) + (graceMs ?? 0);
   const processTimeoutMs = Math.max(options?.timeoutMs ?? 0, closeTimeoutMs + stageOverheadMs);
   const res = await invokeWin32Helper<{
     ok: true;
@@ -460,6 +495,58 @@ export async function appGracefulClose(
     closed: res.closed === true,
     remainingPids,
     ...(reason !== undefined ? { reason } : {}),
+  };
+}
+
+/**
+ * Verify the server identity of a GravityBox Named Pipe (`\\.\pipe\gravitybox-...`) via
+ * `CreateFileW(SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION)` + `GetNamedPipeServerProcessId`
+ * + `OpenProcessToken` + `EqualSid`.
+ */
+export async function verifyPipeServer(
+  pipeName: string,
+  options?: Win32VerifyPipeServerOptions,
+): Promise<Win32VerifyPipeServerResult> {
+  if (typeof pipeName !== 'string' || !pipeName.trim()) {
+    throw new Win32HelperError('INVALID_ARGS', 'pipeName must be a non-empty string');
+  }
+  const args = ['verify-pipe-server', '--pipe', pipeName];
+  if (options?.expectedPid !== undefined) {
+    if (!Number.isInteger(options.expectedPid) || options.expectedPid <= 0) {
+      throw new Win32HelperError('INVALID_ARGS', `Invalid expectedPid: ${String(options.expectedPid)}`);
+    }
+    args.push('--expected-pid', String(options.expectedPid));
+  }
+  if (options?.expectedExe !== undefined) {
+    if (typeof options.expectedExe !== 'string' || !options.expectedExe.trim()) {
+      throw new Win32HelperError('INVALID_ARGS', 'expectedExe must be a non-empty string');
+    }
+    args.push('--expected-exe', options.expectedExe);
+  }
+  const res = await invokeWin32Helper<{
+    ok: true;
+    verified?: unknown;
+    pipeName?: unknown;
+    serverPid?: unknown;
+    sameUserSid?: unknown;
+    exePath?: unknown;
+    reason?: unknown;
+  }>(args, options);
+  const serverPid =
+    typeof res.serverPid === 'number' && Number.isInteger(res.serverPid) && res.serverPid > 0
+      ? res.serverPid
+      : null;
+  const reason =
+    typeof res.reason === 'string' && res.reason.trim().length > 0
+      ? (res.reason.trim() as Win32PipeVerifyReason)
+      : null;
+  return {
+    verified: res.verified === true,
+    pipeName: typeof res.pipeName === 'string' ? res.pipeName : pipeName,
+    serverPid,
+    sameUserSid: res.sameUserSid === true,
+    exePath: typeof res.exePath === 'string' ? res.exePath : '',
+    reason,
   };
 }
 

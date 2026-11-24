@@ -2,13 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createConnection, createServer } from 'node:net';
-import { access, mkdtemp, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdtemp, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   IPC_SESSION_FILENAME,
+  Win32HelperError,
   antigravityLayout,
+  appGracefulClose,
   atomicRenameWithRetry,
   cleanupIpcEndpoint,
   cleanupIpcSession,
@@ -35,9 +37,11 @@ import {
   readIpcSession,
   resolveClientIpcTarget,
   resolveIpcEndpoint,
+  resolveWin32HelperPath,
   safeOpenFlagsNoFollow,
   validateIpcEndpointForClient,
   verifyIpcAuthToken,
+  verifyPipeServer,
   writeIpcSession,
 } from '../dist/platform/index.js';
 import {
@@ -854,4 +858,140 @@ test('release-integrity: macOS/core sourceDigest 严格排除 windows/，windows
   await writeFile(winSrcPath, 'fn main() { println!("v2"); }\n');
   assert.equal(await sourceDigest(fakeRoot), coreDigest1);
   assert.notEqual(await windowsSourceDigest(fakeRoot), winDigest1);
+});
+
+test('win32-helper: verifyPipeServer 原生 SID/PID 鉴权与 resolveClientIpcTarget 自动防抢注', async (t) => {
+  if (process.platform !== 'win32') return;
+  const helperPath = resolveWin32HelperPath();
+  if (!helperPath) {
+    t.skip('gravitybox-win-helper.exe 尚未构建');
+    return;
+  }
+
+  const stateDir = await mkdtemp(join(tmpdir(), 'gb-win-pipe-verify-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+
+  const session = await prepareWindowsIpcForListen(stateDir);
+  const srv = createServer((sock) => sock.end());
+  await new Promise((res, rej) => {
+    srv.once('error', rej);
+    srv.listen(session.pipeName, res);
+  });
+  t.after(() => new Promise((res) => srv.close(() => res())));
+  await writeIpcSession(stateDir, session);
+
+  // 1. 真实 Node Named Pipe 服务端：同用户 SID + PID + exe 匹配通过
+  const okRes = await verifyPipeServer(session.pipeName, {
+    expectedPid: process.pid,
+    expectedExe: 'node.exe',
+    helperPath,
+  });
+  assert.equal(okRes.verified, true);
+  assert.equal(okRes.sameUserSid, true);
+  assert.equal(okRes.serverPid, process.pid);
+  assert.equal(okRes.pipeName, session.pipeName);
+  assert.equal(okRes.reason, null);
+  assert.match(okRes.exePath.toLowerCase(), /node\.exe$/);
+
+  // 2. 错 expectedPid 必须返回 pid_mismatch
+  const wrongPidRes = await verifyPipeServer(session.pipeName, {
+    expectedPid: process.pid + 1,
+    helperPath,
+  });
+  assert.equal(wrongPidRes.verified, false);
+  assert.equal(wrongPidRes.sameUserSid, true);
+  assert.equal(wrongPidRes.serverPid, process.pid);
+  assert.equal(wrongPidRes.reason, 'pid_mismatch');
+
+  // 3. 错 expectedExe 必须返回 exe_mismatch
+  const wrongExeRes = await verifyPipeServer(session.pipeName, {
+    expectedPid: process.pid,
+    expectedExe: 'definitely-not-this-binary.exe',
+    helperPath,
+  });
+  assert.equal(wrongExeRes.verified, false);
+  assert.equal(wrongExeRes.sameUserSid, true);
+  assert.equal(wrongExeRes.reason, 'exe_mismatch');
+
+  // 4. 不存在的管道返回 pipe_not_found
+  const missingPipe = `\\\\.\\pipe\\gravitybox-${computeWindowsStateHash16(stateDir)}-0000000000000000`;
+  const missingRes = await verifyPipeServer(missingPipe, { helperPath });
+  assert.equal(missingRes.verified, false);
+  assert.equal(missingRes.sameUserSid, false);
+  assert.equal(missingRes.serverPid, null);
+  assert.equal(missingRes.reason, 'pipe_not_found');
+
+  // 5. 非法管道前缀与路径穿越必须抛出 INVALID_ARGS
+  await assert.rejects(
+    () => verifyPipeServer('\\\\.\\pipe\\other-unrelated-pipe', { helperPath }),
+    (err) => err instanceof Win32HelperError && err.code === 'INVALID_ARGS',
+  );
+
+  // 6. resolveClientIpcTarget 默认自动调用 verifyPipeServer：合法会话通过
+  const targetOk = await resolveClientIpcTarget(stateDir, { helperPath });
+  assert.equal(targetOk?.endpoint, session.pipeName);
+  assert.equal(targetOk?.authToken, session.authToken);
+
+  // 7. 模拟抢注/PID 不匹配：ipc-session.json 中 PID 与实际管道服务端不符必须拒绝
+  await writeIpcSession(stateDir, { ...session, pid: process.pid + 1 });
+  await assert.rejects(() => resolveClientIpcTarget(stateDir, { helperPath }));
+
+  // 8. 过期 session 指向不存在管道时返回 null（交由上层提示服务未运行）
+  await writeIpcSession(stateDir, { ...session, pipeName: missingPipe });
+  assert.equal(await resolveClientIpcTarget(stateDir, { helperPath }), null);
+});
+
+test('win32-helper: appGracefulClose 默认零 TerminateProcess 返回 background_resident，显式 confirmBackgroundExit 才终止隔离无窗口进程', async (t) => {
+  if (process.platform !== 'win32') return;
+  const helperPath = resolveWin32HelperPath();
+  if (!helperPath) {
+    t.skip('gravitybox-win-helper.exe 尚未构建');
+    return;
+  }
+
+  const dummyDir = await mkdtemp(join(tmpdir(), 'gb-win-close-boundary-'));
+  const dummyExe = join(dummyDir, 'dummy_headless.exe');
+  const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+  await copyFile(join(systemRoot, 'System32', 'PING.EXE'), dummyExe);
+
+  const child = spawn(dummyExe, ['127.0.0.1', '-n', '30'], {
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      try { child.kill(); } catch {}
+      await new Promise((res) => child.once('exit', () => res())).catch(() => {});
+    }
+    await rm(dummyDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  assert.ok(child.pid && child.pid > 0, '隔离无窗口哑进程必须成功启动');
+
+  // 1. 默认模式严禁强杀：必须返回 closed: false, reason: background_resident，且进程仍存活
+  const defaultRes = await appGracefulClose(dummyDir, {
+    closeTimeoutMs: 1200,
+    graceMs: 200,
+    helperPath,
+  });
+  assert.equal(defaultRes.closed, false);
+  assert.equal(defaultRes.reason, 'background_resident');
+  assert.ok(defaultRes.remainingPids.includes(child.pid));
+  assert.equal(child.exitCode, null, '默认模式下无窗口后台进程绝不可被静默强杀');
+
+  // 2. 显式传入 confirmBackgroundExit: true 后才安全终止隔离哑进程
+  const confirmedRes = await appGracefulClose(dummyDir, {
+    closeTimeoutMs: 1200,
+    graceMs: 200,
+    confirmBackgroundExit: true,
+    helperPath,
+  });
+  assert.equal(confirmedRes.closed, true);
+  assert.equal(confirmedRes.reason, 'background_terminated');
+  assert.deepEqual(confirmedRes.remainingPids, []);
+  await new Promise((res) => {
+    if (child.exitCode !== null || child.signalCode !== null) return res();
+    child.once('exit', () => res());
+  });
+  assert.ok(child.exitCode !== null || child.signalCode !== null);
 });

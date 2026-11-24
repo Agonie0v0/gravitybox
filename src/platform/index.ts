@@ -59,6 +59,7 @@ export {
   portOwner,
   appProcesses,
   appGracefulClose,
+  verifyPipeServer,
   trashMove,
   peVersion,
   type Win32HelperOptions,
@@ -68,5 +69,8 @@ export {
   type Win32GracefulCloseReason,
   type Win32GracefulCloseOptions,
   type Win32GracefulCloseResult,
+  type Win32PipeVerifyReason,
+  type Win32VerifyPipeServerOptions,
+  type Win32VerifyPipeServerResult,
   type Win32PeVersion,
 } from './win32-helper.js';
