@@ -75,10 +75,29 @@ export async function getAntigravityRunning(): Promise<boolean> {
   return invoke<boolean>('get_antigravity_running');
 }
 
+const ALLOWED_EXTERNAL_HOSTS = new Set([
+  'github.com',
+  'raw.githubusercontent.com',
+  'cdn.jsdelivr.net',
+  'accounts.google.com',
+]);
+
 export async function openExternalUrl(url: string): Promise<void> {
   const trimmed = url.trim();
-  if (!/^https?:\/\//i.test(trimmed)) {
-    throw new Error('Only http:// or https:// URLs are allowed');
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error('Invalid external URL');
+  }
+  if (
+    parsed.protocol !== 'https:' ||
+    Boolean(parsed.username) ||
+    Boolean(parsed.password) ||
+    Boolean(parsed.port) ||
+    !ALLOWED_EXTERNAL_HOSTS.has(parsed.hostname.toLowerCase())
+  ) {
+    throw new Error('Only allowlisted https:// URLs are allowed');
   }
   if (!isTauriRuntime()) {
     window.open(trimmed, '_blank', 'noopener,noreferrer');

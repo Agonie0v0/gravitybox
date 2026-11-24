@@ -8,9 +8,10 @@ import { copyRuntime } from './copy-runtime.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const tscBin = join(root, 'node_modules', 'typescript', 'bin', 'tsc');
 const winAppDir = join(root, 'windows', 'app');
-const winHelperManifest = join(root, 'windows', 'win-helper', 'Cargo.toml');
-const winHelperRelease = join(root, 'windows', 'win-helper', 'target', 'release', 'gravitybox-win-helper.exe');
-const winHelperDebug = join(root, 'windows', 'win-helper', 'target', 'debug', 'gravitybox-win-helper.exe');
+const winHelperDir = join(root, 'windows', 'win-helper');
+const winHelperManifest = join(winHelperDir, 'Cargo.toml');
+const winHelperRelease = join(winHelperDir, 'target', 'release', 'gravitybox-win-helper.exe');
+const winHelperDebug = join(winHelperDir, 'target', 'debug', 'gravitybox-win-helper.exe');
 
 function runOnce(command, args, cwd = root) {
   return new Promise((resolveDone, reject) => {
@@ -29,7 +30,8 @@ function npmCommand(args) {
     return { command: process.execPath, args: [npmExecPath, ...args] };
   }
   if (process.platform === 'win32') {
-    return { command: 'cmd.exe', args: ['/d', '/s', '/c', 'npm', ...args] };
+    const systemRoot = process.env.SystemRoot?.trim() || process.env.WINDIR?.trim() || 'C:\\Windows';
+    return { command: join(systemRoot, 'System32', 'cmd.exe'), args: ['/d', '/s', '/c', 'npm', ...args] };
   }
   return { command: 'npm', args };
 }
@@ -49,14 +51,14 @@ async function main() {
 
   if (existsSync(winHelperManifest) && !existsSync(winHelperRelease) && !existsSync(winHelperDebug)) {
     process.stdout.write('[dev:win] 2/3 编译 gravitybox-win-helper.exe...\n');
-    await runOnce('cargo', ['build', '--manifest-path', winHelperManifest]);
+    await runOnce('cargo', ['build'], winHelperDir);
   } else {
     process.stdout.write('[dev:win] 2/3 已检测到 gravitybox-win-helper.exe，跳过首次编译\n');
   }
 
   if (!existsSync(join(winAppDir, 'node_modules'))) {
     process.stdout.write('[dev:win] 安装 windows/app 前端依赖...\n');
-    const install = npmCommand(['ci', '--no-audit', '--no-fund']);
+    const install = npmCommand(['ci', '--ignore-scripts', '--no-audit', '--no-fund']);
     await runOnce(install.command, install.args, winAppDir);
   }
 

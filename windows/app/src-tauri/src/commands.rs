@@ -5,11 +5,11 @@ use crate::antigravity::{
 use crate::autostart;
 use crate::backend::BackendManager;
 use crate::config::{load_config, save_config, UiConfig};
-use crate::ipc_pipe::strip_verbatim_prefix;
+use crate::ipc_pipe::{normalize_windows_path, strip_verbatim_prefix};
 use crate::tray::{hide_tray_window, show_main_window_and_focus, update_tray_menu_language};
 use serde::Serialize;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -112,20 +112,44 @@ pub async fn get_antigravity_running(
         .map_err(|e| format!("检测运行状态失败: {}", e))
 }
 
-#[tauri::command]
-pub fn open_external_url(url: String) -> Result<(), String> {
-    let trimmed = url.trim();
-    let rest = trimmed
-        .strip_prefix("https://")
-        .or_else(|| trimmed.strip_prefix("http://"))
-        .ok_or_else(|| "仅允许打开 http:// 或 https:// 链接".to_string())?;
-    if rest.is_empty()
-        || trimmed
-            .bytes()
-            .any(|b| b < 0x20 || b == 0x7f)
+const ALLOWED_EXTERNAL_HOSTS: &[&str] = &[
+    "github.com",
+    "raw.githubusercontent.com",
+    "cdn.jsdelivr.net",
+    "accounts.google.com",
+];
+
+fn validate_external_url(raw: &str) -> Result<String, String> {
+    if raw.is_empty()
+        || raw.len() > 4096
+        || raw.bytes().any(|b| b < 0x20 || b == 0x7f)
+        || raw
+            .chars()
+            .any(|c| c.is_whitespace() || c == '"' || c == '\'' || c == '\\')
     {
+        return Err("链接格式无效或包含非法字符".to_string());
+    }
+    let rest = raw
+        .strip_prefix("https://")
+        .ok_or_else(|| "仅允许打开白名单内的 https:// 链接".to_string())?;
+    if rest.is_empty() {
         return Err("链接格式无效".to_string());
     }
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..auth_end];
+    if authority.is_empty() || authority.contains('@') || authority.contains(':') {
+        return Err("链接主机格式无效".to_string());
+    }
+    let host = authority.to_ascii_lowercase();
+    if !ALLOWED_EXTERNAL_HOSTS.contains(&host.as_str()) {
+        return Err(format!("目标域名不在安全白名单中: {}", host));
+    }
+    Ok(raw.to_string())
+}
+
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    let validated = validate_external_url(&url)?;
     #[cfg(windows)]
     {
         use std::ffi::OsStr;
@@ -135,7 +159,7 @@ pub fn open_external_url(url: String) -> Result<(), String> {
         use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
         let verb: Vec<u16> = OsStr::new("open").encode_wide().chain(Some(0)).collect();
-        let target: Vec<u16> = OsStr::new(trimmed).encode_wide().chain(Some(0)).collect();
+        let target: Vec<u16> = OsStr::new(&validated).encode_wide().chain(Some(0)).collect();
         let res = unsafe {
             ShellExecuteW(
                 std::ptr::null_mut(),
@@ -153,8 +177,65 @@ pub fn open_external_url(url: String) -> Result<(), String> {
     }
     #[cfg(not(windows))]
     {
+        let _ = validated;
         Err("Unsupported platform".to_string())
     }
+}
+
+fn resolve_explorer_exe() -> PathBuf {
+    let win_dir = std::env::var("SystemRoot")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("WINDIR").ok().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| r"C:\Windows".to_string());
+    strip_verbatim_prefix(Path::new(win_dir.trim())).join("explorer.exe")
+}
+
+fn normalized_path_is_within(candidate_norm: &str, base_norm: &str) -> bool {
+    let cand = candidate_norm.to_lowercase();
+    let base = base_norm.to_lowercase();
+    if base.is_empty() {
+        return false;
+    }
+    if cand == base {
+        return true;
+    }
+    let prefix = if base.ends_with('\\') {
+        base
+    } else {
+        format!("{}\\", base)
+    };
+    cand.starts_with(&prefix)
+}
+
+fn is_path_within_state_dir(target: &Path, state_dir: &Path) -> bool {
+    let target_norm = normalize_windows_path(target);
+    let state_norm = normalize_windows_path(state_dir);
+    if normalized_path_is_within(&target_norm, &state_norm) {
+        return true;
+    }
+    // Also check canonicalized state_dir & existing target parent to defeat junctions/8.3 short paths
+    if let Ok(canon_state) = std::fs::canonicalize(state_dir) {
+        let canon_state_norm = normalize_windows_path(&canon_state);
+        if normalized_path_is_within(&target_norm, &canon_state_norm) {
+            return true;
+        }
+        if let Some(parent) = target.parent() {
+            if let Ok(canon_parent) = std::fs::canonicalize(parent) {
+                let canon_target = match target.file_name() {
+                    Some(name) => canon_parent.join(name),
+                    None => canon_parent,
+                };
+                let canon_target_norm = normalize_windows_path(&canon_target);
+                if normalized_path_is_within(&canon_target_norm, &canon_state_norm)
+                    || normalized_path_is_within(&canon_target_norm, &state_norm)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn is_safe_local_windows_path(raw: &str) -> Option<PathBuf> {
@@ -198,8 +279,11 @@ fn validate_dir_path(raw: &str) -> Result<PathBuf, String> {
     Ok(p)
 }
 
-fn validate_json_save_path(raw: &str) -> Result<PathBuf, String> {
+fn validate_json_save_path(raw: &str, state_dir: &Path) -> Result<PathBuf, String> {
     let p = is_safe_local_windows_path(raw).ok_or_else(|| "保存路径无效".to_string())?;
+    if is_path_within_state_dir(&p, state_dir) {
+        return Err("不允许将导出文件覆盖写入 GravityBox 数据目录内部".to_string());
+    }
     let is_json = p
         .extension()
         .and_then(|ext| ext.to_str())
@@ -221,7 +305,7 @@ pub fn open_folder(path: String) -> Result<(), String> {
     let p = validate_dir_path(&path)?;
     #[cfg(windows)]
     {
-        Command::new("explorer.exe")
+        Command::new(resolve_explorer_exe())
             .arg(&p)
             .spawn()
             .map_err(|e| format!("无法打开资源管理器: {}", e))?;
@@ -247,15 +331,16 @@ pub fn reveal_in_explorer(path: String) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
+        let explorer = resolve_explorer_exe();
         if p.is_file() {
             let select_arg = format!("/select,{}", p.to_string_lossy());
-            Command::new("explorer.exe")
+            Command::new(&explorer)
                 .arg(select_arg)
                 .spawn()
                 .map_err(|e| format!("无法在资源管理器中定位文件: {}", e))?;
             Ok(())
         } else if p.is_dir() {
-            Command::new("explorer.exe")
+            Command::new(&explorer)
                 .arg(&p)
                 .spawn()
                 .map_err(|e| format!("无法打开目录: {}", e))?;
@@ -340,10 +425,9 @@ pub fn set_window_dark_mode(app: AppHandle, is_dark: bool) {
     }
 }
 
-#[tauri::command]
-pub fn save_json_file(path: String, content: Value) -> Result<(), String> {
+fn save_json_file_checked(path: &str, content: Value, state_dir: &Path) -> Result<(), String> {
     use std::io::Write;
-    let target = validate_json_save_path(&path)?;
+    let target = validate_json_save_path(path, state_dir)?;
     let parent = target
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -405,6 +489,15 @@ pub fn save_json_file(path: String, content: Value) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn save_json_file(
+    backend: State<'_, Arc<BackendManager>>,
+    path: String,
+    content: Value,
+) -> Result<(), String> {
+    save_json_file_checked(&path, content, &backend.state_dir)
+}
+
+#[tauri::command]
 pub fn quit_app(app: AppHandle, backend: State<'_, Arc<BackendManager>>) {
     backend.graceful_stop();
     app.exit(0);
@@ -415,16 +508,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dir_and_json_path_validation_enforces_security_boundaries() {
-        let tmp_dir = std::env::temp_dir().join(format!("gb-cmd-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        std::fs::create_dir_all(&tmp_dir).unwrap();
+    fn external_url_whitelist_enforces_https_and_rejects_spoofing() {
+        // Allowed HTTPS whitelist domains
+        assert!(validate_external_url("https://github.com/Enzoo404/gravitybox/releases").is_ok());
+        assert!(validate_external_url("https://GITHUB.COM/Enzoo404/gravitybox").is_ok());
+        assert!(
+            validate_external_url("https://raw.githubusercontent.com/Enzoo404/gravitybox/main/pricing.json").is_ok()
+        );
+        assert!(validate_external_url("https://cdn.jsdelivr.net/gh/Enzoo404/gravitybox/pricing.json").is_ok());
+        assert!(
+            validate_external_url("https://accounts.google.com/o/oauth2/v2/auth?client_id=abc&scope=openid").is_ok()
+        );
 
-        let fake_exe = tmp_dir.join("calc.exe");
+        // Must reject HTTP, non-whitelisted hosts, prefix/suffix tricks, userinfo, quotes, spaces, control chars, ports
+        assert!(validate_external_url("http://github.com/Enzoo404/gravitybox").is_err());
+        assert!(validate_external_url("https://attacker.example.invalid/phish").is_err());
+        assert!(validate_external_url("https://github.com.example.invalid/phish").is_err());
+        assert!(validate_external_url("https://evil-github.com/phish").is_err());
+        assert!(validate_external_url("https://github.com@example.invalid/phish").is_err());
+        assert!(validate_external_url("https://github.com:8443/Enzoo404").is_err());
+        assert!(validate_external_url("https://github.com/Enzoo404 \"--evil\"").is_err());
+        assert!(validate_external_url("https://github.com/Enzoo404'bad").is_err());
+        assert!(validate_external_url("https://github.com/Enzoo404\r\n").is_err());
+        assert!(validate_external_url("https://github.com/Enzoo404\r\nX-Inject:1").is_err());
+        assert!(validate_external_url("https://github.com/Enzoo404\0").is_err());
+        assert!(validate_external_url(r"https://github.com\example.invalid").is_err());
+        assert!(validate_external_url("javascript:alert(1)").is_err());
+    }
+
+    #[test]
+    fn explorer_exe_resolves_absolute_system_path() {
+        let exe = resolve_explorer_exe();
+        let s = exe.to_string_lossy();
+        assert!(!s.starts_with(r"\\?\"), "must not have verbatim prefix: {}", s);
+        assert!(
+            s.to_ascii_lowercase().ends_with(r"\explorer.exe"),
+            "must resolve to explorer.exe: {}",
+            s
+        );
+        assert!(exe.is_absolute(), "must be absolute: {}", s);
+    }
+
+    #[test]
+    fn dir_and_json_path_validation_enforces_security_boundaries() {
+        let root_tmp = strip_verbatim_prefix(&std::env::temp_dir())
+            .join(format!("gb-cmd-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root_tmp);
+        let state_dir = root_tmp.join("GravityBox");
+        let export_dir = root_tmp.join("GravityBoxBackup");
+        std::fs::create_dir_all(state_dir.join("sub")).unwrap();
+        std::fs::create_dir_all(&export_dir).unwrap();
+
+        let fake_exe = export_dir.join("calc.exe");
         std::fs::write(&fake_exe, b"stub").unwrap();
 
         // open_folder validator accepts local directories and rejects files, UNC, traversal, leading '/', and control chars
-        assert!(validate_dir_path(&tmp_dir.to_string_lossy()).is_ok());
+        assert!(validate_dir_path(&export_dir.to_string_lossy()).is_ok());
         assert!(validate_dir_path(&fake_exe.to_string_lossy()).is_err());
         assert!(validate_dir_path("/select,C:\\Windows").is_err());
         assert!(validate_dir_path("C:\\Temp\0evil").is_err());
@@ -432,26 +571,45 @@ mod tests {
         assert!(validate_dir_path(r"\\?\UNC\attacker\share").is_err());
         assert!(validate_dir_path(r"C:\Temp\..\Windows").is_err());
 
-        // save_json_file validator accepts .json/.JSON and rejects executables/non-json/UNC/traversal/NUL
-        let ok_json = tmp_dir.join("backup.JSON");
-        assert!(validate_json_save_path(&ok_json.to_string_lossy()).is_ok());
-        assert!(validate_json_save_path(&fake_exe.to_string_lossy()).is_err());
-        assert!(validate_json_save_path(&tmp_dir.join("run.bat").to_string_lossy()).is_err());
-        assert!(validate_json_save_path("C:\\Temp\\bad\0.json").is_err());
-        assert!(validate_json_save_path("/weird.json").is_err());
-        assert!(validate_json_save_path(r"\\attacker\share\leak.json").is_err());
-        assert!(validate_json_save_path(r"C:\Temp\..\leak.json").is_err());
+        // save_json_file validator accepts external sibling .json/.JSON and rejects state_dir + subdirs + bad paths
+        let ok_json = export_dir.join("backup.JSON");
+        assert!(validate_json_save_path(&ok_json.to_string_lossy(), &state_dir).is_ok());
+        assert!(validate_json_save_path(&fake_exe.to_string_lossy(), &state_dir).is_err());
+        assert!(validate_json_save_path(&export_dir.join("run.bat").to_string_lossy(), &state_dir).is_err());
+        assert!(validate_json_save_path("C:\\Temp\\bad\0.json", &state_dir).is_err());
+        assert!(validate_json_save_path("/weird.json", &state_dir).is_err());
+        assert!(validate_json_save_path(r"\\attacker\share\leak.json", &state_dir).is_err());
+        assert!(validate_json_save_path(r"C:\Temp\..\leak.json", &state_dir).is_err());
 
-        // Atomic JSON save roundtrip
-        let out_file = tmp_dir.join("accounts-export.json");
-        save_json_file(
-            out_file.to_string_lossy().to_string(),
+        // Must refuse overwriting files inside state_dir or any subdirectory (case-insensitive & verbatim)
+        assert!(validate_json_save_path(&state_dir.join("config.json").to_string_lossy(), &state_dir).is_err());
+        assert!(validate_json_save_path(&state_dir.join("accounts.json").to_string_lossy(), &state_dir).is_err());
+        assert!(validate_json_save_path(&state_dir.join("ipc-session.json").to_string_lossy(), &state_dir).is_err());
+        assert!(validate_json_save_path(&state_dir.join("sub").join("nested.json").to_string_lossy(), &state_dir).is_err());
+        let upper_inside = state_dir
+            .join("CONFIG.JSON")
+            .to_string_lossy()
+            .to_ascii_uppercase();
+        assert!(validate_json_save_path(&upper_inside, &state_dir).is_err());
+
+        // Atomic JSON save roundtrip outside state_dir succeeds; inside state_dir fails
+        let out_file = export_dir.join("accounts-export.json");
+        save_json_file_checked(
+            &out_file.to_string_lossy(),
             serde_json::json!({ "version": 1, "accounts": [] }),
+            &state_dir,
         )
         .unwrap();
         let saved = std::fs::read_to_string(&out_file).unwrap();
         assert!(saved.contains("\"version\": 1"));
 
-        let _ = std::fs::remove_dir_all(&tmp_dir);
+        assert!(save_json_file_checked(
+            &state_dir.join("config.json").to_string_lossy(),
+            serde_json::json!({ "pwn": true }),
+            &state_dir,
+        )
+        .is_err());
+
+        let _ = std::fs::remove_dir_all(&root_tmp);
     }
 }

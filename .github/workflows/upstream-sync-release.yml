@@ -222,7 +222,7 @@ jobs:
       - name: Install Node dependencies & build Win32 helper
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
-          npm --prefix windows/app ci --no-audit --no-fund
+          npm --prefix windows/app ci --ignore-scripts --no-audit --no-fund
           npm run build:win-helper
 
       - name: Run full Windows verification gate
