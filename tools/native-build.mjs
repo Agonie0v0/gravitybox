@@ -5,6 +5,7 @@ import { cpus } from 'node:os';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { nativeTargetTriple } from './native-target.mjs';
 
 const run = promisify(execFile);
 
@@ -21,7 +22,7 @@ export async function nativeBuildArgs(root, output, { uiTest = false, typecheck 
   return [
     ...modeFlags,
     ...(uiTest ? ['-D', 'NATIVE_UI_TEST'] : []),
-    '-parse-as-library', '-target', 'arm64-apple-macosx14.0',
+    '-parse-as-library', '-target', nativeTargetTriple(),
     ...['Cocoa', 'ServiceManagement', 'Security', 'ApplicationServices', 'CFNetwork'].flatMap(name => ['-framework', name]),
     ...sources,
     ...(uiTest ? [join(root, 'test/native-ui.swift')] : []),
@@ -30,6 +31,8 @@ export async function nativeBuildArgs(root, output, { uiTest = false, typecheck 
 }
 
 async function hashCommonSwiftInputs(hash, root) {
+  // 架构必须进入指纹：arm64 与 x86_64 的编译产物不可互换，缓存不能跨架构复用。
+  hash.update(`arch:${process.arch}\n`);
   try {
     const { stdout } = await run('/usr/bin/swiftc', ['--version'], { cwd: root });
     hash.update(`swiftc:${stdout.trim()}\n`);

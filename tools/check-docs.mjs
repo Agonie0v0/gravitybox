@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join, resolve } from 'node:path';
 import { fileSha256, sourceDigest } from './release-integrity.mjs';
+import { releaseArchSuffix, releaseDmgName } from './native-target.mjs';
 import { parseTestCounts, parseBrowserLog, parseGateLog, countFiles } from './update-acceptance.mjs';
 
 /**
@@ -70,7 +71,7 @@ export async function collectDocFacts({
       gates.push({ version: name.replace(/^词典门禁-/, '').replace(/\.log$/, ''), pass: parsed.pass });
     }
   }
-  const dmg = (!sourceOnly && version) ? join(root, '成品', `GravityBox-${version}-arm64.dmg`) : null;
+  const dmg = (!sourceOnly && version) ? join(root, '成品', releaseDmgName(version)) : null;
   const dmgSHA256 = dmg && existsSync(dmg) ? await fileSha256(dmg) : null;
   const installedFiles = (!sourceOnly && existsSync(installedApp)) ? await countFiles(installedApp) : null;
   const accountsIndex = sourceOnly ? null : await readJson(accountsPath);
@@ -149,10 +150,11 @@ export async function checkDocs({
   const checkDocFile = async (file, path) => {
     const text = await readText(path);
     if (text === null) { add('error', 'DOC_MISSING', file, null, '缺少文档文件'); return; }
-    // DMG 路径：所有出现过的成品 DMG 都必须存在
+    // DMG 路径：文档里出现的成品 DMG 都必须是真实存在的；只校验当前架构，避免 Intel 机器因为文档示例里的 arm64 包误报
     if (!sourceOnly) {
-      for (const match of text.matchAll(/成品\/(GravityBox-[0-9]+\.[0-9]+\.[0-9]+-arm64\.dmg)/g)) {
+      for (const match of text.matchAll(/成品\/(GravityBox-[0-9]+\.[0-9]+\.[0-9]+-(?:arm64|x86_64)\.dmg)/g)) {
         const name = match[1];
+        if (!name.endsWith(`-${releaseArchSuffix()}.dmg`)) continue;
         const line = text.slice(0, match.index).split('\n').length;
         verify('error', 'DOC_DMG_PATH_MISSING', file, line, `文档引用的成品 DMG 不存在：成品/${name}`, existsSync(join(root, '成品', name)));
       }

@@ -10,7 +10,8 @@ import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {computeUiTestSwiftInputsDigest,nativeBuildArgs} from '../tools/native-build.mjs';
 const run=promisify(execFile),root=fileURLToPath(new URL('../',import.meta.url));
-const timeout = process.env.CI ? 360000 : 240000;
+// Intel 机器上 -Onone 全量编译 + 30 套 AppKit 布局明显更慢；超时只用于兜住挂死，不放宽断言。
+const timeout = 600000;
 test('当前五页原生布局、菜单完整身份、部分计价与真实切号控制流隔离检查',{timeout},async t=>{
  const temp=await mkdtemp(join(tmpdir(),'gb-native-ui-'));
  const cacheDir=join(root,'.cache');
