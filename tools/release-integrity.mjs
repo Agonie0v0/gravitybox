@@ -43,6 +43,8 @@ export function includeWindowsSourceDigestPath(relativePath) {
 
 /**
  * 源码摘要：macOS 与跨平台核心发布门禁的唯一真源（严格排除 `windows/`，与 Windows 发行指纹解耦）。
+ * 排除不进入安装包的纯仓库文档（`README*.md`、`CHANGELOG.md`、`PROJECT.md`、`SECURITY.md`），
+ * 仅保留实际随包分发的 `LICENSE` 与 `THIRD_PARTY_NOTICES.md`。
  * 注意：tools/ 与 test/ 也计入，修改发布脚本本身同样会让旧 .cache/verified-release.json 失效，
  * 必须重新执行 `npm run verify` 才能再次打包（失败关闭，而不是静默放行）。
  */
@@ -57,17 +59,8 @@ export async function sourceDigest(root) {
     }
   }
   for (const directory of ['src','runtime','native','tools','test','dict','ui-strings','assets','licenses']) await walk(directory);
-  files.push('package.json','package-lock.json','tsconfig.json','README.md','THIRD_PARTY_NOTICES.md');
-  for (const doc of [
-    'LICENSE',
-    'SECURITY.md',
-    'README.zh-CN.md',
-    'README_EN.md',
-    'CHANGELOG.md',
-    'PROJECT.md',
-  ]) {
-    if (await exists(join(root, doc))) files.push(doc);
-  }
+  files.push('package.json','package-lock.json','tsconfig.json','THIRD_PARTY_NOTICES.md');
+  if (await exists(join(root, 'LICENSE'))) files.push('LICENSE');
   if (await exists(join(root, '.github/workflows'))) {
     await walk('.github/workflows');
   }
