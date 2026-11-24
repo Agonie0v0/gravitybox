@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
 use windows_sys::Win32::Foundation::{
-    BOOL, ERROR_INSUFFICIENT_BUFFER, GetLastError, HANDLE, HWND, LPARAM,
+    BOOL, ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, GetLastError, HANDLE,
+    HWND, LPARAM,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -31,8 +32,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::error::HelperError;
 use crate::util::{
     OwnedHandle, TokenUserBuffer, from_wide_null, has_absolute_local_drive_prefix,
-    has_parent_dir_segment, is_verbatim_unc_path, normalize_win_path, path_matches_prefix,
-    process_has_same_user_sid, zeroize_bytes, zeroize_u16,
+    has_parent_dir_segment, is_verbatim_unc_path, normalize_win_path, path_file_name_lower,
+    path_matches_prefix, process_has_same_user_sid, query_process_creation_time, zeroize_bytes,
+    zeroize_u16,
 };
 
 /// Upper bound when reading remote process CommandLine (64 KiB).
@@ -99,8 +101,10 @@ struct RtlUserProcessParametersHead {
 #[serde(rename_all = "camelCase")]
 pub struct AppProcessInfo {
     pub pid: u32,
+    pub ppid: u32,
     pub exe_path: String,
     pub cmd_line: String,
+    pub role: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -108,6 +112,23 @@ pub struct AppProcessInfo {
 pub struct AppProcessesResponse {
     pub ok: bool,
     pub processes: Vec<AppProcessInfo>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessTreeEntry {
+    pub pid: u32,
+    pub ppid: u32,
+    pub exe_name: String,
+    pub exe_path: String,
+    pub cmd_line: String,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessTreeResponse {
+    pub ok: bool,
+    pub processes: Vec<ProcessTreeEntry>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -147,6 +168,13 @@ pub fn snapshot_processes() -> Result<Vec<ProcessSnapshotEntry>, HelperError> {
 
     let mut result = Vec::new();
     let mut ok = unsafe { Process32FirstW(snap.as_raw(), &mut entry) };
+    if ok == 0 {
+        let err = unsafe { GetLastError() };
+        if err != ERROR_NO_MORE_FILES {
+            return Err(HelperError::win32("Process32FirstW", err));
+        }
+        return Ok(result);
+    }
     while ok != 0 {
         result.push(ProcessSnapshotEntry {
             pid: entry.th32ProcessID,
@@ -186,18 +214,26 @@ pub fn query_pid_exe_path(pid: u32) -> Option<String> {
     query_process_exe_path(handle.as_raw())
 }
 
-/// Open process with `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ`, falling back to query-only.
-pub fn open_process_for_inspect(pid: u32) -> Option<(OwnedHandle, bool)> {
+/// Open process with `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ`, falling back to query-only,
+/// and returning `Err(last_error)` on failure.
+pub fn open_process_for_inspect_checked(pid: u32) -> Result<(OwnedHandle, bool), u32> {
     if pid == 0 {
-        return None;
+        return Err(0);
     }
     if let Some(h) = OwnedHandle::new(unsafe {
         OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid)
     }) {
-        return Some((h, true));
+        return Ok((h, true));
     }
-    OwnedHandle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) })
-        .map(|h| (h, false))
+    if let Some(h) = OwnedHandle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) }) {
+        return Ok((h, false));
+    }
+    Err(unsafe { GetLastError() })
+}
+
+/// Open process with `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ`, falling back to query-only.
+pub fn open_process_for_inspect(pid: u32) -> Option<(OwnedHandle, bool)> {
+    open_process_for_inspect_checked(pid).ok()
 }
 
 fn read_remote_bytes(handle: HANDLE, addr: u64, dst: &mut [u8]) -> Option<usize> {
@@ -221,7 +257,7 @@ fn read_remote_bytes(handle: HANDLE, addr: u64, dst: &mut [u8]) -> Option<usize>
     }
 }
 
-fn read_remote_struct<T: Copy>(handle: HANDLE, addr: u64) -> Option<T> {
+unsafe fn read_remote_struct<T: Copy>(handle: HANDLE, addr: u64) -> Option<T> {
     if addr == 0 {
         return None;
     }
@@ -468,12 +504,12 @@ fn read_peb_process_params(handle: HANDLE) -> Option<(u64, RtlUserProcessParamet
         return None;
     }
 
-    let peb = read_remote_struct::<PEB>(handle, pbi.PebBaseAddress as u64)?;
+    let peb = unsafe { read_remote_struct::<PEB>(handle, pbi.PebBaseAddress as u64) }?;
     let params_addr = peb.ProcessParameters as u64;
     if params_addr == 0 {
         return None;
     }
-    let head = read_remote_struct::<RtlUserProcessParametersHead>(handle, params_addr)?;
+    let head = unsafe { read_remote_struct::<RtlUserProcessParametersHead>(handle, params_addr) }?;
     Some((params_addr, head))
 }
 
@@ -483,10 +519,12 @@ fn read_hint_env_size(
     head: &RtlUserProcessParametersHead,
 ) -> Option<usize> {
     if (head.length as u64) >= RTL_PARAMS_ENV_SIZE_OFFSET + 8 {
-        read_remote_struct::<u64>(
-            handle,
-            params_addr.saturating_add(RTL_PARAMS_ENV_SIZE_OFFSET),
-        )
+        unsafe {
+            read_remote_struct::<u64>(
+                handle,
+                params_addr.saturating_add(RTL_PARAMS_ENV_SIZE_OFFSET),
+            )
+        }
         .and_then(|v| usize::try_from(v).ok())
     } else {
         None
@@ -604,8 +642,73 @@ pub fn resolve_descendant_csrf_token(
     None
 }
 
+fn is_antigravity_related_exe_name(exe_name: &str) -> bool {
+    let lower = exe_name.trim().to_ascii_lowercase();
+    lower == "antigravity.exe"
+        || lower.starts_with("language_server")
+        || lower == "agy.exe"
+        || lower == "agy-tunnel.exe"
+}
+
+fn classify_app_process_role(
+    pid: u32,
+    exe_path: &str,
+    cmd_line: &str,
+    parent_map: &HashMap<u32, u32>,
+    exe_name_map: &HashMap<u32, String>,
+) -> String {
+    let exe_lower = path_file_name_lower(exe_path);
+    let cmd_lower = cmd_line.to_ascii_lowercase();
+    if exe_lower == "chrome_crashpad_handler.exe" || cmd_lower.contains("chrome_crashpad_handler") {
+        return "crashpad".to_string();
+    }
+    if exe_lower == "antigravity.exe" {
+        return "ui".to_string();
+    }
+    let is_chromium_helper = [
+        "--type=renderer",
+        "--type=gpu-process",
+        "--type=utility",
+        "--type=zygote",
+        "--type=broker",
+        "--type=ppapi",
+    ]
+    .iter()
+    .any(|flag| cmd_lower.contains(flag));
+    let is_daemon_candidate = exe_lower.starts_with("language_server")
+        || (cmd_lower.contains("sidecar_sdk") && !is_chromium_helper);
+    if is_daemon_candidate {
+        let mut cur = parent_map.get(&pid).copied().unwrap_or(0);
+        let mut visited = HashSet::from([pid]);
+        for _ in 0..16 {
+            if cur == 0 || !visited.insert(cur) {
+                break;
+            }
+            if let Some(pname) = exe_name_map.get(&cur) {
+                if pname.eq_ignore_ascii_case("antigravity.exe") {
+                    return "ui".to_string();
+                }
+            }
+            cur = parent_map.get(&cur).copied().unwrap_or(0);
+        }
+        return "detached_daemon".to_string();
+    }
+    if exe_lower.starts_with("antigravity") || is_chromium_helper {
+        return "ui".to_string();
+    }
+    "other".to_string()
+}
+
 pub fn app_processes(prefixes: &[String]) -> Result<AppProcessesResponse, HelperError> {
     let entries = snapshot_processes()?;
+    let mut parent_map: HashMap<u32, u32> = HashMap::with_capacity(entries.len());
+    let mut exe_name_map: HashMap<u32, String> = HashMap::with_capacity(entries.len());
+    for entry in &entries {
+        if entry.pid != 0 {
+            parent_map.insert(entry.pid, entry.parent_pid);
+            exe_name_map.insert(entry.pid, entry.exe_name.clone());
+        }
+    }
     let mut processes = Vec::new();
 
     for entry in entries {
@@ -613,8 +716,20 @@ pub fn app_processes(prefixes: &[String]) -> Result<AppProcessesResponse, Helper
         if pid == 0 {
             continue;
         }
-        let Some((handle, has_vm_read)) = open_process_for_inspect(pid) else {
-            continue;
+        let (handle, has_vm_read) = match open_process_for_inspect_checked(pid) {
+            Ok(pair) => pair,
+            Err(err) => {
+                if !prefixes.is_empty()
+                    && err == ERROR_ACCESS_DENIED
+                    && is_antigravity_related_exe_name(&entry.exe_name)
+                {
+                    return Err(HelperError::new(
+                        "ACCESS_DENIED",
+                        format!("access denied opening matching process pid {pid} ({})", entry.exe_name),
+                    ));
+                }
+                continue;
+            }
         };
         let Some(exe_path) = query_process_exe_path(handle.as_raw()) else {
             continue;
@@ -627,15 +742,63 @@ pub fn app_processes(prefixes: &[String]) -> Result<AppProcessesResponse, Helper
         } else {
             String::new()
         };
+        let role = classify_app_process_role(pid, &exe_path, &cmd_line, &parent_map, &exe_name_map);
         processes.push(AppProcessInfo {
             pid,
+            ppid: entry.parent_pid,
             exe_path,
             cmd_line,
+            role,
         });
     }
 
     processes.sort_by_key(|p| p.pid);
     Ok(AppProcessesResponse {
+        ok: true,
+        processes,
+    })
+}
+
+/// Enumerate current-user running processes (`pid`, `ppid`, `exeName`, `exePath`, `cmdLine`) for tunnel/tree inspection.
+pub fn process_tree() -> Result<ProcessTreeResponse, HelperError> {
+    const MAX_TREE_ENTRIES: usize = 4096;
+    let self_user = TokenUserBuffer::from_current_process()
+        .map_err(|err| HelperError::win32("GetTokenInformation(self)", err))?;
+    let self_sid = self_user
+        .sid_ptr()
+        .ok_or_else(|| HelperError::new("WIN32_ERROR", "failed to resolve current user SID"))?;
+
+    let entries = snapshot_processes()?;
+    let mut processes = Vec::new();
+    for entry in entries {
+        if entry.pid == 0 {
+            continue;
+        }
+        if processes.len() >= MAX_TREE_ENTRIES {
+            break;
+        }
+        let Ok((handle, has_vm_read)) = open_process_for_inspect_checked(entry.pid) else {
+            continue;
+        };
+        if !process_has_same_user_sid(handle.as_raw(), self_sid) {
+            continue;
+        }
+        let exe_path = query_process_exe_path(handle.as_raw()).unwrap_or_default();
+        let cmd_line = if has_vm_read {
+            read_peb_cmdline_and_csrf(handle.as_raw(), false).0
+        } else {
+            String::new()
+        };
+        processes.push(ProcessTreeEntry {
+            pid: entry.pid,
+            ppid: entry.parent_pid,
+            exe_name: entry.exe_name,
+            exe_path,
+            cmd_line,
+        });
+    }
+    processes.sort_by_key(|p| p.pid);
+    Ok(ProcessTreeResponse {
         ok: true,
         processes,
     })
@@ -651,6 +814,7 @@ const STAGE3_REMAINING_WAIT_DURATION: Duration = Duration::from_millis(3000);
 struct MatchedProcess {
     pid: u32,
     parent_pid: u32,
+    creation_time: Option<u64>,
 }
 
 fn is_drive_root_normalized(norm: &str) -> bool {
@@ -739,10 +903,18 @@ fn find_matching_processes(
         if pid == 0 || pid == self_pid || !seen.insert(pid) {
             continue;
         }
-        let Some(handle) =
-            OwnedHandle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) })
-        else {
-            continue;
+        let handle = match OwnedHandle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) }) {
+            Some(h) => h,
+            None => {
+                let err = unsafe { GetLastError() };
+                if err == ERROR_ACCESS_DENIED && is_antigravity_related_exe_name(&entry.exe_name) {
+                    return Err(HelperError::new(
+                        "ACCESS_DENIED",
+                        format!("access denied opening matching process pid {pid} ({})", entry.exe_name),
+                    ));
+                }
+                continue;
+            }
         };
         // Strictly restrict graceful close to processes owned by the current Windows user SID.
         if !process_has_same_user_sid(handle.as_raw(), self_sid) {
@@ -751,10 +923,14 @@ fn find_matching_processes(
         let Some(exe_path) = query_process_exe_path(handle.as_raw()) else {
             continue;
         };
+        if path_file_name_lower(&exe_path) == "chrome_crashpad_handler.exe" {
+            continue;
+        }
         if prefixes.iter().any(|p| path_matches_prefix(&exe_path, p)) {
             matched.push(MatchedProcess {
                 pid,
                 parent_pid: entry.parent_pid,
+                creation_time: query_process_creation_time(handle.as_raw()),
             });
         }
     }
@@ -841,35 +1017,57 @@ unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL 
     1
 }
 
-fn collect_windows_for_pids(target_pids: &HashSet<u32>) -> WindowSnapshot {
+fn collect_windows_for_pids(target_pids: &HashSet<u32>) -> Result<WindowSnapshot, HelperError> {
     if target_pids.is_empty() {
-        return WindowSnapshot::default();
+        return Ok(WindowSnapshot::default());
     }
     let mut state = EnumWindowsState {
         target_pids: target_pids.clone(),
         snapshot: WindowSnapshot::default(),
     };
-    unsafe {
+    let ok = unsafe {
         EnumWindows(
             Some(enum_windows_proc),
             &mut state as *mut EnumWindowsState as LPARAM,
-        );
+        )
+    };
+    if ok == 0 {
+        let err = unsafe { GetLastError() };
+        return Err(HelperError::win32("EnumWindows", err));
     }
-    state.snapshot
+    Ok(state.snapshot)
 }
 
-fn post_wm_close_all(targets: &[HWND]) {
+fn post_wm_close_all(targets: &[HWND]) -> Result<(), u32> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let mut posted = 0usize;
+    let mut saw_access_denied = false;
     for &hwnd in targets {
-        unsafe {
-            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        let ok = unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+        if ok != 0 {
+            posted += 1;
+        } else if unsafe { GetLastError() } == ERROR_ACCESS_DENIED {
+            saw_access_denied = true;
         }
     }
+    if posted == 0 && saw_access_denied {
+        Err(ERROR_ACCESS_DENIED)
+    } else {
+        Ok(())
+    }
 }
 
-/// Terminate a single PID after re-verifying both same Windows user SID and live executable
+/// Terminate a single PID after re-verifying user SID, process creation timestamp, and live executable
 /// image path against `prefixes`. Prevents PID-reuse TOCTOU races, cross-user termination, and
 /// self-termination.
-fn terminate_matching_pid(pid: u32, prefixes: &[String], self_sid: *mut c_void) {
+fn terminate_matching_pid(
+    pid: u32,
+    expected_creation_time: Option<u64>,
+    prefixes: &[String],
+    self_sid: *mut c_void,
+) {
     let self_pid = std::process::id();
     if pid == 0 || pid == self_pid {
         return;
@@ -882,9 +1080,17 @@ fn terminate_matching_pid(pid: u32, prefixes: &[String], self_sid: *mut c_void) 
     if !process_has_same_user_sid(handle.as_raw(), self_sid) {
         return;
     }
+    if let Some(expected_ct) = expected_creation_time {
+        if query_process_creation_time(handle.as_raw()) != Some(expected_ct) {
+            return;
+        }
+    }
     let Some(exe_path) = query_process_exe_path(handle.as_raw()) else {
         return;
     };
+    if path_file_name_lower(&exe_path) == "chrome_crashpad_handler.exe" {
+        return;
+    }
     if !prefixes.iter().any(|p| path_matches_prefix(&exe_path, p)) {
         return;
     }
@@ -911,7 +1117,7 @@ fn wait_without_force_kill(
         }
         let now = Instant::now();
         if now >= deadline {
-            let windows = collect_windows_for_pids(&pid_set(&matched));
+            let windows = collect_windows_for_pids(&pid_set(&matched))?;
             let reason = if windows.has_visible() {
                 "visible_window_open"
             } else {
@@ -973,11 +1179,20 @@ pub fn app_graceful_close(
     let stage1_deadline = Instant::now() + Duration::from_millis(opts.timeout_ms);
 
     // Stage 1: Gracefully close visible top-level windows and wait for 1200ms continuous 0-visible state.
-    let initial_windows = collect_windows_for_pids(&pid_set(&initial));
+    let initial_windows = collect_windows_for_pids(&pid_set(&initial))?;
     let mut sent_visible_close_at: Option<Instant> = None;
     let mut retried_visible_close = false;
+    let mut uipi_blocked = false;
     let mut zero_visible_since: Option<Instant> = if initial_windows.has_visible() {
-        post_wm_close_all(initial_windows.visible_close_targets());
+        if post_wm_close_all(initial_windows.visible_close_targets()).is_err() {
+            uipi_blocked = true;
+            return Ok(GracefulCloseResponse {
+                ok: true,
+                closed: false,
+                remaining_pids: sorted_pids(&initial),
+                reason: Some("uipi_access_denied".to_string()),
+            });
+        }
         sent_visible_close_at = Some(Instant::now());
         None
     } else {
@@ -995,7 +1210,7 @@ pub fn app_graceful_close(
             });
         }
 
-        let windows = collect_windows_for_pids(&pid_set(&matched));
+        let windows = collect_windows_for_pids(&pid_set(&matched))?;
         let now = Instant::now();
 
         if windows.has_visible() {
@@ -1003,7 +1218,9 @@ pub fn app_graceful_close(
             zero_visible_since = None;
 
             if sent_visible_close_at.is_none() {
-                post_wm_close_all(windows.visible_close_targets());
+                if post_wm_close_all(windows.visible_close_targets()).is_err() {
+                    uipi_blocked = true;
+                }
                 sent_visible_close_at = Some(now);
             } else if !retried_visible_close
                 && now.duration_since(sent_visible_close_at.unwrap()) >= VISIBLE_RETRY_INTERVAL
@@ -1011,7 +1228,9 @@ pub fn app_graceful_close(
                 retried_visible_close = true;
                 // Only retry on unowned main windows when no owned modal dialog (e.g. Save prompt) is visible.
                 if !windows.visible_unowned.is_empty() && windows.visible_owned.is_empty() {
-                    post_wm_close_all(&windows.visible_unowned);
+                    if post_wm_close_all(&windows.visible_unowned).is_err() {
+                        uipi_blocked = true;
+                    }
                 }
             }
 
@@ -1020,7 +1239,12 @@ pub fn app_graceful_close(
                     ok: true,
                     closed: false,
                     remaining_pids: sorted_pids(&matched),
-                    reason: Some("visible_window_open".to_string()),
+                    reason: Some(if uipi_blocked {
+                        "uipi_access_denied"
+                    } else {
+                        "visible_window_open"
+                    }
+                    .to_string()),
                 });
             }
 
@@ -1038,7 +1262,7 @@ pub fn app_graceful_close(
                 let reason = if opts.confirm_background_exit {
                     "timeout"
                 } else {
-                    post_wm_close_all(windows.hidden_close_targets());
+                    let _ = post_wm_close_all(windows.hidden_close_targets());
                     "background_resident"
                 };
                 return Ok(GracefulCloseResponse {
@@ -1068,7 +1292,7 @@ pub fn app_graceful_close(
             reason: Some("clean_exit".to_string()),
         });
     }
-    let stage2_windows = collect_windows_for_pids(&pid_set(&stage2_matched));
+    let stage2_windows = collect_windows_for_pids(&pid_set(&stage2_matched))?;
     if stage2_windows.has_visible() {
         let non_visible = if opts.confirm_background_exit {
             "timeout"
@@ -1077,7 +1301,7 @@ pub fn app_graceful_close(
         };
         return wait_without_force_kill(&validated_prefixes, self_sid, stage1_deadline, non_visible);
     }
-    post_wm_close_all(stage2_windows.hidden_close_targets());
+    let _ = post_wm_close_all(stage2_windows.hidden_close_targets());
 
     let raw_stage2_deadline = Instant::now() + Duration::from_millis(opts.grace_ms);
     let stage2_deadline = if opts.confirm_background_exit {
@@ -1096,7 +1320,7 @@ pub fn app_graceful_close(
                 reason: Some("clean_exit".to_string()),
             });
         }
-        let windows = collect_windows_for_pids(&pid_set(&matched));
+        let windows = collect_windows_for_pids(&pid_set(&matched))?;
         if windows.has_visible() {
             // A visible window appeared (e.g. confirmation dialog) -> never force-kill.
             let non_visible = if opts.confirm_background_exit {
@@ -1133,7 +1357,7 @@ pub fn app_graceful_close(
                 reason: Some("clean_exit".to_string()),
             });
         }
-        let windows = collect_windows_for_pids(&pid_set(&matched));
+        let windows = collect_windows_for_pids(&pid_set(&matched))?;
         let reason = if windows.has_visible() {
             "visible_window_open"
         } else {
@@ -1157,7 +1381,7 @@ pub fn app_graceful_close(
             reason: Some("clean_exit".to_string()),
         });
     }
-    let stage3_windows = collect_windows_for_pids(&pid_set(&stage3_matched));
+    let stage3_windows = collect_windows_for_pids(&pid_set(&stage3_matched))?;
     if stage3_windows.has_visible() {
         return Ok(GracefulCloseResponse {
             ok: true,
@@ -1167,8 +1391,13 @@ pub fn app_graceful_close(
         });
     }
 
+    let stage3_ct: HashMap<u32, Option<u64>> = stage3_matched
+        .iter()
+        .map(|m| (m.pid, m.creation_time))
+        .collect();
     for root_pid in select_root_pids(&stage3_matched) {
-        terminate_matching_pid(root_pid, &validated_prefixes, self_sid);
+        let ct = stage3_ct.get(&root_pid).copied().flatten();
+        terminate_matching_pid(root_pid, ct, &validated_prefixes, self_sid);
     }
 
     let root_wait_deadline = Instant::now() + STAGE3_ROOT_WAIT_DURATION;
@@ -1182,7 +1411,7 @@ pub fn app_graceful_close(
                 reason: Some("background_terminated".to_string()),
             });
         }
-        let windows = collect_windows_for_pids(&pid_set(&remaining));
+        let windows = collect_windows_for_pids(&pid_set(&remaining))?;
         if windows.has_visible() {
             return Ok(GracefulCloseResponse {
                 ok: true,
@@ -1211,7 +1440,7 @@ pub fn app_graceful_close(
             reason: Some("background_terminated".to_string()),
         });
     }
-    let remaining_windows = collect_windows_for_pids(&pid_set(&remaining));
+    let remaining_windows = collect_windows_for_pids(&pid_set(&remaining))?;
     if remaining_windows.has_visible() {
         return Ok(GracefulCloseResponse {
             ok: true,
@@ -1222,7 +1451,7 @@ pub fn app_graceful_close(
     }
 
     for proc_item in &remaining {
-        terminate_matching_pid(proc_item.pid, &validated_prefixes, self_sid);
+        terminate_matching_pid(proc_item.pid, proc_item.creation_time, &validated_prefixes, self_sid);
     }
 
     let rem_wait_deadline = Instant::now() + STAGE3_REMAINING_WAIT_DURATION;
@@ -1408,17 +1637,17 @@ mod tests {
     #[test]
     fn select_root_pids_identifies_tree_roots() {
         let tree = vec![
-            MatchedProcess { pid: 100, parent_pid: 1 },
-            MatchedProcess { pid: 101, parent_pid: 100 },
-            MatchedProcess { pid: 102, parent_pid: 101 },
-            MatchedProcess { pid: 200, parent_pid: 55 },
+            MatchedProcess { pid: 100, parent_pid: 1, creation_time: None },
+            MatchedProcess { pid: 101, parent_pid: 100, creation_time: None },
+            MatchedProcess { pid: 102, parent_pid: 101, creation_time: None },
+            MatchedProcess { pid: 200, parent_pid: 55, creation_time: None },
         ];
         assert_eq!(select_root_pids(&tree), vec![100, 200]);
 
         // Degenerate cycle fallback returns all matched PIDs
         let cycle = vec![
-            MatchedProcess { pid: 10, parent_pid: 20 },
-            MatchedProcess { pid: 20, parent_pid: 10 },
+            MatchedProcess { pid: 10, parent_pid: 20, creation_time: None },
+            MatchedProcess { pid: 20, parent_pid: 10, creation_time: None },
         ];
         assert_eq!(select_root_pids(&cycle), vec![10, 20]);
     }

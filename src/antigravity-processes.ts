@@ -44,11 +44,11 @@ export function parsePsPidPpidCpuArgs(output: string): ProcessTreeEntry[] {
   for (const rawLine of output.split('\n')) {
     const trimmed = rawLine.trim();
     if (!trimmed) continue;
-    const match = trimmed.match(/^(\d+)\s+(\d+)\s+([\d.]+)\s+(.*)$/);
+    const match = trimmed.match(/^(\d+)\s+(\d+)\s+([\d.,]+)\s+(.*)$/);
     if (!match) continue;
     const pid = Number(match[1]);
     const ppid = Number(match[2]);
-    const cpu = Number.parseFloat(match[3] || '0');
+    const cpu = Number.parseFloat((match[3] || '0').replace(',', '.'));
     const args = (match[4] || '').trim();
     if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(ppid) || ppid < 0 || !args) continue;
     entries.push({ pid, ppid, cpu: Number.isFinite(cpu) ? cpu : 0, args });
@@ -228,7 +228,14 @@ export async function sampleAntigravityProcesses(
   if (process.platform === 'win32') {
     throw new Error('sampleAntigravityProcesses is only supported on POSIX platforms');
   }
-  const { stdout } = await execFileAsync('/bin/ps', ['-ax', '-ww', '-o', 'pid=,ppid=,pcpu=,args='], { timeout: 3000 });
+  const { stdout } = await execFileAsync(
+    '/bin/ps',
+    ['-ax', '-ww', '-o', 'pid=,ppid=,pcpu=,args='],
+    { timeout: 3000, env: { ...process.env, LC_ALL: 'C', LC_NUMERIC: 'C' } },
+  );
   const entries = parsePsPidPpidCpuArgs(stdout);
+  if (stdout.trim().length > 0 && entries.length === 0) {
+    throw new Error('Failed to parse process table output');
+  }
   return classifyAntigravityProcesses(entries, options);
 }

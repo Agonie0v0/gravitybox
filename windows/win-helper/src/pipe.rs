@@ -14,7 +14,7 @@ use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_I
 use crate::error::HelperError;
 use crate::process::query_process_exe_path;
 use crate::util::{
-    OwnedHandle, TokenUserBuffer, normalize_win_path, path_file_name_lower,
+    OwnedHandle, TokenUserBuffer, exe_matches_filter, process_has_compatible_integrity,
     process_has_same_user_sid, to_wide_null,
 };
 
@@ -92,22 +92,6 @@ fn open_pipe_for_identity_check(pipe_w: &[u16]) -> Result<OwnedHandle, u32> {
         return Err(err);
     }
     Err(ERROR_PIPE_BUSY)
-}
-
-/// Strictly match `exe_path` against `expected_exe`:
-/// - When `expected_exe` contains a path separator (`\` or `/`), require exact normalized full-path equality.
-/// - Otherwise, require exact case-insensitive executable filename equality (defeating directory-name spoofing
-///   such as `C:\evil\node.exe\malware.exe` against `node.exe`).
-pub(crate) fn exe_matches_filter(exe_path: &str, expected_exe: &str) -> bool {
-    let trimmed = expected_exe.trim();
-    if trimmed.is_empty() || exe_path.trim().is_empty() {
-        return false;
-    }
-    if trimmed.contains('\\') || trimmed.contains('/') {
-        normalize_win_path(exe_path) == normalize_win_path(trimmed)
-    } else {
-        path_file_name_lower(exe_path) == trimmed.to_lowercase()
-    }
 }
 
 /// Open an existing GravityBox Named Pipe with `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`
@@ -189,13 +173,18 @@ pub fn verify_pipe_server(
         .sid_ptr()
         .ok_or_else(|| HelperError::new("WIN32_ERROR", "failed to resolve current user SID"))?;
 
-    let (exe_path, same_user_sid) = match server_proc {
+    let (exe_path, same_user_sid, compatible_integrity) = match server_proc {
         Some(proc_handle) => {
             let exe = query_process_exe_path(proc_handle.as_raw()).unwrap_or_default();
             let same_sid = process_has_same_user_sid(proc_handle.as_raw(), self_sid);
-            (exe, same_sid)
+            let compat_il = if same_sid {
+                process_has_compatible_integrity(proc_handle.as_raw())
+            } else {
+                false
+            };
+            (exe, same_sid, compat_il)
         }
-        None => (String::new(), false),
+        None => (String::new(), false, false),
     };
 
     if !same_user_sid {
@@ -207,6 +196,18 @@ pub fn verify_pipe_server(
             same_user_sid: false,
             exe_path,
             reason: Some("sid_mismatch".to_string()),
+        });
+    }
+
+    if !compatible_integrity {
+        return Ok(VerifyPipeServerResponse {
+            ok: true,
+            verified: false,
+            pipe_name: pipe_name.to_string(),
+            server_pid: Some(server_pid),
+            same_user_sid: true,
+            exe_path,
+            reason: Some("integrity_mismatch".to_string()),
         });
     }
 

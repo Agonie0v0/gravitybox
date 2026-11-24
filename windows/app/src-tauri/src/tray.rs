@@ -1,7 +1,7 @@
 use crate::antigravity::{launch_antigravity, safe_relaunch_antigravity};
 use crate::backend::BackendManager;
 use serde_json::json;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::image::Image;
@@ -14,6 +14,15 @@ pub const TRAY_ID: &str = "gravitybox-tray";
 
 static LAST_TRAY_HIDE_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_TRAY_SHOW_MS: AtomicU64 = AtomicU64::new(0);
+static TRAY_AUTOHIDE_SUPPRESSED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_tray_autohide_suppressed(suppressed: bool) {
+    TRAY_AUTOHIDE_SUPPRESSED.store(suppressed, Ordering::SeqCst);
+}
+
+pub fn is_tray_autohide_suppressed() -> bool {
+    TRAY_AUTOHIDE_SUPPRESSED.load(Ordering::SeqCst)
+}
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -250,8 +259,23 @@ pub fn setup_tray(app: &AppHandle, backend: Arc<BackendManager>, is_english: boo
                         .and_then(|v| v.get("status").and_then(|s| s.get("translationEnabled")).and_then(|b| b.as_bool()))
                         .unwrap_or(true);
                     let cmd = if currently_enabled { "pause" } else { "resume" };
-                    let _ = mgr.request(json!({ "command": cmd }));
-                    let _ = handle.emit("backend-data-changed", "localization");
+                    match mgr.request(json!({ "command": cmd })) {
+                        Ok(val) if val.get("ok").and_then(|v| v.as_bool()) != Some(false) => {
+                            let _ = handle.emit("backend-data-changed", "localization");
+                        }
+                        Ok(val) => {
+                            let msg = val
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("操作未能完成")
+                                .to_string();
+                            let _ = handle.emit("toast-message", json!({ "message": msg, "error": true }));
+                            let _ = handle.emit("backend-data-changed", "localization");
+                        }
+                        Err(err) => {
+                            let _ = handle.emit("toast-message", json!({ "message": err, "error": true }));
+                        }
+                    }
                 });
             }
             "open_antigravity" => {
@@ -288,8 +312,12 @@ pub fn setup_tray(app: &AppHandle, backend: Arc<BackendManager>, is_english: boo
                 });
             }
             "quit" => {
-                backend_for_menu.graceful_stop();
-                app.exit(0);
+                let mgr = Arc::clone(&backend_for_menu);
+                let handle = app.clone();
+                std::thread::spawn(move || {
+                    mgr.graceful_stop();
+                    handle.exit(0);
+                });
             }
             _ => {}
         })

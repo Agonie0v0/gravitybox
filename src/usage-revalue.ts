@@ -6,6 +6,24 @@ import { aggregateLedger, isUnpricedZeroSentinel, safeRollback, type AggregateOp
 import { matchPricingKeys, resolveContextTierPricing, resolvePricingForTimestamp, type ApiPricing } from './pricing.js';
 import { resolveDatabaseModelFullName } from './usage-types.js';
 import { bt } from './i18n.js';
+
+const REVALUE_RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+function renameFileSyncWithRetry(src: string, dest: string): void {
+    const maxRetries = process.platform === 'win32' ? 6 : 0;
+    const sleepBuf = maxRetries > 0 ? new Int32Array(new SharedArrayBuffer(4)) : null;
+    for (let attempt = 0; ; attempt++) {
+        try {
+            renameSync(src, dest);
+            return;
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException | undefined)?.code;
+            if (attempt >= maxRetries || !code || !REVALUE_RETRYABLE_RENAME_CODES.has(code)) {
+                throw error;
+            }
+            if (sleepBuf) Atomics.wait(sleepBuf, 0, 0, Math.min(200, 20 * (2 ** attempt)));
+        }
+    }
+}
 function digest(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 function feesDigest(db: DatabaseSync): string {
     const hash = createHash('sha256');
@@ -30,8 +48,8 @@ export function writeRateLocksJsonMirror(db: DatabaseSync, ratesPath: string): v
     }
     const tmpRates = `${ratesPath}.${process.pid}.${randomUUID()}.tmp`;
     writeFileSync(tmpRates, JSON.stringify({ version: 1, profiles, entries }) + '\n', { mode: 0o600 });
-    chmodSync(tmpRates, 0o600);
-    renameSync(tmpRates, ratesPath);
+    if (process.platform !== 'win32') chmodSync(tmpRates, 0o600);
+    renameFileSyncWithRetry(tmpRates, ratesPath);
 }
 
 export function revalueLedger(db: DatabaseSync, path: string, options: AggregateOptions & {
@@ -108,7 +126,7 @@ export function revalueLedger(db: DatabaseSync, path: string, options: Aggregate
         finally {
             baseline.close();
         }
-        chmodSync(backup, 0o600);
+        if (process.platform !== 'win32') chmodSync(backup, 0o600);
         const liveFileSet = options.liveFiles ? new Set(options.liveFiles) : null;
         const extraPriceKeys = Object.keys(options.prices);
         const candidateLocks = new Map(backupLocks);
@@ -179,7 +197,7 @@ export function revalueLedger(db: DatabaseSync, path: string, options: Aggregate
         finally {
             candidateDb.close();
         }
-        chmodSync(candidate, 0o600);
+        if (process.platform !== 'win32') chmodSync(candidate, 0o600);
         const changes: {
             key: string;
             before: number | null;
@@ -241,7 +259,7 @@ export function revalueLedger(db: DatabaseSync, path: string, options: Aggregate
         if (existsSync(beforeRatesPath)) {
             const tmpRates = `${ratesPath}.${process.pid}.${randomUUID()}.tmp`;
             writeFileSync(tmpRates, readFileSync(beforeRatesPath), { mode: 0o600 });
-            renameSync(tmpRates, ratesPath);
+            renameFileSyncWithRetry(tmpRates, ratesPath);
         } else if (receipt.rateDigest === null && existsSync(ratesPath)) {
             unlinkSync(ratesPath);
         }

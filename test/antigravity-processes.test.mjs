@@ -198,3 +198,19 @@ test('hasAntigravityCommand 排除 chrome_crashpad_handler 同时保留 Helper (
     false,
   );
 });
+
+test('parsePsPidPpidCpuArgs 兼容逗号小数区域设置，避免非英文 LC_NUMERIC 漏判', () => {
+  const commaPs = [
+    '70001     1  0,0 /Applications/Antigravity.app/Contents/MacOS/Antigravity',
+    '64189     1 14,8 /Applications/Antigravity.app/Contents/Resources/bin/language_server --standalone',
+    '72001     1  1,2 /Applications/Antigravity - Insiders.app/Contents/MacOS/Antigravity - Insiders',
+  ].join('\n');
+
+  const entries = parsePsPidPpidCpuArgs(commaPs);
+  assert.equal(entries.length, 3);
+  const classified = classifyAntigravityProcesses(entries);
+  assert.equal(classified.uiRunning, true);
+  assert.equal(classified.insidersRunning, true);
+  assert.equal(classified.detachedDaemons.length, 1);
+  assert.equal(classified.maxLsCpu, 14.8);
+});

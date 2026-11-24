@@ -65,6 +65,7 @@ export { canonicalPayload } from './ipc-idempotency.js';
 import { loadProxyConfigFromStateDir, redactProxyUrl, resolveEffectiveProxy, setRuntimeProxyConfig } from './proxy.js';
 import {
   appProcesses,
+  classifyWindowsProcesses,
   cleanupIpcEndpoint,
   cleanupIpcSession,
   defaultAntigravityInstallDirs,
@@ -72,7 +73,6 @@ import {
   defaultGravityBoxStateDir,
   finalizeIpcEndpointAfterListen,
   isOwnedByCurrentUser,
-  isPathUnder,
   isWindows,
   pathsEqual,
   prepareIpcEndpointForListen,
@@ -1629,14 +1629,11 @@ async function run() {
                 insidersRoots.add(join(dir, 'Antigravity-Insiders'));
               }
               const procs = await appProcesses([...stableRoots, ...insidersRoots]);
-              for (const proc of procs) {
-                const isInsiders = Array.from(insidersRoots).some(root => isPathUnder(proc.exePath, root, 'win32'));
-                if (isInsiders) {
-                  insidersRunning = true;
-                } else if (Array.from(stableRoots).some(root => isPathUnder(proc.exePath, root, 'win32'))) {
-                  uiRunning = true;
-                }
-              }
+              const classified = classifyWindowsProcesses(procs, target.appPath);
+              uiRunning = classified.uiRunning;
+              insidersRunning = classified.insidersRunning;
+              detachedDaemons = classified.detachedDaemons.map(d => ({ pid: d.pid, kind: d.kind }));
+              detachedDaemonKinds = classified.detachedDaemonKinds;
             } else {
               const classified = await sampleAntigravityProcesses({
                 appPath: target.appPath,

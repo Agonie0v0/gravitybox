@@ -1177,6 +1177,7 @@
     "keychain.err.write_timeout": "无法保存账号钥匙串，访问超时",
     "keychain.err.write": "无法保存账号钥匙串，原凭据访问权限可能受限",
     "keychain.err.delete": "无法恢复账号钥匙串",
+    "keychain.err.payload_too_large": "账号凭据超出 Windows 凭据管理器容量上限（2560 字节）",
     "policy.err.invalid_format": "账号推荐配置格式无效",
     "policy.err.enabled_boolean": "推荐开关必须为布尔值",
     "policy.err.invalid_strategy": "推荐策略无效",

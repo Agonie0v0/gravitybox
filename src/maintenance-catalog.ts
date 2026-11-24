@@ -264,7 +264,19 @@ export async function readProcessCommands(): Promise<string[] | null> {
         // Enumerate all running processes (matching `/bin/ps -axo command=` on macOS) so both
         // custom Antigravity install paths and external browser_profile Chromium processes are visible.
         const procs = await appProcesses([]);
-        const commands = procs.map((p) => (p.cmdLine || p.exePath || '').trim()).filter(Boolean);
+        const commands = procs.map((p) => {
+          const exe = p.exePath.trim();
+          const cmd = p.cmdLine.trim();
+          if (exe && cmd) {
+            const normCmd = cmd.toLowerCase();
+            const normExe = exe.toLowerCase();
+            if (normCmd.startsWith(normExe) || normCmd.startsWith(`"${normExe}"`)) {
+              return cmd;
+            }
+            return `"${exe}" ${cmd}`;
+          }
+          return (cmd || exe).trim();
+        }).filter(Boolean);
         cachedProcessCommands = { at: Date.now(), commands };
         return commands;
       }
@@ -287,6 +299,20 @@ export async function readProcessCommands(): Promise<string[] | null> {
   }
 }
 
+function extractWindowsExecutableToken(command: string): string {
+  const trimmed = command.trimStart();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('"')) {
+    const closeIdx = trimmed.indexOf('"', 1);
+    return closeIdx > 1 ? trimmed.slice(1, closeIdx) : trimmed.slice(1);
+  }
+  const exeMatch = trimmed.match(/^(.+?\.exe)(?=\s|$)/i);
+  if (exeMatch && exeMatch[1]) {
+    return exeMatch[1];
+  }
+  return trimmed.split(/\s+/)[0] ?? '';
+}
+
 export function hasAntigravityCommand(commands: string[], appPath = defaultAntigravityAppPath()): boolean {
   const winMode = !appPath.toLowerCase().endsWith('.app') && (isWindows() || /^[a-zA-Z]:[\\/]/.test(appPath));
   if (winMode) {
@@ -298,12 +324,17 @@ export function hasAntigravityCommand(commands: string[], appPath = defaultAntig
       ),
     );
     return commands.some((trimmed) => {
-      const normalized = trimmed.replaceAll('"', '').replaceAll('\\', '/').toLowerCase();
+      if (isCrashpadHandlerArgs(trimmed)) return false;
+      const exeToken = normalizePathForCompare(extractWindowsExecutableToken(trimmed), 'win32');
+      if (!exeToken) return false;
+      if (exeToken.endsWith('/chrome_crashpad_handler.exe') || exeToken === 'chrome_crashpad_handler.exe') {
+        return false;
+      }
       return roots.some(
         (root) =>
-          normalized.includes(`${root}/antigravity.exe`) ||
-          normalized.includes(`${root}/resources/bin/language_server.exe`) ||
-          normalized.startsWith(`${root}/`),
+          exeToken === `${root}/antigravity.exe` ||
+          exeToken === `${root}/resources/bin/language_server.exe` ||
+          isPathUnder(exeToken, root, 'win32'),
       );
     });
   }

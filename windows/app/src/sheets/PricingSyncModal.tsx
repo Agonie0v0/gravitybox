@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, ChevronDown, ChevronRight, DollarSign, ExternalLink, RotateCw } from 'lucide-react';
+import { CheckCircle2, DollarSign, ExternalLink, RotateCw } from 'lucide-react';
 import { Modal } from '../components/Modal';
 import { useApp } from '../context/AppContext';
 import { backendRequest, openExternalUrl } from '../lib/tauri';
@@ -23,7 +23,7 @@ export function PricingSyncModal({
   initialPayload?: PricingPayload | null;
   onClose: () => void;
 }) {
-  const { t, locale, fetchDashboard, fetchUsage, showToast } = useApp();
+  const { t, fetchDashboard, fetchUsage, showToast } = useApp();
   const [payload, setPayload] = useState<PricingPayload | null>(initialPayload ?? null);
   const [checking, setChecking] = useState(false);
   const [retiredExpanded, setRetiredExpanded] = useState(false);
@@ -59,20 +59,24 @@ export function PricingSyncModal({
   };
 
   const prices = payload?.prices ?? {};
-  const catalogState = payload?.catalogState ?? {};
+  const retiredPrices = payload?.retiredPrices ?? {};
+  const allRateEntries = { ...retiredPrices, ...prices };
+  const catalogState = payload?.modelCatalogState ?? payload?.catalogState ?? {};
+  const pricingStatus = payload?.pricingStatus ?? {};
   const unpricedLive = payload?.unpricedLiveModels ?? [];
 
   const allKeys = Object.keys(prices);
   const currentKeys: string[] = [];
   const otherTierKeys: string[] = [];
-  const retiredKeys: string[] = [];
+  const retiredKeySet = new Set<string>(Object.keys(retiredPrices));
 
   for (const key of allKeys) {
     const av = catalogState[key]?.availability;
-    if (av === 'retired') retiredKeys.push(key);
+    if (av === 'retired') retiredKeySet.add(key);
     else if (av === 'other_tier_only') otherTierKeys.push(key);
     else currentKeys.push(key);
   }
+  const retiredKeys = Array.from(retiredKeySet);
 
   const sortKeys = (list: string[]) =>
     [...list].sort((a, b) => {
@@ -87,14 +91,21 @@ export function PricingSyncModal({
   const sortedRetired = sortKeys(retiredKeys);
 
   const modelCount = payload?.status?.modelCount ?? allKeys.length;
-  const version = payload?.status?.version;
+  const version = payload?.status?.feedVersion ?? payload?.status?.version;
+  const healedRecords = payload?.healedCount ?? payload?.healedRecords ?? 0;
 
   const renderRateCard = (key: string, dimmed = false) => {
-    const entry = prices[key];
+    const entry = allRateEntries[key];
     if (!entry) return null;
     const cat = catalogState[key];
     const displayName = cat?.displayName || entry.displayName || '';
-    const state = entry.provenance?.state || entry.state || cat?.state || 'confirmed';
+    const state =
+      pricingStatus[key] ||
+      entry.provenance?.verification ||
+      entry.provenance?.state ||
+      entry.state ||
+      cat?.state ||
+      'confirmed';
     const checkedAt = entry.provenance?.checkedAt || '';
     const validUntil = entry.provenance?.validUntil || '';
     const sourceUrl = entry.provenance?.sourceUrl || '';
@@ -187,7 +198,11 @@ export function PricingSyncModal({
                   alignItems: 'center',
                   gap: 2,
                 }}
-                onClick={() => void openExternalUrl(sourceUrl)}
+                onClick={() =>
+                  void openExternalUrl(sourceUrl).catch((e) =>
+                    showToast(e instanceof Error ? e.message : String(e), true),
+                  )
+                }
               >
                 <span>{t('pricing_sheet.source_link')}</span>
                 <ExternalLink size={10} />
@@ -222,8 +237,8 @@ export function PricingSyncModal({
               <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 1 }}>
                 {payload?.error
                   ? t('pricing_sheet.check_hint', { error: payload.error })
-                  : payload?.healedRecords
-                  ? t('pricing_sheet.healed_sub', { count: payload.healedRecords })
+                  : healedRecords > 0
+                  ? t('pricing_sheet.healed_sub', { count: healedRecords })
                   : payload?.synced
                   ? t('pricing_sheet.synced')
                   : t('pricing_sheet.note')}
@@ -311,11 +326,10 @@ export function PricingSyncModal({
                 style={{ paddingLeft: 4 }}
                 onClick={() => setRetiredExpanded((v) => !v)}
               >
-                {retiredExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                 <span>
-                  {locale === 'en'
-                    ? `Deprecated Models (${sortedRetired.length} · Historical Ledger Only)`
-                    : `已下架模型（${sortedRetired.length} 款 · 仅用于历史账单核算）`}
+                  {retiredExpanded
+                    ? t('pricing_sheet.retired.toggle_expanded', { count: sortedRetired.length })
+                    : t('pricing_sheet.retired.toggle_collapsed', { count: sortedRetired.length })}
                 </span>
               </button>
               {retiredExpanded && (
@@ -326,7 +340,7 @@ export function PricingSyncModal({
             </div>
           )}
 
-          {allKeys.length === 0 && unpricedLive.length === 0 && !checking && (
+          {allKeys.length === 0 && sortedRetired.length === 0 && unpricedLive.length === 0 && !checking && (
             <div style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: 36 }}>
               {t('pricing_sheet.empty')}
             </div>

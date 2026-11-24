@@ -404,3 +404,15 @@ export function parseHourIndex(item: { hour?: number | string; label?: string })
   const parsed = Number.parseInt(match[1], 10);
   return Number.isInteger(parsed) && parsed >= 0 && parsed < 24 ? parsed : null;
 }
+
+export function formatDetachedDaemonKinds(
+  kinds: string[] | undefined,
+  t: (key: string) => string,
+  locale: ResolvedLocale,
+): string {
+  const unique = Array.from(new Set((kinds ?? []).map((k) => k.trim()).filter(Boolean)));
+  const labels = (unique.length > 0 ? unique : ['language_server']).map((kind) =>
+    t(`process.daemon_kind.${kind}`),
+  );
+  return labels.join(locale === 'en' ? ', ' : '、');
+}

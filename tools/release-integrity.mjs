@@ -9,9 +9,19 @@ export function includeDictionaryPath(path) {
   return parts[0] !== 'dict' || !parts.slice(1).some(part => part.startsWith('.'));
 }
 
-/** Excludes Finder/Explorer metadata and README screenshot previews from the macOS/core code release digest. */
+const WINDOWS_ONLY_PATHS = new Set([
+  'tools/package-win.mjs',
+  'tools/gravitybox-win.nsi',
+  'tools/dev-win.mjs',
+  'test/windows-platform.test.mjs',
+  '.github/workflows/ci-windows.yml',
+  '.github/workflows/package-windows.yml',
+]);
+
+/** Excludes Finder/Explorer metadata, Windows-only tooling/workflows, and README screenshot previews from the macOS/core code release digest. */
 export function includeSourceDigestPath(relativePath) {
   const normalized = relativePath.replaceAll('\\', '/');
+  if (WINDOWS_ONLY_PATHS.has(normalized)) return false;
   const parts = normalized.split('/');
   if (parts[0] === 'windows') return false;
   if (parts.includes('.DS_Store') || parts.includes('Thumbs.db')) return false;
@@ -40,7 +50,7 @@ export async function sourceDigest(root) {
   const files = [];
   async function walk(relative) {
     for (const entry of await readdir(join(root, relative), { withFileTypes: true })) {
-      const path = join(relative, entry.name);
+      const path = join(relative, entry.name).replaceAll('\\', '/');
       if (!includeSourceDigestPath(path)) continue;
       if (entry.isDirectory()) await walk(path);
       else if (entry.isFile()) files.push(path);

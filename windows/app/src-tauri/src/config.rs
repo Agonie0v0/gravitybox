@@ -128,6 +128,43 @@ pub fn load_config(state_dir: &Path) -> UiConfig {
     cfg
 }
 
+pub(crate) fn atomic_replace_file(tmp: &Path, dest: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+        let src_w: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
+        let dst_w: Vec<u16> = dest.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut last_err = std::io::Error::new(std::io::ErrorKind::Other, "MoveFileExW failed");
+        for attempt in 0..8u64 {
+            let ok = unsafe {
+                MoveFileExW(
+                    src_w.as_ptr(),
+                    dst_w.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if ok != 0 {
+                return Ok(());
+            }
+            last_err = std::io::Error::last_os_error();
+            let raw = last_err.raw_os_error().unwrap_or(0);
+            if matches!(raw, 5 | 32 | 33) {
+                std::thread::sleep(Duration::from_millis((20 * (1u64 << attempt.min(3))).min(200)));
+                continue;
+            }
+            return Err(last_err);
+        }
+        Err(last_err)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(tmp, dest)
+    }
+}
+
 /// Atomically save `UiConfig` while preserving any external fields in `config.json`
 /// (matching macOS `ConfigurationStore.save()`).
 pub fn save_config(state_dir: &Path, cfg: &UiConfig) -> Result<(), String> {
@@ -189,31 +226,7 @@ pub fn save_config(state_dir: &Path, cfg: &UiConfig) -> Result<(), String> {
         return Err(format!("无法写入临时配置: {}", e));
     }
 
-    // Windows atomic rename with short retry on EPERM/EBUSY
-    let mut last_err = None;
-    for attempt in 0..5u64 {
-        match fs::rename(&tmp_path, &config_path) {
-            Ok(()) => {
-                last_err = None;
-                break;
-            }
-            Err(e) => {
-                if fs::symlink_metadata(&config_path)
-                    .map(|m| m.file_type().is_file())
-                    .unwrap_or(false)
-                {
-                    let _ = fs::remove_file(&config_path);
-                    if fs::rename(&tmp_path, &config_path).is_ok() {
-                        last_err = None;
-                        break;
-                    }
-                }
-                last_err = Some(e);
-                std::thread::sleep(Duration::from_millis(20 * (attempt + 1)));
-            }
-        }
-    }
-    if let Some(err) = last_err {
+    if let Err(err) = atomic_replace_file(&tmp_path, &config_path) {
         let _ = fs::remove_file(&tmp_path);
         return Err(format!("配置保存失败: {}", err));
     }

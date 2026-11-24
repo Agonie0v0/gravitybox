@@ -57,7 +57,7 @@ fn parse_flag_value(
 fn dispatch(mut args: Vec<String>) -> Result<(), HelperError> {
     if args.len() < 2 {
         return Err(HelperError::invalid_args(
-            "missing subcommand (expected one of: cred-read, cred-write, cred-delete, ls-inspect, port-owner, app-processes, app-graceful-close, trash-move, pe-version, verify-pipe-server)",
+            "missing subcommand (expected one of: cred-read, cred-write, cred-delete, ls-inspect, port-owner, app-processes, process-tree, app-graceful-close, trash-move, pe-version, verify-pipe-server)",
         ));
     }
 
@@ -161,6 +161,17 @@ fn dispatch(mut args: Vec<String>) -> Result<(), HelperError> {
                 }
             }
             let resp = process::app_processes(&prefixes)?;
+            emit_json(&resp);
+            Ok(())
+        }
+
+        "process-tree" => {
+            if iter.peek().is_some() {
+                return Err(HelperError::invalid_args(
+                    "process-tree accepts no CLI arguments",
+                ));
+            }
+            let resp = process::process_tree()?;
             emit_json(&resp);
             Ok(())
         }

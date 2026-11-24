@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { BarChart2, Download, FileText, RotateCw, Server, Tag } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { BarChart2, Download, FileText, RotateCw, Server, Tag, Users } from 'lucide-react';
 import { DONUT_PALETTE, DonutChart, type DonutSlice } from '../components/DonutChart';
 import { BrandIcons } from '../components/ModelIcon';
 import { TrendChart, type TrendBarPoint } from '../components/TrendChart';
@@ -19,7 +19,7 @@ import {
   sshStateSortOrder,
 } from '../lib/ssh';
 import { pickSaveJsonPath, saveJsonFile } from '../lib/tauri';
-import type { UsagePeriodKey, UsageSummaryReply } from '../lib/types';
+import type { AvailableAccountUsageOption, UsagePeriodKey, UsageSummaryReply } from '../lib/types';
 import { PricingSyncModal } from '../sheets/PricingSyncModal';
 import { UsageLogModal } from '../sheets/UsageLogModal';
 
@@ -31,6 +31,7 @@ export function UsagePage() {
     locale,
     isDark,
     reachable,
+    accounts,
     usageByPeriod,
     usageLoading,
     usageErrors,
@@ -43,11 +44,13 @@ export function UsagePage() {
 
   const [period, setPeriod] = useState<UsagePeriodKey>('today');
   const [environmentId, setEnvironmentId] = useState<string>('all');
+  const [accountId, setAccountId] = useState<string>('all');
   const [scopedReport, setScopedReport] = useState<UsageSummaryReply | null>(null);
-  const [chartMetric, setChartMetric] = useState<'tokens' | 'requests' | 'cost'>('tokens');
+  const [chartMetric, setChartMetric] = useState<'tokens' | 'requests'>('tokens');
   const [hoveredPt, setHoveredPt] = useState<TrendBarPoint | null>(null);
   const [logOpen, setLogOpen] = useState(false);
   const [pricingOpen, setPricingOpen] = useState(false);
+  const fetchSeqRef = useRef(0);
 
   const normalizedSshHosts = useMemo(() => {
     const fallback = t('ssh.remote_fallback');
@@ -70,21 +73,21 @@ export function UsagePage() {
 
   useEffect(() => {
     if (!reachable) return;
-    if (environmentId === 'all') {
+    const seq = ++fetchSeqRef.current;
+    if (environmentId === 'all' && accountId === 'all') {
       setScopedReport(null);
       void fetchUsage(period, false);
     } else {
-      let active = true;
-      void fetchUsage(period, false, environmentId).then((res) => {
-        if (active && res) setScopedReport(res);
+      void fetchUsage(period, false, environmentId, accountId).then((res) => {
+        if (fetchSeqRef.current === seq && res) setScopedReport(res);
       });
-      return () => {
-        active = false;
-      };
     }
-  }, [period, environmentId, reachable, fetchUsage]);
+  }, [period, environmentId, accountId, reachable, fetchUsage]);
 
-  const report = environmentId === 'all' ? usageByPeriod[period] : (scopedReport ?? usageByPeriod[period]);
+  const report =
+    environmentId === 'all' && accountId === 'all'
+      ? usageByPeriod[period]
+      : (scopedReport ?? usageByPeriod[period]);
   const selectedSshHost = useMemo(
     () => normalizedSshHosts.find((h) => h.id === environmentId) ?? null,
     [environmentId, normalizedSshHosts],
@@ -92,6 +95,44 @@ export function UsagePage() {
   const loading = Boolean(usageLoading[period]);
   const readError = usageErrors[period];
   const summary = report?.summary ?? {};
+
+  const availableAccountOptions = useMemo<AvailableAccountUsageOption[]>(() => {
+    const seen = new Map<string, AvailableAccountUsageOption>();
+    const rawLists = [
+      usageByPeriod[period]?.availableAccounts,
+      usageByPeriod[period]?.available_accounts,
+      report?.availableAccounts,
+      report?.available_accounts,
+    ];
+    for (const list of rawLists) {
+      for (const item of list ?? []) {
+        const id = String(item?.id ?? '').trim();
+        if (!id || id === 'all' || seen.has(id)) continue;
+        seen.set(id, item);
+      }
+    }
+    if (seen.size === 0 && accounts.length > 0) {
+      for (const acc of accounts) {
+        if (!acc.id || seen.has(acc.id)) continue;
+        seen.set(acc.id, {
+          id: acc.id,
+          label: acc.email || acc.name || acc.id,
+          email: acc.email,
+          name: acc.name ?? null,
+          type: 'account',
+        });
+      }
+    }
+    const unattributedReqs = report?.unattributedRequests ?? report?.unattributed_requests ?? 0;
+    if (!seen.has('unattributed') && (unattributedReqs > 0 || accountId === 'unattributed')) {
+      seen.set('unattributed', {
+        id: 'unattributed',
+        label: t('usage.account.unattributed'),
+        type: 'account',
+      });
+    }
+    return Array.from(seen.values());
+  }, [accountId, accounts, period, report, t, usageByPeriod]);
 
   const totalTokens = summary.totalTokens ?? 0;
   const promptTokens = summary.promptTokens ?? 0;
@@ -110,22 +151,16 @@ export function UsagePage() {
   }, [report]);
 
   const trendPoints = useMemo<TrendBarPoint[]>(() => {
-    const costPerToken = totalTokens > 0 && estimatedUsd > 0 ? estimatedUsd / totalTokens : 0;
-
     if (period === 'today') {
       const hourly = report?.todayHourly ?? [];
-      const map = new Map<number, { tokens: number; requests: number; cost: number; hasCost: boolean }>();
+      const map = new Map<number, { tokens: number; requests: number }>();
       for (const item of hourly) {
         const h = parseHourIndex(item);
         if (h !== null) {
-          const prev = map.get(h) ?? { tokens: 0, requests: 0, cost: 0, hasCost: false };
-          const rawCost = item.estimatedUsd ?? item.estimated_usd;
-          const hasExplicitCost = typeof rawCost === 'number' && Number.isFinite(rawCost);
+          const prev = map.get(h) ?? { tokens: 0, requests: 0 };
           map.set(h, {
             tokens: prev.tokens + (Number(item.totalTokens ?? item.total_tokens ?? 0) || 0),
             requests: prev.requests + (Number(item.requestCount ?? item.request_count ?? 0) || 0),
-            cost: prev.cost + (hasExplicitCost ? rawCost : 0),
-            hasCost: prev.hasCost || hasExplicitCost,
           });
         }
       }
@@ -134,13 +169,7 @@ export function UsagePage() {
         const hh = String(hour).padStart(2, '0');
         const row = map.get(hour);
         const tokensVal = row?.tokens ?? 0;
-        const costVal = row?.hasCost ? row.cost : tokensVal * costPerToken;
-        const val =
-          chartMetric === 'requests'
-            ? row?.requests ?? 0
-            : chartMetric === 'cost'
-            ? costVal
-            : tokensVal;
+        const val = chartMetric === 'requests' ? row?.requests ?? 0 : tokensVal;
         return {
           label: locale === 'en' ? `${hh}h` : `${hh}时`,
           tooltipLabel: t('menu_panel.trend.today_key', { time: `${hh}:00` }),
@@ -155,13 +184,9 @@ export function UsagePage() {
     return daily.slice(-limit).map((d) => {
       const shortDate = d.date.length >= 10 ? d.date.slice(5) : d.date;
       const tokensVal = Number(d.totalTokens ?? d.total_tokens ?? 0) || 0;
-      const rawCost = d.estimatedUsd ?? d.estimated_usd;
-      const costVal = typeof rawCost === 'number' && Number.isFinite(rawCost) ? rawCost : tokensVal * costPerToken;
       const val =
         chartMetric === 'requests'
           ? Number(d.requestCount ?? d.request_count ?? 0) || 0
-          : chartMetric === 'cost'
-          ? costVal
           : tokensVal;
       return {
         label: shortDate,
@@ -169,7 +194,7 @@ export function UsagePage() {
         value: val,
       };
     });
-  }, [period, report, chartMetric, locale, t, totalTokens, estimatedUsd]);
+  }, [period, report, chartMetric, locale, t]);
 
   // Donut slices (top 4 + Other)
   const { donutSlices, effectiveTotalUsd } = useMemo(() => {
@@ -258,11 +283,12 @@ export function UsagePage() {
             className="gb-btn gb-btn-sm"
             disabled={!reachable || loading}
             onClick={() => {
-              if (environmentId === 'all') {
+              const seq = ++fetchSeqRef.current;
+              if (environmentId === 'all' && accountId === 'all') {
                 void fetchUsage(period, true);
               } else {
-                void fetchUsage(period, true, environmentId).then((res) => {
-                  if (res) setScopedReport(res);
+                void fetchUsage(period, true, environmentId, accountId).then((res) => {
+                  if (fetchSeqRef.current === seq && res) setScopedReport(res);
                 });
               }
             }}
@@ -282,8 +308,8 @@ export function UsagePage() {
         </div>
       </div>
 
-      {/* SSH Environment Scope Filter Bar (v1.2.0) */}
-      {normalizedSshHosts.length > 0 && (
+      {/* SSH Environment & Account Scope Filter Bar */}
+      {(normalizedSshHosts.length > 0 || availableAccountOptions.length > 0) && (
         <div
           className="gb-card"
           style={{
@@ -295,71 +321,100 @@ export function UsagePage() {
             flexWrap: 'wrap',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)' }}>
-              <Server size={12} />
-              <span>{t('usage.env.label')}</span>
-            </span>
-            <div className="gb-segmented" role="tablist" aria-label={t('usage.env.a11y')}>
-              <button
-                type="button"
-                className={`gb-segmented-btn ${environmentId === 'all' ? 'active' : ''}`}
-                onClick={() => setEnvironmentId('all')}
-              >
-                {t('usage.env.all_chip')}
-              </button>
-              <button
-                type="button"
-                className={`gb-segmented-btn ${environmentId === 'local' ? 'active' : ''}`}
-                onClick={() => setEnvironmentId('local')}
-              >
-                {t('usage.env.local_label')}
-              </button>
-              {normalizedSshHosts.slice(0, 4).map((host) => (
-                <button
-                  key={host.id}
-                  type="button"
-                  className={`gb-segmented-btn ${environmentId === host.id ? 'active' : ''}`}
-                  onClick={() => setEnvironmentId(host.id)}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            {normalizedSshHosts.length > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)' }}>
+                  <Server size={12} />
+                  <span>{t('usage.env.label')}</span>
+                </span>
+                <div className="gb-segmented" role="tablist" aria-label={t('usage.env.a11y')}>
+                  <button
+                    type="button"
+                    className={`gb-segmented-btn ${environmentId === 'all' ? 'active' : ''}`}
+                    onClick={() => setEnvironmentId('all')}
+                  >
+                    {t('usage.env.all_chip')}
+                  </button>
+                  <button
+                    type="button"
+                    className={`gb-segmented-btn ${environmentId === 'local' ? 'active' : ''}`}
+                    onClick={() => setEnvironmentId('local')}
+                  >
+                    {t('usage.env.local_label')}
+                  </button>
+                  {normalizedSshHosts.slice(0, 4).map((host) => (
+                    <button
+                      key={host.id}
+                      type="button"
+                      className={`gb-segmented-btn ${environmentId === host.id ? 'active' : ''}`}
+                      onClick={() => setEnvironmentId(host.id)}
+                    >
+                      {host.state === 'offline_recent' || host.state === 'historical_only'
+                        ? t('usage.env.offline_suffix', { label: t('usage.env.ssh_label', { host: host.hostLabel }) })
+                        : t('usage.env.ssh_label', { host: host.hostLabel })}
+                    </button>
+                  ))}
+                </div>
+                {normalizedSshHosts.length > 4 && (
+                  <select
+                    className="gb-select"
+                    style={{ height: 26, fontSize: 11.5 }}
+                    aria-label={t('usage.env.more_hosts_a11y', { count: normalizedSshHosts.length - 4 })}
+                    value={normalizedSshHosts.slice(4).some((h) => h.id === environmentId) ? environmentId : ''}
+                    onChange={(e) => {
+                      if (e.target.value) setEnvironmentId(e.target.value);
+                    }}
+                  >
+                    <option value="">
+                      {normalizedSshHosts.length - 4 === 1
+                        ? t('usage.env.more_hosts_one')
+                        : t('usage.env.more_hosts_many', { count: normalizedSshHosts.length - 4 })}
+                    </option>
+                    {normalizedSshHosts.slice(4).map((host) => (
+                      <option key={host.id} value={host.id}>
+                        {t('usage.env.ssh_label', { host: host.hostLabel })}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )}
+            {availableAccountOptions.length > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)' }}>
+                  <Users size={12} />
+                </span>
+                <select
+                  className="gb-select"
+                  style={{ height: 26, fontSize: 11.5, maxWidth: 200 }}
+                  aria-label={t('usage.account.a11y')}
+                  value={accountId}
+                  onChange={(e) => setAccountId(e.target.value)}
                 >
-                  {host.state === 'offline_recent' || host.state === 'historical_only'
-                    ? t('usage.env.offline_suffix', { label: t('usage.env.ssh_label', { host: host.hostLabel }) })
-                    : t('usage.env.ssh_label', { host: host.hostLabel })}
-                </button>
-              ))}
-            </div>
-            {normalizedSshHosts.length > 4 && (
-              <select
-                className="gb-select"
-                style={{ height: 26, fontSize: 11.5 }}
-                aria-label={t('usage.env.more_hosts_a11y', { count: normalizedSshHosts.length - 4 })}
-                value={normalizedSshHosts.slice(4).some((h) => h.id === environmentId) ? environmentId : ''}
-                onChange={(e) => {
-                  if (e.target.value) setEnvironmentId(e.target.value);
-                }}
-              >
-                <option value="">
-                  {normalizedSshHosts.length - 4 === 1
-                    ? t('usage.env.more_hosts_one')
-                    : t('usage.env.more_hosts_many', { count: normalizedSshHosts.length - 4 })}
-                </option>
-                {normalizedSshHosts.slice(4).map((host) => (
-                  <option key={host.id} value={host.id}>
-                    {t('usage.env.ssh_label', { host: host.hostLabel })}
-                  </option>
-                ))}
-              </select>
+                  <option value="all">{t('usage.account.all')}</option>
+                  {availableAccountOptions.map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.id === 'unattributed'
+                        ? t('usage.account.unattributed')
+                        : opt.label || opt.email || opt.id}
+                    </option>
+                  ))}
+                </select>
+              </div>
             )}
           </div>
-          <button
-            type="button"
-            className="gb-btn gb-btn-ghost gb-btn-sm"
-            disabled={!reachable || remoteSyncing}
-            onClick={() => void refreshRemoteEnvironments(environmentId)}
-          >
-            <RotateCw size={11.5} className={remoteSyncing ? 'gb-spin' : undefined} />
-            <span>{locale === 'en' ? 'Sync SSH' : '同步 SSH'}</span>
-          </button>
+          {normalizedSshHosts.length > 0 && (
+            <button
+              type="button"
+              className="gb-btn gb-btn-ghost gb-btn-sm"
+              disabled={!reachable || remoteSyncing}
+              onClick={() => void refreshRemoteEnvironments(environmentId)}
+            >
+              <RotateCw size={11.5} className={remoteSyncing ? 'gb-spin' : undefined} />
+              <span>{locale === 'en' ? 'Sync SSH' : '同步 SSH'}</span>
+            </button>
+          )}
         </div>
       )}
 
@@ -412,14 +467,6 @@ export function UsagePage() {
               >
                 {t('menu_panel.dim.requests')}
               </button>
-              <button
-                type="button"
-                className={`gb-segmented-btn ${chartMetric === 'cost' ? 'active' : ''}`}
-                style={{ height: 22, padding: '0 8px', fontSize: 11 }}
-                onClick={() => setChartMetric('cost')}
-              >
-                {locale === 'en' ? 'Cost' : '费用'}
-              </button>
             </div>
           </div>
         </div>
@@ -427,9 +474,7 @@ export function UsagePage() {
         {hoveredPt && (
           <div className="tabular" style={{ fontSize: 11.5, color: 'var(--blue)', fontWeight: 500 }}>
             {hoveredPt.tooltipLabel} ·{' '}
-            {chartMetric === 'cost'
-              ? formatUsd(hoveredPt.value)
-              : chartMetric === 'requests'
+            {chartMetric === 'requests'
               ? `${formatInteger(hoveredPt.value, locale)} ${t('menu_panel.dim.requests')}`
               : `${formatCompactTokens(hoveredPt.value, locale, true)} Token`}
           </div>
@@ -734,6 +779,8 @@ export function UsagePage() {
         open={logOpen}
         initialPeriod={period}
         initialEnvironmentId={environmentId}
+        initialAccountId={accountId}
+        availableAccounts={availableAccountOptions}
         onClose={() => setLogOpen(false)}
       />
       <PricingSyncModal open={pricingOpen} onClose={() => setPricingOpen(false)} />

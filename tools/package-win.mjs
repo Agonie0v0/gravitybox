@@ -338,6 +338,7 @@ async function main() {
   ]);
   const buildInfo = {
     ...buildInfoPayload({ version, build, verification, scope, node: process.versions.node }),
+    signing: 'unsigned',
     windowsSourceDigest: currentWindowsDigest,
     platform: 'win32',
     arch: process.arch,

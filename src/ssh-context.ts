@@ -6,7 +6,7 @@ import { basename, join, win32 as win32Path } from 'node:path';
 import { promisify } from 'node:util';
 import type { CDP } from './cdp.js';
 import { compareLayers } from './dictionary.js';
-import { defaultAntigravityProfileDir, isWindows } from './platform/index.js';
+import { defaultAntigravityProfileDir, isWindows, processTree, type Win32ProcessTreeEntry } from './platform/index.js';
 
 const execFileRaw = promisify(execFile);
 
@@ -247,24 +247,38 @@ export function parseSshTunnelProcesses(
 
 export async function hasActiveAntigravitySshTunnel(
   antigravityPid: number,
-  deps?: { execFile?: ExecFileFn }
+  deps?: { execFile?: ExecFileFn; processTreeImpl?: () => Promise<Win32ProcessTreeEntry[]> }
 ): Promise<{ found: boolean; tunnels: SshTunnelProcessInfo[] }> {
   if (!Number.isSafeInteger(antigravityPid) || antigravityPid <= 0) {
     return { found: false, tunnels: [] };
   }
-  if (isWindows() && !deps?.execFile) {
+  if ((isWindows() && !deps?.execFile) || deps?.processTreeImpl) {
     try {
-      // TODO(stage-2): replace PowerShell process walk with win-helper once Stage 2 lands
-      const cmd = 'Get-CimInstance Win32_Process | ForEach-Object { $cl = ($_.CommandLine -replace "[\\r\\n]+", " "); "$($_.ProcessId) $($_.ParentProcessId) $cl" }';
-      const { stdout } = await execFileRaw(
-        resolveWindowsPowerShellPath(),
-        ['-NoProfile', '-NonInteractive', '-Command', cmd],
-        { timeout: 2500, maxBuffer: 4 * 1024 * 1024, windowsHide: true }
-      );
-      const tunnels = parseSshTunnelProcesses(String(stdout ?? ''), antigravityPid, { includeDescendants: true });
+      const entries = await (deps?.processTreeImpl ? deps.processTreeImpl() : processTree());
+      const formatted = entries
+        .map((entry) => {
+          const args = (entry.cmdLine || entry.exePath || entry.exeName || '').replace(/[\r\n]+/g, ' ').trim();
+          return `${entry.pid} ${entry.ppid} ${args}`;
+        })
+        .join('\n');
+      const tunnels = parseSshTunnelProcesses(formatted, antigravityPid, { includeDescendants: true });
       return { found: tunnels.length > 0, tunnels };
     } catch {
-      return { found: false, tunnels: [] };
+      if (deps?.processTreeImpl) {
+        return { found: false, tunnels: [] };
+      }
+      try {
+        const cmd = 'Get-CimInstance Win32_Process | ForEach-Object { $cl = ($_.CommandLine -replace "[\\r\\n]+", " "); "$($_.ProcessId) $($_.ParentProcessId) $cl" }';
+        const { stdout } = await execFileRaw(
+          resolveWindowsPowerShellPath(),
+          ['-NoProfile', '-NonInteractive', '-Command', cmd],
+          { timeout: 5000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }
+        );
+        const tunnels = parseSshTunnelProcesses(String(stdout ?? ''), antigravityPid, { includeDescendants: true });
+        return { found: tunnels.length > 0, tunnels };
+      } catch {
+        return { found: false, tunnels: [] };
+      }
     }
   }
   const exec = deps?.execFile ?? defaultExecFile;

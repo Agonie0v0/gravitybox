@@ -919,7 +919,10 @@ export class CacheMaintenance {
     if (this.useSystemTrash) {
       const trashMover = this.options.moveToSystemTrash ?? moveToSystemTrash;
       try {
-        await trashMover([target]);
+        const trashResult = await trashMover([target]) as { moved?: unknown } | undefined;
+        if (trashResult && typeof trashResult === 'object' && Array.isArray(trashResult.moved) && trashResult.moved.length === 0) {
+          throw new Error('Recycle Bin moved 0 items');
+        }
         movedToSystemTrash = true;
         usingFallbackTrash = false;
         finalTrashDir = 'Recycle Bin';

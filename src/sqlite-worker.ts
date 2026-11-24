@@ -655,6 +655,7 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
     let executorMetaUnchanged = false;
     let executorMetaDigest = '';
     let executorMetaBlob: Uint8Array | null = null;
+    let latestExecIdx = -1;
     if (hasExecutorMetaTable) {
       try {
         const execRow = db
@@ -672,6 +673,7 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
           | undefined;
         if (execRow && Number(execRow.dataLen ?? 0) > 0) {
           const execIdx = Number(execRow.idx);
+          latestExecIdx = execIdx;
           const execLen = Number(execRow.dataLen ?? 0);
           const execHasher = createHash('sha256');
           hashRawGenRowMeta(execHasher, execIdx, execLen, execRow.inlineData, execRow.dataHead, execRow.dataTail);
@@ -714,18 +716,25 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
           req.prevExecutorHistoryMaxIdx >= 0
             ? req.prevExecutorHistoryMaxIdx
             : -1;
+        const stepsRewound =
+          req.prevStepPrefixCutoffIdx !== undefined &&
+          req.prevStepPrefixCutoffIdx >= 0 &&
+          Boolean(req.prevStepPrefixDigest) &&
+          stepsMode === 'full';
+        const resetHistory = stepsRewound || (sinceIdx >= 0 && latestExecIdx >= 0 && latestExecIdx < sinceIdx);
+        const effectiveSinceIdx = resetHistory ? -1 : sinceIdx;
         const histRows = db
           .prepare(
             `SELECT idx, length(data) AS dataLen, CASE WHEN length(data) <= ${inlineLimit} THEN data ELSE NULL END AS inlineData FROM executor_metadata WHERE data IS NOT NULL AND idx > ? ORDER BY idx DESC LIMIT ${HUD_EXECUTOR_HISTORY_MAX_ROWS}`
           )
-          .all(sinceIdx) as Array<{
+          .all(effectiveSinceIdx) as Array<{
           idx: number;
           dataLen: number;
           inlineData: Uint8Array | null;
         }>;
         histRows.reverse();
         const blobs: Uint8Array[] = [];
-        let maxHistIdx = sinceIdx;
+        let maxHistIdx = effectiveSinceIdx;
         let histChunkStmt: ReturnType<DatabaseSync['prepare']> | undefined;
         let histFullStmt: ReturnType<DatabaseSync['prepare']> | undefined;
         for (const hr of histRows) {
@@ -752,7 +761,7 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
         }
         executorMetaHistoryBlobs = blobs;
         executorMetaHistoryMaxIdx = maxHistIdx;
-        executorMetaHistoryMode = sinceIdx >= 0 ? 'append' : 'full';
+        executorMetaHistoryMode = effectiveSinceIdx >= 0 ? 'append' : 'full';
       } catch {
         executorMetaHistoryBlobs = undefined;
         executorMetaHistoryMaxIdx = undefined;
@@ -982,7 +991,9 @@ function openSession(path: string) {
     database.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=250;');
     sessionDataVersion = Number(database.prepare('PRAGMA data_version').get()?.data_version);
   } catch (error) {
-    sessionError = (error as Error).message;
+    const msg = (error as Error).message;
+    closeSession();
+    sessionError = msg;
   }
 }
 

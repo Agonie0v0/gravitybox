@@ -10,7 +10,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use crate::error::HelperError;
-use crate::util::to_wide_null;
+use crate::util::{
+    has_absolute_local_drive_prefix, has_parent_dir_segment, is_verbatim_unc_path, to_wide_null,
+};
 
 const VS_FFI_SIGNATURE: u32 = 0xFEEF_04BD;
 const MAX_VERSION_INFO_BYTES: u32 = 16 * 1024 * 1024;
@@ -145,14 +147,25 @@ fn query_fixed_versions(buf: &[u8]) -> Option<(String, String)> {
 }
 
 pub fn pe_version(path: &str) -> Result<PeVersionResponse, HelperError> {
-    if path.trim().is_empty() || path.contains('\0') {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || path.contains('\0') {
         return Err(HelperError::invalid_args("invalid PE path"));
     }
-    if !Path::new(path).exists() {
+    if is_verbatim_unc_path(trimmed) {
+        return Err(HelperError::invalid_args("UNC paths are not supported for pe-version"));
+    }
+    let cleaned = trimmed.strip_prefix(r"\\?\").unwrap_or(trimmed);
+    if cleaned.starts_with(r"\\") || cleaned.starts_with("//") {
+        return Err(HelperError::invalid_args("UNC and device paths are not supported for pe-version"));
+    }
+    if !has_absolute_local_drive_prefix(cleaned) || has_parent_dir_segment(cleaned) {
+        return Err(HelperError::invalid_args("pe-version requires a local drive absolute path without '..'"));
+    }
+    if !Path::new(cleaned).exists() {
         return Err(HelperError::not_found(format!("file not found: {path}")));
     }
 
-    let path_w = to_wide_null(path);
+    let path_w = to_wide_null(cleaned);
     let mut handle: u32 = 0;
     let size = unsafe { GetFileVersionInfoSizeW(path_w.as_ptr(), &mut handle) };
     if size == 0 {

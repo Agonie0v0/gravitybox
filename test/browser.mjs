@@ -2174,6 +2174,10 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
               '<div><span id="perm-title-turbo">Turbo</span><span class="badge"><span id="perm-badge-on-turbo">Default</span><svg width="10" height="10"></svg></span></div>' +
               '<div id="perm-sub-turbo">Run all commands without restrictions.</div>' +
             '</div>' +
+            '<div role="menuitem" aria-label="Agent permissions preset: Default, Ask before sensitive operations">' +
+              '<div><span id="perm-aria-row-title-default">Default</span><span class="badge"><span id="perm-aria-row-badge-default">Default</span><svg width="10" height="10"></svg></span></div>' +
+              '<div>Ask before sensitive operations.</div>' +
+            '</div>' +
           '</div>' +
         '</div>');
     })()`);
@@ -2184,6 +2188,8 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
       (await text(main, '#perm-title-turbo')) === '跳过审批' &&
       (await text(main, '#perm-badge-on-default')) === '默认' &&
       (await text(main, '#perm-badge-on-turbo')) === '默认' &&
+      (await text(main, '#perm-aria-row-title-default')) === '按需询问' &&
+      (await text(main, '#perm-aria-row-badge-default')) === '默认' &&
       (await text(main, '#perm-trigger-turbo')) === '跳过审批' &&
       (await text(main, '#perm-trigger-default')) === '按需询问'
     , 8000, 'local permissions zh-Hans');

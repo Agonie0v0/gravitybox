@@ -18,7 +18,7 @@ export type MaintenanceManifest = Record<string, any> & {
 };
 async function identity(path: string): Promise<string | null> {
     try {
-        const stat = await lstat(path);
+        const stat = await (isWindows() ? lstat(path, { bigint: true }) : lstat(path));
         if (stat.isSymbolicLink())
             throw Error(bt('maintenance.journal.err.symlink'));
         return `${stat.dev}:${stat.ino}`;
@@ -64,7 +64,7 @@ export async function reconcileMoves(path: string, manifest: MaintenanceManifest
             }
             await mkdir(dirname(move.from), { recursive: true });
             if (isWindows()) {
-                await atomicRenameWithRetry(move.to, move.from);
+                await atomicRenameWithRetry(move.to, move.from, { allowCrossDevice: true });
             } else {
                 await rename(move.to, move.from);
             }
@@ -105,7 +105,7 @@ export async function executeMoves(path: string, manifest: MaintenanceManifest, 
                 throw Error(bt('maintenance.journal.err.path_changed_during'));
             await mkdir(dirname(move.to), { recursive: true, mode: 0o700 });
             if (isWindows()) {
-                await atomicRenameWithRetry(move.from, move.to);
+                await atomicRenameWithRetry(move.from, move.to, { allowCrossDevice: true });
             } else {
                 await rename(move.from, move.to);
             }

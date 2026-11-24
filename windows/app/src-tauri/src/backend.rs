@@ -29,6 +29,7 @@ pub struct BackendManager {
     pub state_dir: PathBuf,
     resource_dir: Option<PathBuf>,
     isolated_logs: bool,
+    start_lock: Mutex<()>,
     child: Arc<Mutex<Option<Child>>>,
     is_booting: Arc<AtomicBool>,
     shutting_down: Arc<AtomicBool>,
@@ -47,6 +48,7 @@ impl BackendManager {
             state_dir,
             resource_dir,
             isolated_logs,
+            start_lock: Mutex::new(()),
             child: Arc::new(Mutex::new(None)),
             is_booting: Arc::new(AtomicBool::new(false)),
             shutting_down: Arc::new(AtomicBool::new(false)),
@@ -178,6 +180,7 @@ impl BackendManager {
     /// If an external backend is already listening on the Named Pipe (e.g., `npm run dev:backend`),
     /// attaches to it without spawning a duplicate.
     pub fn ensure_started(&self) -> Result<(), String> {
+        let _start_guard = self.start_lock.lock().unwrap();
         if self.shutting_down.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -355,7 +358,19 @@ impl BackendManager {
     }
 
     pub fn restart(&self) -> Result<(), String> {
+        let was_owned = self.owns_process.load(Ordering::SeqCst);
         self.stop_owned_child();
+        if !was_owned {
+            let _ = send_session_ndjson_request(
+                &self.state_dir,
+                &json!({ "command": "stop" }),
+                Duration::from_millis(1500),
+            );
+            let deadline = Instant::now() + Duration::from_millis(1800);
+            while self.ping() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
         self.shutting_down.store(false, Ordering::SeqCst);
         self.ensure_started()
     }

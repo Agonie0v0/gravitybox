@@ -9,6 +9,9 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  formatDetachedDaemonKinds,
+} from '../lib/format';
+import {
   getSystemLocales,
   normalizeLanguageSetting,
   resolveLocale,
@@ -43,6 +46,7 @@ import type {
   PageKey,
   ProxyInfo,
   ProxyMode,
+  SwitchPreflightReply,
   ThemeMode,
   UiConfig,
   UsagePeriodKey,
@@ -127,7 +131,7 @@ interface AppContextValue {
   fetchDashboard: (force?: boolean, environmentId?: string) => Promise<void>;
   fetchAccounts: () => Promise<void>;
   fetchAutoSwitch: () => Promise<void>;
-  fetchUsage: (period: UsagePeriodKey, force?: boolean, environmentId?: string) => Promise<UsageSummaryReply | null>;
+  fetchUsage: (period: UsagePeriodKey, force?: boolean, environmentId?: string, accountId?: string) => Promise<UsageSummaryReply | null>;
   fetchMaintenanceScan: (retentionDays?: number, force?: boolean) => Promise<MaintenanceScanReply | null>;
   fetchProxy: (force?: boolean) => Promise<ProxyInfo | null>;
   applyProxy: (mode: ProxyMode, manualUrl?: string) => Promise<ProxyInfo>;
@@ -194,7 +198,30 @@ export function AppProvider({
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const toastTimerRef = useRef<number | null>(null);
+  const timersRef = useRef<Set<number>>(new Set());
   const configRef = useRef<UiConfig>(DEFAULT_CONFIG);
+
+  const scheduleTimer = useCallback((fn: () => void, ms: number) => {
+    const id = window.setTimeout(() => {
+      timersRef.current.delete(id);
+      fn();
+    }, ms);
+    timersRef.current.add(id);
+    return id;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = null;
+      }
+      for (const id of timersRef.current) {
+        window.clearTimeout(id);
+      }
+      timersRef.current.clear();
+    };
+  }, []);
 
   const languageSetting = normalizeLanguageSetting(config.appLanguage);
   const locale: ResolvedLocale = useMemo(() => resolveLocale(languageSetting), [languageSetting]);
@@ -210,11 +237,17 @@ export function AppProvider({
   const showToast = useCallback((message: string, error = false) => {
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
     setToast({ id: Date.now(), message, error });
-    toastTimerRef.current = window.setTimeout(() => setToast(null), error ? 5500 : 3400);
+    toastTimerRef.current = window.setTimeout(() => {
+      toastTimerRef.current = null;
+      setToast(null);
+    }, error ? 5500 : 3400);
   }, []);
 
   const clearToast = useCallback(() => {
-    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
     setToast(null);
   }, []);
 
@@ -340,19 +373,22 @@ export function AppProvider({
       period: UsagePeriodKey,
       force = false,
       environmentId?: string,
+      accountId?: string,
     ): Promise<UsageSummaryReply | null> => {
       setUsageLoading((prev) => ({ ...prev, [period]: true }));
       try {
         const isAllEnv = !environmentId || environmentId === 'all';
+        const isAllAcc = !accountId || accountId === 'all';
         const res = await backendRequest<UsageSummaryReply>({
           command: 'usage_summary',
           period,
           ...(force ? { force: true } : {}),
           ...(!isAllEnv ? { environmentId } : {}),
+          ...(!isAllAcc ? { accountId } : {}),
         });
         setReachable(true);
         setUsageErrors((prev) => ({ ...prev, [period]: undefined }));
-        if (isAllEnv) {
+        if (isAllEnv && isAllAcc) {
           if (res?.periods) {
             setUsageByPeriod((prev) => ({ ...prev, ...res.periods, [period]: res }));
           } else if (res) {
@@ -635,7 +671,7 @@ export function AppProvider({
       } else {
         showToast(first.message, !first.ok);
       }
-      setTimeout(() => void refreshAll(true), 1200);
+      scheduleTimer(() => void refreshAll(true), 1200);
     } catch (err) {
       showToast(
         t('assistant.safe_relaunch_failed', {
@@ -653,6 +689,7 @@ export function AppProvider({
     locale,
     refreshAll,
     relaunching,
+    scheduleTimer,
     showToast,
     sshWindowsCount,
     t,
@@ -665,11 +702,11 @@ export function AppProvider({
     }
     try {
       await launchAntigravity();
-      setTimeout(() => void fetchStatus(), 1500);
+      scheduleTimer(() => void fetchStatus(), 1500);
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), true);
     }
-  }, [fetchStatus, showToast, status.mode, triggerSafeRelaunch]);
+  }, [fetchStatus, scheduleTimer, showToast, status.mode, triggerSafeRelaunch]);
 
   const refreshAllQuotas = useCallback(async () => {
     if (quotaRefreshing || !reachable) return;
@@ -679,21 +716,27 @@ export function AppProvider({
       const taskId = start?.taskId;
       if (taskId) {
         // Poll task completion up to 60s
+        let completed = false;
         const deadline = Date.now() + 60_000;
         while (Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 450));
           const list = await backendRequest<{ tasks?: Array<{ id: string; state: string; message?: string; error?: string }> }>({
             command: 'task_list',
           }).catch(() => null);
-          const task = list?.tasks?.find((item) => item.id === taskId);
+          if (!list) continue;
+          const task = list.tasks?.find((item) => item.id === taskId);
           if (!task || task.state !== 'running') {
-            if (task?.state === 'failed') {
+            if (task?.state === 'failed' || task?.state === 'cancelled' || task?.state === 'error') {
               showToast(task.error || task.message || t('assistant.quota_refresh_incomplete'), true);
             } else if (task?.message) {
               showToast(task.message);
             }
+            completed = true;
             break;
           }
+        }
+        if (!completed) {
+          showToast(t('assistant.quota_refresh_timeout'), true);
         }
       } else {
         await backendRequest({ command: 'quota_refresh_all' });
@@ -736,20 +779,28 @@ export function AppProvider({
       if (!acc.id || switchingAccount || !reachable) return;
       setSwitchingAccount(true);
       try {
-        const preflight = await backendRequest<{
-          appRunning?: boolean;
-          stableRunning?: boolean;
-          insidersRunning?: boolean;
-          hasRunningTask?: boolean;
-          safe?: boolean;
-        }>({ command: 'account_switch_preflight', id: acc.id });
+        const preflight = await backendRequest<SwitchPreflightReply>({
+          command: 'account_switch_preflight',
+          id: acc.id,
+        });
 
         if (preflight?.insidersRunning) {
           showToast(t('assistant_account.insiders_running'), true);
           return;
         }
 
-        const liveRunning = Boolean(preflight?.appRunning || preflight?.stableRunning || (await getAntigravityRunning()));
+        let hasUiRunning = Boolean(
+          preflight?.uiRunning ?? preflight?.stableRunning ?? preflight?.appRunning,
+        );
+        const detachedCount = Number(preflight?.detachedDaemonCount ?? 0);
+        const detachedKinds = preflight?.detachedDaemonKinds ?? [];
+        const detachedPids = preflight?.detachedDaemonPids ?? [];
+        if (!hasUiRunning && detachedCount === 0 && (await getAntigravityRunning())) {
+          hasUiRunning = true;
+        }
+        const needClose = hasUiRunning || detachedCount > 0;
+        const detachedOnly = !hasUiRunning && detachedCount > 0;
+        const kindsLabel = formatDetachedDaemonKinds(detachedKinds, t, locale);
         const busy = preflight?.hasRunningTask === true || preflight?.safe === false;
         const display =
           acc.name && acc.name.toLowerCase() !== acc.email.toLowerCase()
@@ -758,9 +809,19 @@ export function AppProvider({
               : `${acc.name}（${acc.email}）`
             : acc.email || acc.name || t('assistant_account.target_fallback');
 
-        const baseBody = busy
+        const baseBody = detachedOnly
+          ? busy
+            ? t('assistant_account.switch_detached_busy_body', {
+                count: detachedCount,
+                kinds: kindsLabel,
+              })
+            : t('assistant_account.switch_detached_body', {
+                count: detachedCount,
+                kinds: kindsLabel,
+              })
+          : busy
           ? t('assistant_account.switch_busy_body')
-          : liveRunning
+          : hasUiRunning
           ? t('assistant_account.switch_ready_body')
           : t('assistant_account.switch_stopped_body');
         const bodyWithSsh =
@@ -774,19 +835,32 @@ export function AppProvider({
         const confirmed = await askConfirm({
           title: t('assistant_account.switch_prompt_title', { display }),
           body: bodyWithSsh,
-          confirmLabel: busy ? t('assistant_account.switch_busy_confirm') : t('assistant_account.switch_confirm'),
-          danger: busy,
+          confirmLabel: detachedOnly
+            ? t('assistant_account.switch_detached_confirm')
+            : busy
+            ? t('assistant_account.switch_busy_confirm')
+            : t('assistant_account.switch_confirm'),
+          danger: busy || detachedOnly,
         });
         if (!confirmed) return;
 
-        if (liveRunning) {
+        if (needClose) {
           const outcome = await closeAntigravitySafely(18_000, 'switch');
           if (!outcome.closed) {
             showToast(
-              outcome.reason === 'visible_window_open'
+              detachedOnly
+                ? t('assistant_account.detached_daemons_remaining', {
+                    kinds: kindsLabel,
+                    pids: detachedPids.join(', ') || '-',
+                  })
+                : outcome.reason === 'visible_window_open'
                 ? locale === 'en'
                   ? 'Visible Antigravity windows are still open. Save and close them before switching accounts.'
                   : '检测到 Antigravity 仍有未关闭的可见窗口，请先保存并关闭后再切换账号。'
+                : outcome.reason === 'uipi_access_denied'
+                ? locale === 'en'
+                  ? 'Antigravity is running elevated (administrator). Close it manually before switching accounts.'
+                  : '检测到 Antigravity 以管理员权限运行，无法直接关闭。请先手动退出后再切换账号。'
                 : t('assistant_account.quit_first'),
               true,
             );
@@ -803,7 +877,7 @@ export function AppProvider({
           });
           showToast(switchRes?.message || t('assistant_account.switched_to', { email: acc.email }));
         } finally {
-          if (liveRunning) {
+          if (hasUiRunning) {
             await launchAntigravity().catch((e) => {
               showToast(
                 t('assistant.relaunch_failed', { detail: e instanceof Error ? e.message : String(e) }),
@@ -838,6 +912,22 @@ export function AppProvider({
     }
   }, [refreshAll, showToast, t]);
 
+  const refreshAllRef = useRef(refreshAll);
+  const fetchUsageRef = useRef(fetchUsage);
+  const fetchMaintenanceScanRef = useRef(fetchMaintenanceScan);
+  const showToastRef = useRef(showToast);
+  const askBackgroundExitConfirmationRef = useRef(askBackgroundExitConfirmation);
+  const scheduleTimerRef = useRef(scheduleTimer);
+  const tRef = useRef(t);
+
+  refreshAllRef.current = refreshAll;
+  fetchUsageRef.current = fetchUsage;
+  fetchMaintenanceScanRef.current = fetchMaintenanceScan;
+  showToastRef.current = showToast;
+  askBackgroundExitConfirmationRef.current = askBackgroundExitConfirmation;
+  scheduleTimerRef.current = scheduleTimer;
+  tRef.current = t;
+
   // Initial load
   useEffect(() => {
     let mounted = true;
@@ -850,15 +940,18 @@ export function AppProvider({
       if (windowRole === 'main' && cfg.lastPage >= 0 && cfg.lastPage < PAGE_INDEX_MAP.length) {
         setActivePageState(PAGE_INDEX_MAP[cfg.lastPage]);
       }
-      await refreshAll(false);
+      await refreshAllRef.current(false);
       if (mounted) {
-        void fetchUsage('today', false);
-        void fetchMaintenanceScan(7, false);
+        void fetchUsageRef.current('today', false);
+        void fetchMaintenanceScanRef.current(7, false);
       }
     })();
 
     const unlisteners: Array<Promise<() => void>> = [
       listenEvent<UiConfig>('ui-config-changed', (nextCfg) => {
+        if (!nextCfg || typeof nextCfg !== 'object' || typeof nextCfg.schema !== 'number') {
+          return;
+        }
         configRef.current = nextCfg;
         setConfig(nextCfg);
       }),
@@ -868,24 +961,24 @@ export function AppProvider({
         }
       }),
       listenEvent<string>('backend-data-changed', () => {
-        void refreshAll(false);
+        void refreshAllRef.current(false);
       }),
       listenEvent<{ message: string; error?: boolean }>('toast-message', (msg) => {
-        showToast(msg.message, Boolean(msg.error));
+        showToastRef.current(msg.message, Boolean(msg.error));
       }),
       listenEvent<{ message?: string }>('confirm-background-relaunch', (payload) => {
         if (windowRole !== 'main') return;
         void (async () => {
-          const ok = await askBackgroundExitConfirmation(payload?.message ?? '', 'relaunch');
+          const ok = await askBackgroundExitConfirmationRef.current(payload?.message ?? '', 'relaunch');
           if (!ok) return;
           setRelaunching(true);
           try {
             const res = await safeRelaunchAntigravity(true);
-            showToast(res.message, !res.ok);
-            setTimeout(() => void refreshAll(true), 1200);
+            showToastRef.current(res.message, !res.ok);
+            scheduleTimerRef.current(() => void refreshAllRef.current(true), 1200);
           } catch (err) {
-            showToast(
-              t('assistant.safe_relaunch_failed', {
+            showToastRef.current(
+              tRef.current('assistant.safe_relaunch_failed', {
                 detail: err instanceof Error ? err.message : String(err),
               }),
               true,
@@ -897,8 +990,8 @@ export function AppProvider({
       }),
       listenEvent<void>('tray-opened', () => {
         if (windowRole === 'tray') {
-          void refreshAll(false);
-          void fetchUsage('today', false);
+          void refreshAllRef.current(false);
+          void fetchUsageRef.current('today', false);
         }
       }),
     ];
@@ -909,7 +1002,7 @@ export function AppProvider({
         void p.then((fn) => fn());
       }
     };
-  }, [askBackgroundExitConfirmation, fetchMaintenanceScan, fetchUsage, refreshAll, showToast, t, windowRole]);
+  }, [windowRole]);
 
   // Periodic background status & data refresh
   useEffect(() => {

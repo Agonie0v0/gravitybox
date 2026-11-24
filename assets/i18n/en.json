@@ -1177,6 +1177,7 @@
     "keychain.err.write_timeout": "Unable to save account Keychain: access timed out",
     "keychain.err.write": "Unable to save account Keychain; original credential permissions may be restricted",
     "keychain.err.delete": "Unable to restore account Keychain",
+    "keychain.err.payload_too_large": "Account credential exceeds the Windows Credential Manager size limit (2560 bytes)",
     "policy.err.invalid_format": "Invalid account recommendation policy format",
     "policy.err.enabled_boolean": "Recommendation toggle must be a boolean",
     "policy.err.invalid_strategy": "Invalid recommendation strategy",

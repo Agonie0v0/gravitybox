@@ -151,7 +151,11 @@ export function SettingsPage() {
       : t('settings.storage.default_subtitle');
 
   const antigravityRunning =
-    status.mode === 'connected' || status.mode === 'debug-port-missing' || status.mode === 'paused';
+    status.mode === 'connected' ||
+    status.mode === 'adaptive' ||
+    status.mode === 'waiting-window' ||
+    status.mode === 'debug-port-missing' ||
+    status.mode === 'paused';
 
   const proxyStatus = useMemo<{ text: string; tone: 'muted' | 'warning' | 'active'; showRelaunch: boolean }>(() => {
     if (proxyError) {

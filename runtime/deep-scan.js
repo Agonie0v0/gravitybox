@@ -4,7 +4,7 @@
   const engine=globalThis.__GRAVITYBOX_ENGINE_V1__,boot=globalThis.__GRAVITYBOX_BOOT__;
   if(!engine||engine.deepScan)return;
   const fixture=boot?.path==='/fixture';let current;
-  const blocked='script,style,[data-gravitybox-protect],[data-message-id],[data-message-author-role],[data-testid*="conversation-row"],[data-testid*="message"],[data-testid="project-header"],.gravitybox-project-name,.markdown,.prose,pre,code,.monaco-editor,.xterm,.code-block,.code-line,.line-content,[data-line-tokens],.notebook-code-cell,[data-testid="csv-scroll-viewport"],[data-testid="lsp-reference-item"]';
+  const blocked='script,style,[data-gravitybox-protect],[data-message-id],[data-message-author-role],[data-testid*="conversation-row"],[data-testid*="message"],[data-testid="project-header"],.gravitybox-project-name,.markdown,.prose,pre,code,.monaco-editor,.xterm,.code-block,.code-line,.line-content,[data-line-tokens],.notebook-code-cell,.notebook-code-input,.notebook-output-text,[data-testid="csv-scroll-viewport"],[data-testid="lsp-reference-item"]';
   const ids=['history','marketplace','installed','settings-open','settings-general','settings-app','settings-appearance','settings-models','settings-shortcuts','settings-close','automations','model-open','model-usage','model-close'];
   const text=e=>(e?.getAttribute('aria-label')||e?.textContent||'').replace(/\s+/g,' ').trim();
   const foldKey=s=>String(s).toLowerCase().replace(/[\u2018\u2019]/g,"'");

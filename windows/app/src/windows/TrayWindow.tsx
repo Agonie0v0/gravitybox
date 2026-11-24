@@ -43,7 +43,7 @@ import {
 } from '../lib/format';
 import { formatBarTitle, parseQuotaContract } from '../lib/quota';
 import { normalizeSshEnvironment, sshStateSortOrder } from '../lib/ssh';
-import { hideTrayWindow, quitApp, showMainWindow } from '../lib/tauri';
+import { hideTrayWindow, quitApp, setTrayAutohideSuppressed, showMainWindow } from '../lib/tauri';
 import type { LanguageSetting, UsagePeriodKey, UsageSummaryReply } from '../lib/types';
 
 const PERIODS: UsagePeriodKey[] = ['today', '7d', '30d', 'all'];
@@ -146,6 +146,13 @@ export function TrayWindow() {
     document.addEventListener('mousedown', onDocClick);
     return () => document.removeEventListener('mousedown', onDocClick);
   }, []);
+
+  useEffect(() => {
+    void setTrayAutohideSuppressed(Boolean(confirmDialog));
+    return () => {
+      void setTrayAutohideSuppressed(false);
+    };
+  }, [confirmDialog]);
 
   const selectTab = (idx: number) => {
     setTab(idx);
@@ -937,7 +944,7 @@ export function TrayWindow() {
         {confirmDialog && (
           <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <h4 style={{ margin: 0, fontSize: 14.5, fontWeight: 700 }}>{confirmDialog.title}</h4>
-            <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.45 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.45, whiteSpace: 'pre-line' }}>
               {confirmDialog.body}
             </div>
             <div className="gb-divider" />

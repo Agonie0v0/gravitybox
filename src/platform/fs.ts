@@ -1,4 +1,5 @@
-import { constants, renameSync, type Stats } from 'node:fs';
+import { constants, cpSync, existsSync, renameSync, rmSync, type Stats } from 'node:fs';
+import { unlink } from 'node:fs/promises';
 import { trashMove, type Win32HelperOptions } from './win32-helper.js';
 
 const WINDOWS_RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
@@ -35,6 +36,15 @@ export interface AtomicRenameRetryOptions {
   signal?: AbortSignal;
   platform?: NodeJS.Platform;
   renameFn?: (src: string, dest: string) => void;
+  allowCrossDevice?: boolean;
+}
+
+export interface UnlinkRetryOptions {
+  maxRetries?: number;
+  baseDelayMs?: number;
+  signal?: AbortSignal;
+  platform?: NodeJS.Platform;
+  unlinkFn?: (targetPath: string) => Promise<void>;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -68,7 +78,7 @@ export async function atomicRenameWithRetry(
 ): Promise<void> {
   const platform = options.platform ?? process.platform;
   const renameFn = options.renameFn ?? renameSync;
-  const maxRetries = platform === 'win32' ? Math.max(0, Math.floor(options.maxRetries ?? 5)) : 0;
+  const maxRetries = platform === 'win32' ? Math.max(0, Math.floor(options.maxRetries ?? 8)) : 0;
   const baseDelayMs = Math.max(1, Math.floor(options.baseDelayMs ?? 20));
 
   for (let attempt = 0; ; attempt++) {
@@ -78,10 +88,56 @@ export async function atomicRenameWithRetry(
       return;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (code === 'EXDEV' && options.allowCrossDevice) {
+        const destExisted = existsSync(dest);
+        try {
+          cpSync(src, dest, { recursive: true, force: true, errorOnExist: false });
+        } catch (cpError) {
+          if (!destExisted) {
+            try { rmSync(dest, { recursive: true, force: true }); } catch {}
+          }
+          throw cpError;
+        }
+        rmSync(src, { recursive: true, force: true });
+        return;
+      }
       if (attempt >= maxRetries || !code || !WINDOWS_RETRYABLE_RENAME_CODES.has(code)) {
         throw error;
       }
-      await sleep(baseDelayMs * (2 ** attempt), options.signal);
+      const delayMs = Math.min(300, baseDelayMs * (2 ** attempt)) + Math.floor(Math.random() * 15);
+      await sleep(delayMs, options.signal);
+    }
+  }
+}
+
+/**
+ * Unlink `targetPath` with short exponential backoff on transient Windows sharing/AV locks
+ * (`EPERM`, `EBUSY`, `EACCES`). Runs as a single `unlink` on macOS / POSIX.
+ */
+export async function unlinkWithRetry(
+  targetPath: string,
+  options: UnlinkRetryOptions = {},
+): Promise<void> {
+  const platform = options.platform ?? process.platform;
+  const unlinkFn = options.unlinkFn ?? unlink;
+  const maxRetries = platform === 'win32' ? Math.max(0, Math.floor(options.maxRetries ?? 6)) : 0;
+  const baseDelayMs = Math.max(1, Math.floor(options.baseDelayMs ?? 20));
+
+  for (let attempt = 0; ; attempt++) {
+    options.signal?.throwIfAborted();
+    try {
+      await unlinkFn(targetPath);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (attempt > 0 && code === 'ENOENT') {
+        return;
+      }
+      if (attempt >= maxRetries || !code || !WINDOWS_RETRYABLE_RENAME_CODES.has(code)) {
+        throw error;
+      }
+      const delayMs = Math.min(300, baseDelayMs * (2 ** attempt)) + Math.floor(Math.random() * 15);
+      await sleep(delayMs, options.signal);
     }
   }
 }

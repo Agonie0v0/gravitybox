@@ -1097,7 +1097,19 @@ final class CachePage: NSObject, NSPopoverDelegate {
                         if self.appRunning {
                             self.quitAntigravityAndSmartClear(scopes: scopesToClear)
                         } else {
-                            self.performSmartClear(scopes: scopesToClear, restartAfter: false)
+                            let inspection = Assistant.inspectLiveAntigravityProcesses()
+                            if inspection.hasUiProcesses {
+                                self.quitAntigravityAndSmartClear(scopes: scopesToClear)
+                            } else if !inspection.detachedDaemons.isEmpty {
+                                self.cleanupDetachedDaemonsThenRun(
+                                    statusText: L10n.t("maintenance.simple.status_cleaning"),
+                                    uiStillRunningKey: "maintenance.error.quit_first_clear"
+                                ) { [weak self] in
+                                    self?.performSmartClear(scopes: scopesToClear, restartAfter: false)
+                                }
+                            } else {
+                                self.performSmartClear(scopes: scopesToClear, restartAfter: false)
+                            }
                         }
                     }
                 }
@@ -1260,7 +1272,19 @@ final class CachePage: NSObject, NSPopoverDelegate {
                         if self.appRunning {
                             self.quitAntigravityAndRestore(snapshotId: snapshotId)
                         } else {
-                            self.executeRestoreRequest(snapshotId: snapshotId, restartAfter: false)
+                            let inspection = Assistant.inspectLiveAntigravityProcesses()
+                            if inspection.hasUiProcesses {
+                                self.quitAntigravityAndRestore(snapshotId: snapshotId)
+                            } else if !inspection.detachedDaemons.isEmpty {
+                                self.cleanupDetachedDaemonsThenRun(
+                                    statusText: L10n.t("maintenance.simple.status_undoing"),
+                                    uiStillRunningKey: "maintenance.restore.quit_body"
+                                ) { [weak self] in
+                                    self?.executeRestoreRequest(snapshotId: snapshotId, restartAfter: false)
+                                }
+                            } else {
+                                self.executeRestoreRequest(snapshotId: snapshotId, restartAfter: false)
+                            }
                         }
                     }
                 }

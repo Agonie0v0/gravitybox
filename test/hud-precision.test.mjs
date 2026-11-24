@@ -3021,6 +3021,30 @@ test('sqlite-worker 增量扫描 executor_metadata 历史行：首次 full、追
   assert.equal(secondScan.executorMetaHistoryMaxIdx, 3);
   assert.equal(secondScan.executorMetaHistoryBlobs?.length, 1);
   assert.equal(parseExecutorMetadataBlob(secondScan.executorMetaHistoryBlobs[0]).planModelEnum, 1532);
+
+  // 对话回退/截断（execIdx < sinceIdx）时，必须退回 full 全量回扫并重置游标，不得丢弃新重写步骤
+  db.exec('DELETE FROM executor_metadata WHERE idx >= 2');
+  const rewindScan = await runHudDbScanInWorker({
+    dbPath,
+    inlineBlobLimitBytes: 65_536,
+    prevExecutorMetaDigest: secondScan.executorMetaDigest,
+    prevExecutorHistoryMaxIdx: secondScan.executorMetaHistoryMaxIdx,
+  });
+  assert.equal(rewindScan.executorMetaHistoryMode, 'full');
+  assert.equal(rewindScan.executorMetaHistoryMaxIdx, 1);
+  assert.equal(rewindScan.executorMetaHistoryBlobs?.length, 2);
+
+  insertStmt.run(2, encodeExecMeta(1402, 1528));
+  const afterRewindAppend = await runHudDbScanInWorker({
+    dbPath,
+    inlineBlobLimitBytes: 65_536,
+    prevExecutorMetaDigest: rewindScan.executorMetaDigest,
+    prevExecutorHistoryMaxIdx: rewindScan.executorMetaHistoryMaxIdx,
+  });
+  assert.equal(afterRewindAppend.executorMetaHistoryMode, 'append');
+  assert.equal(afterRewindAppend.executorMetaHistoryMaxIdx, 2);
+  assert.equal(afterRewindAppend.executorMetaHistoryBlobs?.length, 1);
+  assert.equal(parseExecutorMetadataBlob(afterRewindAppend.executorMetaHistoryBlobs[0]).planModelEnum, 1402);
 });
 
 test('P1-1 回归：>4MB 超大 gen_metadata 投影成功不静默丢弃，且 >64KB 历史行不阻塞 genPrefixCutoffIdx 增量推进', async (t) => {

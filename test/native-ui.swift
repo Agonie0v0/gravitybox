@@ -2168,6 +2168,39 @@ import Cocoa
                 isolated.suppressLifecycleAutoQuitUntil >= longDeadline,
                 "Shorter lifecycle auto-quit suppression must not shorten an existing longer deadline"
             )
+            // Reparenting race regression: once tracked daemon child (Antigravity Helper --worker) is reparented to PPID=1 after parent exits, poll step must keep treating it as stillExiting instead of .uiStillRunning
+            var trackedDaemons: [Int32: DetachedDaemonKind] = [:]
+            let stepBeforeParentExit = Assistant.inspectAntigravityProcessesDetailed(
+                psPidPpidArgsOutput: psTreeWithSidecarOnly,
+                appPaths: appPaths
+            )
+            let evalInitial = Assistant.evaluateDetachedPollStep(
+                registeredRunning: false,
+                detailed: stepBeforeParentExit,
+                trackedKindsByPid: &trackedDaemons,
+                appPaths: appPaths
+            )
+            if case .stillExiting(let initialRemaining) = evalInitial {
+                check(initialRemaining.count == 3, "Initial detached snapshot must track all 3 detached processes")
+            } else {
+                check(false, "Initial detached tree must evaluate to stillExiting")
+            }
+            let psTreeReparentedChild = "69485 1 /Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper --custom-worker\n"
+            let stepReparented = Assistant.inspectAntigravityProcessesDetailed(
+                psPidPpidArgsOutput: psTreeReparentedChild,
+                appPaths: appPaths
+            )
+            let evalReparented = Assistant.evaluateDetachedPollStep(
+                registeredRunning: false,
+                detailed: stepReparented,
+                trackedKindsByPid: &trackedDaemons,
+                appPaths: appPaths
+            )
+            if case .stillExiting(let remaining) = evalReparented {
+                check(remaining.map(\.pid) == [69485] && remaining.first?.kind == .sidecar, "Reparented detached daemon child must stay classified as stillExiting sidecar")
+            } else {
+                check(false, "Reparented detached daemon child must never trigger uiStillRunning")
+            }
 
             // Package E: AssistantAccountUsage switch menu and cache invalidation
             isolated.cachedAccounts = []

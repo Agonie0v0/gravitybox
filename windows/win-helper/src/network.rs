@@ -17,7 +17,9 @@ use crate::process::{
     open_process_for_inspect, query_pid_exe_path, query_process_exe_path,
     read_peb_cmdline_and_csrf, resolve_descendant_csrf_token, snapshot_processes,
 };
-use crate::util::{normalize_win_path, path_file_name_lower};
+use crate::util::{
+    TokenUserBuffer, exe_matches_filter, path_file_name_lower, process_has_same_user_sid,
+};
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -56,7 +58,7 @@ pub struct PortOwnerResponse {
 struct TcpListenRow {
     pid: u32,
     local_address: String,
-    is_ipv4_loopback: bool,
+    is_loopback: bool,
     port: u16,
 }
 
@@ -164,7 +166,7 @@ fn query_ipv4_listeners() -> Result<Vec<TcpListenRow>, HelperError> {
         rows.push(TcpListenRow {
             pid: row.dwOwningPid,
             local_address: addr.to_string(),
-            is_ipv4_loopback: addr == Ipv4Addr::LOCALHOST,
+            is_loopback: addr == Ipv4Addr::LOCALHOST,
             port,
         });
     }
@@ -202,7 +204,7 @@ fn query_ipv6_listeners() -> Result<Vec<TcpListenRow>, HelperError> {
         rows.push(TcpListenRow {
             pid: row.dwOwningPid,
             local_address: addr.to_string(),
-            is_ipv4_loopback: false,
+            is_loopback: addr == Ipv6Addr::LOCALHOST,
             port,
         });
     }
@@ -210,15 +212,21 @@ fn query_ipv6_listeners() -> Result<Vec<TcpListenRow>, HelperError> {
 }
 
 pub fn ls_inspect(exe_filter: Option<&str>) -> Result<LsInspectResponse, HelperError> {
-    let filter_norm = exe_filter
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(normalize_win_path);
+    let filter_trimmed = exe_filter.map(str::trim).filter(|s| !s.is_empty());
 
-    let ipv4_rows = query_ipv4_listeners()?;
+    let self_user = TokenUserBuffer::from_current_process()
+        .map_err(|err| HelperError::win32("GetTokenInformation(self)", err))?;
+    let self_sid = self_user
+        .sid_ptr()
+        .ok_or_else(|| HelperError::new("WIN32_ERROR", "failed to resolve current user SID"))?;
+
+    let mut tcp_rows = query_ipv4_listeners()?;
+    if let Ok(v6_rows) = query_ipv6_listeners() {
+        tcp_rows.extend(v6_rows);
+    }
     let mut loopback_ports_by_pid: HashMap<u32, Vec<u16>> = HashMap::new();
-    for row in ipv4_rows {
-        if row.is_ipv4_loopback {
+    for row in tcp_rows {
+        if row.is_loopback {
             loopback_ports_by_pid.entry(row.pid).or_default().push(row.port);
         }
     }
@@ -236,20 +244,23 @@ pub fn ls_inspect(exe_filter: Option<&str>) -> Result<LsInspectResponse, HelperE
             continue;
         }
         // Fast pre-filter when using default `language_server.exe` mode
-        if filter_norm.is_none() && !entry.exe_name.eq_ignore_ascii_case("language_server.exe") {
+        if filter_trimmed.is_none() && !entry.exe_name.eq_ignore_ascii_case("language_server.exe") {
             continue;
         }
 
         let Some((handle, has_vm_read)) = open_process_for_inspect(pid) else {
             continue;
         };
+        if !process_has_same_user_sid(handle.as_raw(), self_sid) {
+            continue;
+        }
         let Some(exe_path) = query_process_exe_path(handle.as_raw()) else {
             continue;
         };
 
-        let matched = match &filter_norm {
+        let matched = match filter_trimmed {
             None => path_file_name_lower(&exe_path) == "language_server.exe",
-            Some(substr) => normalize_win_path(&exe_path).contains(substr.as_str()),
+            Some(filter) => exe_matches_filter(&exe_path, filter),
         };
         if !matched {
             continue;

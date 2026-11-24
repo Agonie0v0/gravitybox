@@ -100,14 +100,18 @@ test('隐私门禁扫描器：拦截真实私钥与密钥前缀，豁免显式�
 
   const tempDir = await mkdtemp(join(tmpdir(), 'gb-privacy-dir-'));
   try {
-    await mkdir(join(tempDir, 'Resources', 'core'), { recursive: true });
+    await mkdir(join(tempDir, 'Resources', 'core', 'dist'), { recursive: true });
     await mkdir(join(tempDir, 'MacOS'), { recursive: true });
     await writeFile(join(tempDir, 'MacOS', 'bin'), `${fakeGhToken}\n`);
     await writeFile(join(tempDir, 'Resources', 'core', 'app.js'), `console.log('${fakeGoogleKey}');\n`);
+    await writeFile(join(tempDir, 'Resources', 'core', 'dist', 'main.js'), `console.log('${fakeOAuthSecret}');\n`);
     const dirResult = await scanDirectoryForPrivacy(tempDir, { excludePrefixes: ['MacOS/'] });
-    assert.equal(dirResult.scannedCount, 1);
-    assert.equal(dirResult.issues.length, 1);
-    assert.equal(dirResult.issues[0].file, 'Resources/core/app.js');
+    assert.equal(dirResult.scannedCount, 2);
+    assert.equal(dirResult.issues.length, 2);
+    assert.deepEqual(
+      dirResult.issues.map(i => i.file).sort(),
+      ['Resources/core/app.js', 'Resources/core/dist/main.js'],
+    );
   } finally {
     await rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }

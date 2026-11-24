@@ -46,6 +46,7 @@ BrandingText "${APP_NAME} ${APP_VERSION} (${APP_ARCH})"
 
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
+!include "LogicLib.nsh"
 
 !define MUI_ABORTWARNING
 !define MUI_ICON "${APP_ICON}"
@@ -74,6 +75,8 @@ LangString DESC_SecDesktop ${LANG_ENGLISH} "Create a Desktop shortcut for Gravit
 LangString DESC_SecDesktop ${LANG_SIMPCHINESE} "在桌面创建 GravityBox 快捷方式。"
 LangString DESC_LaunchApp ${LANG_ENGLISH} "Launch GravityBox now"
 LangString DESC_LaunchApp ${LANG_SIMPCHINESE} "立即启动 GravityBox"
+LangString ERR_AppRunning ${LANG_ENGLISH} "GravityBox is currently running. Please quit GravityBox from the system tray and try again."
+LangString ERR_AppRunning ${LANG_SIMPCHINESE} "检测到 GravityBox 正在运行，请先从系统托盘退出 GravityBox 后再试。"
 
 VIProductVersion "${APP_VI_VERSION}"
 VIAddVersionKey /LANG=${LANG_ENGLISH} "ProductName" "${APP_NAME}"
@@ -83,11 +86,38 @@ VIAddVersionKey /LANG=${LANG_ENGLISH} "ProductVersion" "${APP_VERSION}"
 VIAddVersionKey /LANG=${LANG_ENGLISH} "CompanyName" "${APP_PUBLISHER}"
 VIAddVersionKey /LANG=${LANG_ENGLISH} "LegalCopyright" "MIT License"
 
+!macro EnsureAppNotLocked
+  ${If} ${FileExists} "$INSTDIR\${APP_EXE}"
+    ClearErrors
+    FileOpen $0 "$INSTDIR\${APP_EXE}" a
+    ${If} ${Errors}
+      MessageBox MB_OK|MB_ICONSTOP "$(ERR_AppRunning)" /SD IDOK
+      Abort
+    ${EndIf}
+    FileClose $0
+  ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\resources\runtime\node.exe"
+    ClearErrors
+    FileOpen $0 "$INSTDIR\resources\runtime\node.exe" a
+    ${If} ${Errors}
+      MessageBox MB_OK|MB_ICONSTOP "$(ERR_AppRunning)" /SD IDOK
+      Abort
+    ${EndIf}
+    FileClose $0
+  ${EndIf}
+!macroend
+
 Section "GravityBox (Core)" SecCore
   SectionIn RO
 
-  ; Clean previous packaged resources on upgrade to prevent stale files
-  RMDir /r "$INSTDIR\resources"
+  ; Block overwrite while GravityBox or its bundled Node backend is still running
+  !insertmacro EnsureAppNotLocked
+
+  ; Clean previous packaged resources on upgrade only after verifying sentinel files
+  ${If} ${FileExists} "$INSTDIR\${APP_EXE}"
+  ${AndIf} ${FileExists} "$INSTDIR\resources\core\dist\main.js"
+    RMDir /r "$INSTDIR\resources"
+  ${EndIf}
 
   SetOutPath "$INSTDIR"
   File /r "${STAGE_DIR}\*"
@@ -130,6 +160,26 @@ SectionEnd
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Section "Uninstall"
+  ; Verify running lock before removing shortcuts, registry entries, or binary files
+  ${If} ${FileExists} "$INSTDIR\${APP_EXE}"
+    ClearErrors
+    FileOpen $0 "$INSTDIR\${APP_EXE}" a
+    ${If} ${Errors}
+      MessageBox MB_OK|MB_ICONSTOP "$(ERR_AppRunning)" /SD IDOK
+      Abort
+    ${EndIf}
+    FileClose $0
+  ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\resources\runtime\node.exe"
+    ClearErrors
+    FileOpen $0 "$INSTDIR\resources\runtime\node.exe" a
+    ${If} ${Errors}
+      MessageBox MB_OK|MB_ICONSTOP "$(ERR_AppRunning)" /SD IDOK
+      Abort
+    ${EndIf}
+    FileClose $0
+  ${EndIf}
+
   ; Remove shortcuts
   Delete "$DESKTOP\${APP_NAME}.lnk"
   Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
@@ -141,8 +191,11 @@ Section "Uninstall"
   DeleteRegKey HKCU "${REG_UNINSTALL_KEY}"
   DeleteRegKey HKCU "${REG_APP_KEY}"
 
-  ; Remove installed files
-  RMDir /r "$INSTDIR\resources"
+  ; Remove installed files only when sentinel files confirm an authentic GravityBox install dir
+  ${If} ${FileExists} "$INSTDIR\${APP_EXE}"
+  ${AndIf} ${FileExists} "$INSTDIR\resources\core\dist\main.js"
+    RMDir /r "$INSTDIR\resources"
+  ${EndIf}
   Delete "$INSTDIR\${APP_EXE}"
   Delete "$INSTDIR\LICENSE"
   Delete "$INSTDIR\THIRD_PARTY_NOTICES.md"

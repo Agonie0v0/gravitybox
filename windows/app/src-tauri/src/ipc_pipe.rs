@@ -515,8 +515,16 @@ mod win_impl {
                     });
                 }
                 let wait_ms = rem.min(1500);
-                unsafe {
-                    WaitNamedPipeW(wide.as_ptr(), wait_ms);
+                let waited = unsafe { WaitNamedPipeW(wide.as_ptr(), wait_ms) };
+                if waited == 0 {
+                    let wait_err = unsafe { GetLastError() };
+                    if wait_err == ERROR_FILE_NOT_FOUND || wait_err == ERROR_PATH_NOT_FOUND {
+                        return Err(PipeError {
+                            message: "后台尚未连接。请稍候，或点击重新连接。".to_string(),
+                            retryable: true,
+                        });
+                    }
+                    std::thread::sleep(Duration::from_millis(30u64.min(rem as u64)));
                 }
                 continue;
             }
@@ -610,6 +618,12 @@ mod win_impl {
                 )
             };
             if ok != 0 {
+                if written == 0 {
+                    return Err(PipeError {
+                        message: "本机请求未能完整发送".to_string(),
+                        retryable: false,
+                    });
+                }
                 offset += written as usize;
                 continue;
             }

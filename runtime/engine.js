@@ -734,17 +734,42 @@
     '免审批无限制运行所有命令',
   ];
 
+  function isDefaultPresetBadgeElement(el, scopeRoot) {
+    if (!el) return false;
+    const parentBadge = el.parentElement && el.parentElement !== scopeRoot ? el.parentElement : null;
+    const parentBadgeText = parentBadge ? lower(normalize(parentBadge.textContent || '')) : '';
+    const hasBadgeSvg =
+      Boolean(el.querySelector?.('svg')) ||
+      Boolean(parentBadge && (parentBadgeText === 'default' || parentBadgeText === '默认') && parentBadge.querySelector?.('svg'));
+    if (hasBadgeSvg && !el.closest?.('button[aria-label*="Agent permissions preset" i],button[aria-label*="智能体权限预设"]')) {
+      return true;
+    }
+    if (!scopeRoot?.querySelectorAll) return false;
+    const firstTitleMatch = [...scopeRoot.querySelectorAll('*')].find((node) => {
+      if (!node || node.tagName === 'svg' || node.closest?.('svg')) return false;
+      if (node.childElementCount > 0) return false;
+      const t = lower(normalize(node.textContent || ''));
+      return t === 'default' || t === '按需询问';
+    });
+    return Boolean(firstTitleMatch && firstTitleMatch !== el && !el.contains(firstTitleMatch));
+  }
+
   function resolvePermissionPresetLabel(key, el) {
     if (!el) return undefined;
     const lowerKey = lower(key);
     if (!Object.prototype.hasOwnProperty.call(PERMISSION_PRESET_LABELS, lowerKey)) return undefined;
     if (lowerKey === 'autonomous') return undefined;
 
-    if (el.closest?.('[aria-label*="Agent permissions preset" i],[aria-label*="智能体权限预设"]')) {
+    const ariaPresetContainer = el.closest?.('[aria-label*="Agent permissions preset" i],[aria-label*="智能体权限预设"]');
+    const row = el.closest?.('[role="menuitem"],[role="option"],button,li,[role="listitem"]');
+    if (lowerKey === 'default' && isDefaultPresetBadgeElement(el, row || ariaPresetContainer)) {
+      return undefined;
+    }
+
+    if (ariaPresetContainer) {
       return PERMISSION_PRESET_LABELS[lowerKey];
     }
 
-    const row = el.closest?.('[role="menuitem"],[role="option"],button,li,[role="listitem"]');
     if (!row) return undefined;
 
     const rowText = normalize(row.textContent || '');
@@ -760,23 +785,7 @@
         rowText.includes('Ask before sensitive operations') ||
         rowText.includes('执行敏感操作前询问');
       if (!isDefaultPresetRow) return undefined;
-
-      const parentBadge = el.parentElement && el.parentElement !== row ? el.parentElement : null;
-      const parentBadgeText = parentBadge ? lower(normalize(parentBadge.textContent || '')) : '';
-      const hasBadgeSvg =
-        Boolean(el.querySelector?.('svg')) ||
-        Boolean(parentBadge && (parentBadgeText === 'default' || parentBadgeText === '默认') && parentBadge.querySelector?.('svg'));
-      if (hasBadgeSvg) return undefined;
-
-      const firstTitleMatch = [...row.querySelectorAll('*')].find((node) => {
-        if (!node || node.tagName === 'svg' || node.closest?.('svg')) return false;
-        if (node.childElementCount > 0) return false;
-        const t = lower(normalize(node.textContent || ''));
-        return t === 'default' || t === '按需询问';
-      });
-      if (firstTitleMatch && firstTitleMatch !== el && !el.contains(firstTitleMatch)) {
-        return undefined;
-      }
+      if (isDefaultPresetBadgeElement(el, row)) return undefined;
     }
 
     return PERMISSION_PRESET_LABELS[lowerKey];
@@ -3192,7 +3201,7 @@
     for (const mutation of mutations) {
       const targetEl = mutation.target.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target.parentElement;
       const inStaticProtected = Boolean(
-        targetEl?.closest?.('[data-gravitybox-protect],.monaco-editor,.xterm,[data-message-id],[data-message-author-role],[data-testid="planner-response-text"],.markdown,.prose,pre,code,.code-block,.code-line,.line-content,[data-line-tokens],.notebook-code-cell,[data-testid="csv-scroll-viewport"],[data-testid="lsp-reference-item"]') &&
+        targetEl?.closest?.('[data-gravitybox-protect],.monaco-editor,.xterm,[data-message-id],[data-message-author-role],[data-testid="planner-response-text"],.markdown,.prose,pre,code,.code-block,.code-line,.line-content,[data-line-tokens],.notebook-code-cell,.notebook-code-input,.notebook-output-text,[data-testid="csv-scroll-viewport"],[data-testid="lsp-reference-item"]') &&
         !targetEl.closest?.('[data-testid="conversation-row-sidebar"],[data-testid*="model"]')
       );
       if (mutation.type === 'childList') {
