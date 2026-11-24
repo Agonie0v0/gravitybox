@@ -6,6 +6,7 @@ import { TrendChart, type TrendBarPoint } from '../components/TrendChart';
 import { useApp } from '../context/AppContext';
 import {
   foldThinkingVariants,
+  formatAccountOptionLabel,
   formatCompactTokens,
   formatInteger,
   formatUsd,
@@ -30,6 +31,7 @@ export function UsagePage() {
     t,
     locale,
     isDark,
+    config,
     reachable,
     accounts,
     usageByPeriod,
@@ -397,7 +399,7 @@ export function UsagePage() {
                     <option key={opt.id} value={opt.id}>
                       {opt.id === 'unattributed'
                         ? t('usage.account.unattributed')
-                        : opt.label || opt.email || opt.id}
+                        : formatAccountOptionLabel(opt, Boolean(config.privacyMaskAccounts))}
                     </option>
                   ))}
                 </select>

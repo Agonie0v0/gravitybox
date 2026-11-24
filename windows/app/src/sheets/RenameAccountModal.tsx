@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Modal } from '../components/Modal';
 import { useApp } from '../context/AppContext';
+import { displayAccountIdentity } from '../lib/format';
 import { backendRequest } from '../lib/tauri';
 
 export function RenameAccountModal({
@@ -10,7 +11,7 @@ export function RenameAccountModal({
   account: { id: string; email: string; name?: string } | null;
   onClose: () => void;
 }) {
-  const { t, fetchAccounts, showToast } = useApp();
+  const { t, locale, config, fetchAccounts, showToast } = useApp();
   const [name, setName] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -40,7 +41,11 @@ export function RenameAccountModal({
       <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div>
           <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700 }}>{t('accounts.rename.title')}</h3>
-          <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginTop: 3 }}>{account?.email}</div>
+          <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginTop: 3 }}>
+            {account
+              ? displayAccountIdentity(account.name, account.email, locale, Boolean(config.privacyMaskAccounts)).email
+              : ''}
+          </div>
         </div>
         <input
           type="text"

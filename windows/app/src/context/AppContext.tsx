@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  displayAccountIdentity,
   formatDetachedDaemonKinds,
 } from '../lib/format';
 import {
@@ -82,6 +83,7 @@ const DEFAULT_CONFIG: UiConfig = {
   themeMode: 'system',
   antigravityProxyMode: 'off',
   antigravityProxyManualUrl: '',
+  privacyMaskAccounts: false,
 };
 
 const PAGE_INDEX_MAP: PageKey[] = ['overview', 'accounts', 'usage', 'settings', 'about'];
@@ -802,12 +804,14 @@ export function AppProvider({
         const detachedOnly = !hasUiRunning && detachedCount > 0;
         const kindsLabel = formatDetachedDaemonKinds(detachedKinds, t, locale);
         const busy = preflight?.hasRunningTask === true || preflight?.safe === false;
+        const masked = Boolean(configRef.current.privacyMaskAccounts);
+        const identity = displayAccountIdentity(acc.name, acc.email, locale, masked);
         const display =
-          acc.name && acc.name.toLowerCase() !== acc.email.toLowerCase()
+          acc.name && identity.email && acc.name.toLowerCase() !== acc.email.toLowerCase()
             ? locale === 'en'
-              ? `${acc.name} (${acc.email})`
-              : `${acc.name}（${acc.email}）`
-            : acc.email || acc.name || t('assistant_account.target_fallback');
+              ? `${identity.name} (${identity.email})`
+              : `${identity.name}（${identity.email}）`
+            : identity.email || identity.name || t('assistant_account.target_fallback');
 
         const baseBody = detachedOnly
           ? busy
@@ -875,7 +879,11 @@ export function AppProvider({
             target: 'all',
             autoRefreshToken: true,
           });
-          showToast(switchRes?.message || t('assistant_account.switched_to', { email: acc.email }));
+          showToast(
+            masked
+              ? t('assistant_account.switched_to', { email: identity.email || identity.name })
+              : switchRes?.message || t('assistant_account.switched_to', { email: acc.email }),
+          );
         } finally {
           if (hasUiRunning) {
             await launchAntigravity().catch((e) => {

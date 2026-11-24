@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { Modal } from '../components/Modal';
 import { useApp } from '../context/AppContext';
+import { displayAccountIdentity } from '../lib/format';
 import {
   backendRequest,
   getAppInfo,
@@ -74,7 +75,7 @@ export function AddAccountModal({
   open: boolean;
   onClose: () => void;
 }) {
-  const { t, locale, appInfo, status, accounts, refreshAll, showToast, askConfirm } = useApp();
+  const { t, locale, config, appInfo, status, accounts, refreshAll, showToast, askConfirm } = useApp();
   const [busy, setBusy] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
@@ -87,7 +88,10 @@ export function AddAccountModal({
   const pollInFlightRef = useRef(false);
   const copyTimerRef = useRef<number | null>(null);
 
-  const currentEmail = (status.liveAccountEmail || status.activeAccountEmail || '').trim();
+  const rawCurrentEmail = (status.liveAccountEmail || status.activeAccountEmail || '').trim();
+  const currentEmail = rawCurrentEmail
+    ? displayAccountIdentity(undefined, rawCurrentEmail, locale, Boolean(config.privacyMaskAccounts)).email
+    : '';
   const oauthConfigured = status.oauthClientConfigured === true;
 
   const stopPolling = () => {
