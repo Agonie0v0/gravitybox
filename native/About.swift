@@ -253,6 +253,15 @@ final class AboutPage: NSObject {
         return L10n.t("about.antigravity_stable", fallback: "Antigravity 正式版")
     }
 
+    /// 编译架构标签：Intel 构建显示 x86_64，Apple Silicon 构建显示 arm64。
+    static var buildArchLabel: String {
+        #if arch(x86_64)
+        return "x86_64"
+        #else
+        return "arm64"
+        #endif
+    }
+
     private func refreshSpecs() {
         let ver = app.updateManager.currentVersion
         let buildDisplay = resolvedBuildSummary()
@@ -264,7 +273,7 @@ final class AboutPage: NSObject {
         let osStr = osVer.patchVersion > 0
             ? "macOS \(osVer.majorVersion).\(osVer.minorVersion).\(osVer.patchVersion)"
             : "macOS \(osVer.majorVersion).\(osVer.minorVersion)"
-        let copyText = "GravityBox v\(ver) (\(buildPart)) · \(antigravityPart) · \(osStr) arm64"
+        let copyText = "GravityBox v\(ver) (\(buildPart)) · \(antigravityPart) · \(osStr) \(Self.buildArchLabel)"
         enableTextCopy(versionSpecLabel, value: copyText, title: L10n.t("about.copy_version_info", fallback: "复制版本与环境信息"))
     }
 

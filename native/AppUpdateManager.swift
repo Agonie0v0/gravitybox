@@ -269,15 +269,29 @@ final class AppUpdateManager {
 
             var dmgURL: URL?
             var sha256URL: URL?
-            if let assets = json["assets"] as? [[String: Any]] {
-                for asset in assets {
-                    guard let assetName = asset["name"] as? String,
-                          let downloadStr = asset["browser_download_url"] as? String,
-                          let url = Self.httpsURL(from: downloadStr) else { continue }
-                    let expectedName = "GravityBox-\(remoteVersion)-arm64.dmg"
-                    if assetName == expectedName { dmgURL = url }
-                    else if assetName == expectedName + ".sha256" { sha256URL = url }
+            let assetList = (json["assets"] as? [[String: Any]]) ?? []
+            let assetNames = assetList.compactMap { $0["name"] as? String }
+            let assetChoice = Self.selectReleaseAssetNames(version: remoteVersion, assetNames: assetNames)
+            guard let dmgName = assetChoice.dmg else {
+                // 远端没有当前架构（或 universal）的安装包：安全视为无可用更新，绝不回退到异架构包。
+                if let (prevRel, dmg) = preservedReady,
+                   prevRel.version == remoteVersion,
+                   FileManager.default.fileExists(atPath: dmg.path) {
+                    self.downloadedDMGURL = dmg
+                    self.transition(.readyToInstall(prevRel, dmg))
+                } else {
+                    self.availableRelease = nil
+                    self.downloadedDMGURL = nil
+                    self.transition(.upToDate)
                 }
+                return
+            }
+            for asset in assetList {
+                guard let assetName = asset["name"] as? String,
+                      let downloadStr = asset["browser_download_url"] as? String,
+                      let url = Self.httpsURL(from: downloadStr) else { continue }
+                if assetName == dmgName { dmgURL = url }
+                else if assetName == assetChoice.sha256 { sha256URL = url }
             }
 
             let info = AppReleaseInfo(
@@ -410,7 +424,7 @@ final class AppUpdateManager {
     }
 
     private func cachedDMGPath(for version: String) -> URL {
-        app.state.appendingPathComponent("updates/v\(version)/GravityBox-\(version)-arm64.dmg")
+        app.state.appendingPathComponent("updates/v\(version)/GravityBox-\(version)-\(Self.releaseArchSuffix).dmg")
     }
 
     private static func configureSilentProcess(_ proc: Process) {
@@ -649,6 +663,30 @@ final class AppUpdateManager {
         pattern: #"^GravityBox[-_ ]v?(\d+\.\d+\.\d+(?:-[A-Za-z0-9._-]+)?)(?:-(?:arm64|universal|x86_64|mac))?\.dmg(?:\.sha256)?$"#,
         options: [.caseInsensitive]
     )
+
+    /// 当前编译架构对应的发行包后缀（arm64 / x86_64）。更新只安装同架构或 universal 的包。
+    static var releaseArchSuffix: String {
+        #if arch(x86_64)
+        return "x86_64"
+        #else
+        return "arm64"
+        #endif
+    }
+
+    /// 可用安装包文件名，按优先级排序：本架构优先，其次 universal。
+    static func releaseAssetNames(forVersion version: String) -> [String] {
+        ["GravityBox-\(version)-\(releaseArchSuffix).dmg", "GravityBox-\(version)-universal.dmg"]
+    }
+
+    /// 从远端资产名片中挑选安装包与校验文件；没有同架构/ universal 包时返回空，交由调用方视为无更新。
+    static func selectReleaseAssetNames(version: String, assetNames: [String]) -> (dmg: String?, sha256: String?) {
+        let available = Set(assetNames)
+        for candidate in releaseAssetNames(forVersion: version) where available.contains(candidate) {
+            let sha = candidate + ".sha256"
+            return (candidate, available.contains(sha) ? sha : nil)
+        }
+        return (nil, nil)
+    }
 
     static func extractGravityBoxDMGVersion(from fileName: String) -> String? {
         let ns = fileName as NSString

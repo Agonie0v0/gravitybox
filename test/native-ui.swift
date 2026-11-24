@@ -1236,6 +1236,19 @@ import Cocoa
             check(updaterScript.contains("HUP TERM INT QUIT PIPE") && updaterScript.contains("kill -9 12345") && updaterScript.contains("--install-update"), "Detached updater must wait for its parent then invoke the transactional helper")
             check(!updaterScript.contains("rm -rf") && !updaterScript.contains("ditto"), "Detached launcher must never delete or copy over the live app")
             check(AppUpdateManager.extractGravityBoxDMGVersion(from: "GravityBox-1.0.4-arm64.dmg") == "1.0.4", "Must extract version from standard arm64 DMG filename")
+            check(AppUpdateManager.extractGravityBoxDMGVersion(from: "GravityBox-1.0.4-x86_64.dmg") == "1.0.4", "Must extract version from Intel x86_64 DMG filename")
+            let archChoice = AppUpdateManager.selectReleaseAssetNames(
+                version: "1.0.4",
+                assetNames: ["GravityBox-1.0.4-arm64.dmg", "GravityBox-1.0.4-x86_64.dmg", "GravityBox-1.0.4-x86_64.dmg.sha256"]
+            )
+            check(archChoice.dmg == "GravityBox-1.0.4-\(AppUpdateManager.releaseArchSuffix).dmg", "Must prefer the DMG matching this build's architecture")
+            check(archChoice.sha256 == "GravityBox-1.0.4-\(AppUpdateManager.releaseArchSuffix).dmg.sha256", "Must pair the chosen DMG with its sha256 sidecar")
+            let universalChoice = AppUpdateManager.selectReleaseAssetNames(version: "1.0.4", assetNames: ["GravityBox-1.0.4-arm64.dmg", "GravityBox-1.0.4-universal.dmg"])
+            let expectedUniversal = AppUpdateManager.releaseArchSuffix == "arm64" ? "GravityBox-1.0.4-arm64.dmg" : "GravityBox-1.0.4-universal.dmg"
+            check(universalChoice.dmg == expectedUniversal, "Must accept a universal DMG when the matching arch is absent")
+            let foreignChoice = AppUpdateManager.selectReleaseAssetNames(version: "1.0.4", assetNames: ["GravityBox-1.0.4-arm64.dmg", "GravityBox-1.0.4-arm64.dmg.sha256"])
+            let expectedForeign = AppUpdateManager.releaseArchSuffix == "arm64" ? "GravityBox-1.0.4-arm64.dmg" : nil
+            check(foreignChoice.dmg == expectedForeign && (expectedForeign != nil || foreignChoice.sha256 == nil), "Must never fall back to a foreign-arch DMG")
             check(AppUpdateManager.extractGravityBoxDMGVersion(from: "GravityBox-v1.0.3-universal.dmg.sha256") == "1.0.3", "Must extract version from v-prefixed DMG sha256 sidecar")
             check(AppUpdateManager.extractGravityBoxDMGVersion(from: "OtherApp-1.0.4-arm64.dmg") == nil, "Must ignore unrelated DMG filenames")
 
@@ -1350,7 +1363,8 @@ import Cocoa
         check(aboutPage.versionSpecLabel.stringValue.contains("Antigravity") && !aboutPage.versionSpecLabel.stringValue.contains("Build "), "About page versionSpecLabel must display Antigravity version without Build number")
         let aboutTexts = allTextValues(aboutPage.view)
         check(aboutTexts.contains("自动检查更新") && aboutTexts.contains("运行信息") && aboutTexts.contains("目标应用") && aboutTexts.contains("GravityBox 数据目录"), "Simplified About page must render 自动检查更新, 运行信息, 目标应用 and GravityBox 数据目录")
-        check(!aboutTexts.contains("系统环境") && !aboutTexts.contains("构建与环境") && !aboutTexts.contains("本地数据与隐私原则") && !aboutTexts.contains("macOS · arm64") && !aboutTexts.contains { $0.contains("查看历史发行版本") }, "Simplified About page must omit redundant OS, build, privacy, arm64 pill and Releases subtitle rows")
+        let aboutArchPill = "macOS · \(AppUpdateManager.releaseArchSuffix)"
+        check(!aboutTexts.contains("系统环境") && !aboutTexts.contains("构建与环境") && !aboutTexts.contains("本地数据与隐私原则") && !aboutTexts.contains(aboutArchPill) && !aboutTexts.contains { $0.contains("查看历史发行版本") }, "Simplified About page must omit redundant OS, build, privacy, arch pill and Releases subtitle rows")
         check(aboutPage.revealDataBtn.title == "在访达中显示", "About page revealDataBtn title must be 在访达中显示")
         check(aboutPage.githubReleasesBtn.title == "GitHub ↗", "About page githubReleasesBtn title must be GitHub ↗")
 
