@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as net from 'node:net';
-import { join } from 'node:path';
+import { join, win32 as win32Path } from 'node:path';
 import * as tls from 'node:tls';
 import { promisify } from 'node:util';
 import { bt } from './i18n.js';
@@ -439,6 +439,11 @@ function hasAnyConfiguredProxy(snapshot: SystemProxySnapshot): boolean {
   return snapshot.httpEnabled || snapshot.httpsEnabled || snapshot.socksEnabled || snapshot.pacEnabled;
 }
 
+export function resolveWindowsRegExePath(env: NodeJS.ProcessEnv = process.env): string {
+  const systemRoot = (env.SystemRoot || env.WINDIR || 'C:\\Windows').trim() || 'C:\\Windows';
+  return win32Path.join(systemRoot, 'System32', 'reg.exe');
+}
+
 export function clearSystemProxyCache(): void {
   systemProxyCache = null;
 }
@@ -498,7 +503,7 @@ export async function readSystemProxySnapshot(options?: {
       let parsed: SystemProxySnapshot;
       if (process.platform === 'win32') {
         const { stdout } = await execFileAsync(
-          'reg.exe',
+          resolveWindowsRegExePath(),
           ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'],
           { encoding: 'utf8', timeout: 2000, windowsHide: true }
         );

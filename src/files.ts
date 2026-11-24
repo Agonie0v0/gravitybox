@@ -28,7 +28,7 @@ export async function atomicText(path: string, text: string, signal?: AbortSigna
     } finally { await handle.close(); }
     signal?.throwIfAborted();
     if (isWindows()) {
-      await atomicRenameWithRetry(temp, path);
+      await atomicRenameWithRetry(temp, path, { signal });
     } else {
       renameSync(temp, path);
     }

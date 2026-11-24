@@ -224,7 +224,7 @@ export class CacheMaintenance {
 
   private async probeHostState(): Promise<ProcessProbeState> {
     if (this.useDefaultRunningProbe) {
-      return await probeAntigravityRunning(this.options.appPath, this.options.processProbe);
+      return await probeAntigravityRunning(this.options.appPath, this.options.processProbe ?? readProcessCommands);
     }
     try {
       return normalizeProcessProbeState(await this.running());
@@ -276,9 +276,7 @@ export class CacheMaintenance {
     }
     let commands: string[] | null = null;
     try {
-      commands = this.options.processProbe
-        ? await this.options.processProbe()
-        : await readProcessCommands(isWindows() ? this.options.appPath : undefined);
+      commands = await (this.options.processProbe ?? readProcessCommands)();
     } catch {
       commands = null;
     }

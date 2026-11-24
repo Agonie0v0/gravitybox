@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { open, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, win32 as win32Path } from 'node:path';
 import { promisify } from 'node:util';
 import type { CDP } from './cdp.js';
 import { compareLayers } from './dictionary.js';
@@ -182,24 +182,65 @@ function extractSocksPortFromTokens(tokens: string[]): number | undefined {
   return undefined;
 }
 
+export function resolveWindowsPowerShellPath(env: NodeJS.ProcessEnv = process.env): string {
+  const systemRoot = (env.SystemRoot || env.WINDIR || 'C:\\Windows').trim() || 'C:\\Windows';
+  return win32Path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+}
+
 /**
- * 解析 `ps -ax -ww -o pid=,ppid=,args=` 输出，筛选父进程为官方 Antigravity 的活跃 `ssh -D` 隧道。
+ * 解析 `ps -ax -ww -o pid=,ppid=,args=` 输出，筛选父进程（或可选全部后代链）属于官方 Antigravity 的活跃 `ssh -D` 隧道。
  */
-export function parseSshTunnelProcesses(psStdout: string, antigravityPid: number): SshTunnelProcessInfo[] {
+export function parseSshTunnelProcesses(
+  psStdout: string,
+  antigravityPid: number,
+  options?: { includeDescendants?: boolean }
+): SshTunnelProcessInfo[] {
   if (!Number.isSafeInteger(antigravityPid) || antigravityPid <= 0) return [];
-  const results: SshTunnelProcessInfo[] = [];
-  for (const line of psStdout.split('\n')) {
-    const m = line.trim().match(/^(\d+)\s+(\d+)\s+([\s\S]+)$/);
+  const rows: Array<{ pid: number; ppid: number; args: string }> = [];
+  for (const line of psStdout.split(/\r?\n/)) {
+    const m = line.trim().match(/^(\d+)\s+(\d+)(?:\s+([\s\S]*))?$/);
     if (!m) continue;
     const pid = Number(m[1]);
     const ppid = Number(m[2]);
-    const args = m[3] ?? '';
-    if (ppid !== antigravityPid || !Number.isSafeInteger(pid) || pid <= 0) continue;
-    const tokens = splitCommandPrefixTokens(args);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isSafeInteger(ppid) || ppid < 0) continue;
+    rows.push({ pid, ppid, args: m[3] ?? '' });
+  }
+
+  let matchedPids: Set<number> | null = null;
+  if (options?.includeDescendants) {
+    const childrenByPpid = new Map<number, number[]>();
+    for (const row of rows) {
+      if (row.pid === row.ppid) continue;
+      let list = childrenByPpid.get(row.ppid);
+      if (!list) {
+        list = [];
+        childrenByPpid.set(row.ppid, list);
+      }
+      list.push(row.pid);
+    }
+    matchedPids = new Set<number>();
+    const queue: number[] = [antigravityPid];
+    while (queue.length > 0) {
+      const parentPid = queue.shift()!;
+      const children = childrenByPpid.get(parentPid);
+      if (!children) continue;
+      for (const childPid of children) {
+        if (childPid === antigravityPid || matchedPids.has(childPid)) continue;
+        matchedPids.add(childPid);
+        queue.push(childPid);
+      }
+    }
+  }
+
+  const results: SshTunnelProcessInfo[] = [];
+  for (const row of rows) {
+    if (matchedPids ? !matchedPids.has(row.pid) : row.ppid !== antigravityPid) continue;
+    if (!row.args) continue;
+    const tokens = splitCommandPrefixTokens(row.args);
     if (tokens.length === 0 || !isSshExecutableToken(tokens[0]!)) continue;
     const socksPort = extractSocksPortFromTokens(tokens);
     if (socksPort === undefined) continue;
-    results.push({ pid, socksPort });
+    results.push({ pid: row.pid, socksPort });
   }
   return results;
 }
@@ -213,13 +254,14 @@ export async function hasActiveAntigravitySshTunnel(
   }
   if (isWindows() && !deps?.execFile) {
     try {
-      const cmd = `Get-CimInstance Win32_Process -Filter "ParentProcessId = ${antigravityPid}" | ForEach-Object { if ($_.CommandLine) { "$($_.ProcessId) $($_.ParentProcessId) $($_.CommandLine)" } }`;
+      // TODO(stage-2): replace PowerShell process walk with win-helper once Stage 2 lands
+      const cmd = 'Get-CimInstance Win32_Process | ForEach-Object { $cl = ($_.CommandLine -replace "[\\r\\n]+", " "); "$($_.ProcessId) $($_.ParentProcessId) $cl" }';
       const { stdout } = await execFileRaw(
-        'powershell.exe',
+        resolveWindowsPowerShellPath(),
         ['-NoProfile', '-NonInteractive', '-Command', cmd],
-        { timeout: 2500, windowsHide: true }
+        { timeout: 2500, maxBuffer: 4 * 1024 * 1024, windowsHide: true }
       );
-      const tunnels = parseSshTunnelProcesses(String(stdout ?? ''), antigravityPid);
+      const tunnels = parseSshTunnelProcesses(String(stdout ?? ''), antigravityPid, { includeDescendants: true });
       return { found: tunnels.length > 0, tunnels };
     } catch {
       return { found: false, tunnels: [] };

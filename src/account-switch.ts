@@ -1,5 +1,5 @@
 import { type ApplicationChannel, type ApplicationTarget, applicationTarget } from './application-target.js';
-import { execFile } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile, mkdir, lstat, unlink, readdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -30,6 +30,7 @@ const USER = 'antigravityUnifiedStateSync.userStatus';
 const INIT = 'jetskiStateSync.agentManagerInitState';
 const PROJECT = 'antigravityUnifiedStateSync.enterprisePreferences';
 const KEYS = [TOKEN, USER, INIT, PROJECT, 'antigravityOnboarding'];
+const quote = (s: string) => `'${s.replaceAll("'", "''")}'`;
 type Rows = Record<string, string>;
 type SavedFile = { path: string; before: string; after: string; afterDigest?: string };
 type CliSnapshot = {
@@ -84,9 +85,71 @@ function loadDatabaseSync(): new (location: string) => DatabaseSyncType {
   return cachedDatabaseSyncCtor;
 }
 
-// Holds an in-process node:sqlite BEGIN IMMEDIATE write transaction while other resources
-// (Keychain & JSON account records) are committed. Neither tokens nor DB values ever touch argv.
-export class DatabaseTransaction {
+interface DatabaseTransactionBackend {
+  sql?(sql: string): Promise<string>;
+  begin(): Promise<void>;
+  rows(): Promise<Rows>;
+  replace(rows: Rows): Promise<void>;
+  finish(commit: boolean): Promise<void>;
+  close(): Promise<void>;
+}
+
+// macOS / POSIX path: unchanged upstream sqlite3 CLI transaction.
+// sqlite3 stays in BEGIN IMMEDIATE while the other resources are committed. SQL goes through
+// stdin, so neither tokens nor database values appear in command arguments or diagnostics.
+class PosixSqliteCliTransaction implements DatabaseTransactionBackend {
+  private child;
+  private output = '';
+  private pending?: { marker: string; resolve: (s: string) => void; reject: (e: Error) => void };
+  private failed = false;
+  private exited: Promise<void>;
+  constructor(path: string) {
+    this.child = spawn('/usr/bin/sqlite3', ['-batch', '-bail', path], { stdio: ['pipe', 'pipe', 'pipe'] });
+    this.exited = new Promise(resolve => this.child.once('close', () => resolve()));
+    this.child.stdin.on('error', () => this.fail());
+    this.child.stderr.on('data', () => this.fail());
+    this.child.on('error', () => this.fail());
+    this.child.on('exit', () => this.fail());
+    this.child.stdout.on('data', chunk => {
+      this.output += chunk.toString();
+      if (this.output.length > 4_000_000) return this.fail();
+      const marker = this.pending?.marker;
+      if (marker && this.output.includes(marker)) {
+        const reply = this.output.slice(0, this.output.indexOf(marker)).trim();
+        this.output = this.output.slice(this.output.indexOf(marker) + marker.length).trimStart();
+        const pending = this.pending!; this.pending = undefined; pending.resolve(reply);
+      }
+    });
+  }
+  private fail() { this.failed = true; this.pending?.reject(new Error(bt('switch.err.db_tx_failed'))); this.pending = undefined; }
+  async sql(sql: string): Promise<string> {
+    if (this.failed) throw new Error(bt('switch.err.db_closed'));
+    const marker = `GB_${randomUUID()}`;
+    const response = new Promise<string>((resolve, reject) => { this.pending = { marker, resolve, reject }; });
+    this.child.stdin.write(`${sql}\n.print ${marker}\n`);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try { return await Promise.race([response, new Promise<never>((_, reject) => { timer = setTimeout(() => { this.child.kill(); reject(new Error(bt('switch.err.db_busy'))); }, 6000); })]); }
+    finally { clearTimeout(timer); }
+  }
+  async begin() { await this.sql('.timeout 3000\n.mode json\nBEGIN IMMEDIATE;'); }
+  async rows(): Promise<Rows> {
+    const raw = await this.sql(`SELECT key,value FROM ItemTable WHERE key IN (${KEYS.map(quote).join(',')});`);
+    return Object.fromEntries((JSON.parse(raw || '[]') as { key: string; value: string }[]).map(r => [r.key, r.value]));
+  }
+  async replace(rows: Rows) {
+    await this.sql(`DELETE FROM ItemTable WHERE key IN (${KEYS.map(quote).join(',')});\n${Object.entries(rows).map(([k, v]) => `INSERT INTO ItemTable(key,value) VALUES(${quote(k)},${quote(v)});`).join('\n')}`);
+  }
+  async finish(commit: boolean) { try { await this.sql(commit ? 'COMMIT;' : 'ROLLBACK;'); } finally { this.child.stdin.end(); } }
+  async close() {
+    this.child.stdin.end();
+    const timer = setTimeout(() => this.child.kill(), 1500);
+    try { await this.exited; } finally { clearTimeout(timer); }
+  }
+}
+
+// Windows path: in-process node:sqlite BEGIN IMMEDIATE write transaction (loaded lazily so macOS
+// never loads node:sqlite or emits ExperimentalWarning on stderr).
+class WindowsNodeSqliteTransaction implements DatabaseTransactionBackend {
   private db: DatabaseSyncType | null = null;
   private inTransaction = false;
   private closed = false;
@@ -189,6 +252,41 @@ export class DatabaseTransaction {
 
   async close(): Promise<void> {
     this.closeSync();
+  }
+}
+
+export class DatabaseTransaction {
+  private readonly backend: DatabaseTransactionBackend;
+
+  constructor(path: string) {
+    this.backend = isWindows()
+      ? new WindowsNodeSqliteTransaction(path)
+      : new PosixSqliteCliTransaction(path);
+  }
+
+  async sql(sql: string): Promise<string> {
+    if (!this.backend.sql) throw new Error(bt('switch.err.db_tx_failed'));
+    return await this.backend.sql(sql);
+  }
+
+  async begin(): Promise<void> {
+    await this.backend.begin();
+  }
+
+  async rows(): Promise<Rows> {
+    return await this.backend.rows();
+  }
+
+  async replace(rows: Rows): Promise<void> {
+    await this.backend.replace(rows);
+  }
+
+  async finish(commit: boolean): Promise<void> {
+    await this.backend.finish(commit);
+  }
+
+  async close(): Promise<void> {
+    await this.backend.close();
   }
 }
 
