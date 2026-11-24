@@ -2,7 +2,7 @@
 import { bt } from './i18n.js';
 export type ProtoSelection = { [field: number]: true | ProtoSelection };
 export const GENERATION_PROJECTION: ProtoSelection = {
-  1: { 3: true, 4: true, 9: { 4: { 1: true } }, 19: true, 21: true },
+  1: { 3: true, 4: true, 9: { 4: { 1: true } }, 11: true, 12: true, 19: true, 21: true },
   2: true,
   4: true,
 };
@@ -90,7 +90,7 @@ export interface ProtoProjectionLimits {
   skipOversizedLeafFields?: boolean;
 }
 
-export const USAGE_PROJECTION_VERSION = 3;
+export const USAGE_PROJECTION_VERSION = 4;
 
 export const DEFAULT_PROTO_LIMITS: ProtoProjectionLimits = {
   maxReadBytes: 4 * 1024 * 1024,

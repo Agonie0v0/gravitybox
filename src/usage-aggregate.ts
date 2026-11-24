@@ -7,13 +7,24 @@ import {
     resolveDatabaseModelFullName,
     type AvailableAccountUsageOption,
     type AvailableEnvironmentUsageOption,
+    type CustomDateRange,
+    type DailyTokenUsage,
     type EnvironmentShareBreakdown,
+    type HourlyTokenUsage,
     type KnownEnvironmentContext,
+    type ModelTokenUsage,
     type TokenUsagePeriod,
     type TokenUsageSummary,
 } from './usage-types.js';
 import { getEffectiveModelAliasKeys } from './model-catalog.js';
-import { normalizeModelId, THINKING_EFFORT_OR_LATEST_SUFFIX_RE } from './model-identity.js';
+import {
+    extractThinkingEffort,
+    normalizeModelId,
+    normalizeThinkingEffort,
+    THINKING_EFFORT_OR_LATEST_SUFFIX_RE,
+    type ThinkingEffortLevel,
+} from './model-identity.js';
+import { computeEventOutputTps, RecentSpeedTracker } from './usage-speed.js';
 import { DEFAULT_API_PRICES, resolveContextTierPricing, resolvePricingForTimestamp, matchPricingKeys, calculateEstimatedUsd, priceStatus, type ApiPricing, type ApiPricingEntry } from './pricing.js';
 import { bt, getActiveLocale } from './i18n.js';
 import { cleanHostLabel } from './ssh-context.js';
@@ -241,6 +252,7 @@ export interface AggregateOptions {
     ignoreLegacyRates?: boolean;
     dryRunRateLocks?: Map<string, { unit_price: string; usd: number }>;
     cacheKey?: string;
+    customRange?: CustomDateRange;
 }
 export interface LedgerSnapshot {
     revision: number;
@@ -249,9 +261,39 @@ export interface LedgerSnapshot {
     environmentId?: string;
     rateRevision: number;
     snapshotId?: string;
+    customRange?: CustomDateRange;
 }
 function period(): TokenUsagePeriod {
-    return { totals: { input_tokens: 0, output_tokens: 0, cached_tokens: 0, cache_write_tokens: 0, total_tokens: 0, request_count: 0 }, estimated_usd: 0, by_model: [] };
+    return {
+        totals: {
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+            total_tokens: 0,
+            request_count: 0,
+            median_output_tps: null,
+            speed_sample_count: 0,
+        },
+        estimated_usd: 0,
+        median_output_tps: null,
+        speed_sample_count: 0,
+        by_model: [],
+        by_model_effort: [],
+    };
+}
+
+function hydrateIndexedLedgerEvent(event: LedgerEvent): void {
+    const rawModel = event.model;
+    const effort =
+        normalizeThinkingEffort(event.thinking_effort) ??
+        (rawModel ? extractThinkingEffort(rawModel) : undefined);
+    if (effort) {
+        event.thinking_effort = effort;
+    } else if ('thinking_effort' in event && event.thinking_effort !== undefined) {
+        delete event.thinking_effort;
+    }
+    event.model = resolveDatabaseModelFullName(rawModel, null);
 }
 
 interface IndexedLedgerRow {
@@ -375,7 +417,7 @@ function loadOrBuildLedgerIndex(
     const rows: IndexedLedgerRow[] = [];
     for (const row of db.prepare('SELECT e.payload,l.unit_price,l.usd FROM events e LEFT JOIN rate_locks l ON l.event_key=e.event_key LEFT JOIN event_aliases a ON a.legacy_key=e.event_key WHERE a.legacy_key IS NULL').iterate()) {
         const event = JSON.parse(String(row.payload)) as LedgerEvent;
-        event.model = resolveDatabaseModelFullName(event.model, null);
+        hydrateIndexedLedgerEvent(event);
         const isSynthetic = event.db_file === 'recovered_session.db' || event.db_file === 'recovered_enterprise_session.db';
         const evEnv = normalizeEventEnvironment(event);
         const hasRawLock = Boolean(row.unit_price);
@@ -390,6 +432,7 @@ function loadOrBuildLedgerIndex(
         const lockedUsd = hasRawLock && row.usd !== null && row.usd !== undefined ? Number(row.usd) : null;
         rows.push({ event, evEnv, isSynthetic, lockedPrice, lockedUsd, hasRawLock });
     }
+    rows.sort((a, b) => a.event.timestamp_seconds - b.event.timestamp_seconds || (a.event.event_key ?? '').localeCompare(b.event.event_key ?? ''));
     const next: CachedLedgerIndex = { revision, rateRevision, ignoreLegacyRates, locale, rows };
     aggregateIndexCache.delete(cacheKey);
     while (aggregateIndexCache.size >= MAX_AGGREGATE_INDEX_CACHE_ENTRIES) {
@@ -414,7 +457,9 @@ export function aggregateLedger(db: DatabaseSync, options: AggregateOptions): To
     seven.setDate(seven.getDate() - 6);
     const thirty = new Date(today);
     thirty.setDate(thirty.getDate() - 29);
-    const periods = [period(), period(), period(), period()];
+    const customRange = options.customRange;
+    const periodCount = customRange ? 5 : 4;
+    const periods = Array.from({ length: periodCount }, () => period());
     const periodEnvCounters = periods.map(() => ({
         localTokens: 0,
         sshTokens: 0,
@@ -423,8 +468,25 @@ export function aggregateLedger(db: DatabaseSync, options: AggregateOptions): To
         localUsd: 0,
         sshUsd: 0,
     }));
-    const models = periods.map(() => new Map<string, any>());
+    interface AggModelBucket {
+        model: string;
+        thinking_effort?: ThinkingEffortLevel;
+        input_tokens: number;
+        output_tokens: number;
+        cached_tokens: number;
+        cache_write_tokens: number;
+        total_tokens: number;
+        request_count: number;
+        estimated_usd: number;
+        unpriced_tokens: number;
+        speedTracker: RecentSpeedTracker;
+    }
+    const models = periods.map(() => new Map<string, AggModelBucket>());
+    const effortModels = periods.map(() => new Map<string, AggModelBucket>());
+    const periodSpeedTrackers = periods.map(() => new RecentSpeedTracker());
     const daily = new Map<string, any>(), hourly = new Map<string, any>();
+    const customDaily = customRange ? new Map<string, DailyTokenUsage>() : null;
+    const customHourly = customRange?.isSingleDay ? new Map<string, HourlyTokenUsage>() : null;
     const accounts = new Map<string, AvailableAccountUsageOption>();
     accounts.set('all', { id: 'all', label: bt('usage.all_accounts'), type: 'all', total_tokens: 0, request_count: 0 });
     for (const account of options.accounts)
@@ -528,7 +590,7 @@ export function aggregateLedger(db: DatabaseSync, options: AggregateOptions): To
         const list: IndexedLedgerRow[] = [];
         for (const row of db.prepare('SELECT e.payload FROM events e LEFT JOIN event_aliases a ON a.legacy_key=e.event_key WHERE a.legacy_key IS NULL').iterate()) {
             const event = JSON.parse(String(row.payload)) as LedgerEvent;
-            event.model = resolveDatabaseModelFullName(event.model, null);
+            hydrateIndexedLedgerEvent(event);
             const isSynthetic = event.db_file === 'recovered_session.db' || event.db_file === 'recovered_enterprise_session.db';
             const evEnv = normalizeEventEnvironment(event);
             const dryEntry = event.event_key ? dryRunLocks?.get(event.event_key) : undefined;
@@ -548,6 +610,7 @@ export function aggregateLedger(db: DatabaseSync, options: AggregateOptions): To
                 hasRawLock,
             });
         }
+        list.sort((a, b) => a.event.timestamp_seconds - b.event.timestamp_seconds || (a.event.event_key ?? '').localeCompare(b.event.event_key ?? ''));
         return list;
     };
 
@@ -616,17 +679,58 @@ export function aggregateLedger(db: DatabaseSync, options: AggregateOptions): To
             if (!matchesEnv)
                 continue;
 
+            const addToModelMap = (
+                map: Map<string, AggModelBucket>,
+                bucketKey: string,
+                thinkingEffort?: ThinkingEffortLevel
+            ) => {
+                let bucket = map.get(bucketKey);
+                if (!bucket) {
+                    bucket = {
+                        model: event.model,
+                        ...(thinkingEffort ? { thinking_effort: thinkingEffort } : {}),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cached_tokens: 0,
+                        cache_write_tokens: 0,
+                        total_tokens: 0,
+                        request_count: 0,
+                        estimated_usd: 0,
+                        unpriced_tokens: 0,
+                        speedTracker: new RecentSpeedTracker(),
+                    };
+                    map.set(bucketKey, bucket);
+                }
+                for (const key of ['input_tokens', 'output_tokens', 'cached_tokens', 'cache_write_tokens', 'total_tokens'] as const)
+                    bucket[key] += event[key] ?? 0;
+                bucket.request_count++;
+                bucket.estimated_usd += cost ?? 0;
+                if (cost === null)
+                    bucket.unpriced_tokens += event.total_tokens;
+                bucket.speedTracker.add(event);
+            };
+            const inCustomRange = Boolean(
+                customRange &&
+                event.timestamp_seconds > 0 &&
+                event.timestamp_seconds >= customRange.startSec &&
+                event.timestamp_seconds < customRange.endExclusiveSec
+            );
             const tomorrowStartSeconds = tomorrow.getTime() / 1000;
-            const flags = [event.timestamp_seconds >= today.getTime() / 1000 && event.timestamp_seconds < tomorrowStartSeconds,
+            const flags = [
+                event.timestamp_seconds >= today.getTime() / 1000 && event.timestamp_seconds < tomorrowStartSeconds,
                 event.timestamp_seconds >= seven.getTime() / 1000 && event.timestamp_seconds < tomorrowStartSeconds,
-                event.timestamp_seconds >= thirty.getTime() / 1000 && event.timestamp_seconds < tomorrowStartSeconds, true];
-            for (let index = 0; index < 4; index++)
+                event.timestamp_seconds >= thirty.getTime() / 1000 && event.timestamp_seconds < tomorrowStartSeconds,
+                true,
+                ...(customRange ? [inCustomRange] : []),
+            ];
+            for (let index = 0; index < periodCount; index++)
                 if (flags[index]) {
                     const result = periods[index]!;
                     for (const key of ['input_tokens', 'output_tokens', 'cached_tokens', 'cache_write_tokens', 'total_tokens'] as const)
                         result.totals[key] = (result.totals[key] ?? 0) + (event[key] ?? 0);
                     result.totals.request_count++;
                     result.estimated_usd += cost ?? 0;
+                    periodSpeedTrackers[index]!.add(event);
                     const envBucket = periodEnvCounters[index]!;
                     if (evEnv.kind === 'ssh') {
                         envBucket.sshTokens += event.total_tokens;
@@ -637,34 +741,36 @@ export function aggregateLedger(db: DatabaseSync, options: AggregateOptions): To
                         envBucket.localRequests += 1;
                         envBucket.localUsd += cost ?? 0;
                     }
-                    const model = models[index]!.get(event.model) ?? { model: event.model, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cache_write_tokens: 0, total_tokens: 0, request_count: 0, estimated_usd: 0, unpriced_tokens: 0 };
-                    for (const key of ['input_tokens', 'output_tokens', 'cached_tokens', 'cache_write_tokens', 'total_tokens'] as const)
-                        model[key] += event[key] ?? 0;
-                    model.request_count++;
-                    model.estimated_usd += cost ?? 0;
-                    if (cost === null)
-                        model.unpriced_tokens += event.total_tokens;
-                    models[index]!.set(event.model, model);
+                    addToModelMap(models[index]!, event.model);
+                    const effort = event.thinking_effort;
+                    addToModelMap(effortModels[index]!, `${event.model}\0${effort ?? ''}`, effort);
                 }
             if (event.timestamp_seconds <= 0) {
                 unknownCount++;
                 unknownTokens += event.total_tokens;
                 continue;
             }
+            const addTrend = (map: Map<string, any>, key: string, attribute: string) => {
+                const value = map.get(key) ?? { [attribute]: key, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cache_write_tokens: 0, total_tokens: 0, request_count: 0 };
+                for (const column of ['input_tokens', 'output_tokens', 'cached_tokens', 'cache_write_tokens', 'total_tokens'] as const)
+                    value[column] += event[column] ?? 0;
+                value.request_count++;
+                map.set(key, value);
+            };
+            const eventDate = new Date(event.timestamp_seconds * 1000);
+            const eventDay = formatLocalDate(eventDate);
+            if (inCustomRange && customDaily) {
+                addTrend(customDaily, eventDay, 'date');
+                if (customHourly) {
+                    addTrend(customHourly, `${eventDay} ${String(eventDate.getHours()).padStart(2, '0')}:00`, 'hour');
+                }
+            }
             // 次日零点之后的轻微未来时钟偏移事件仍保留在 all_time 中，但不写入 daily_trends，防止 7/30 天趋势切片右移一天
             if (event.timestamp_seconds < tomorrowStartSeconds) {
                 if (event.timestamp_seconds < minPositiveTs) minPositiveTs = event.timestamp_seconds;
-                const date = new Date(event.timestamp_seconds * 1000), day = formatLocalDate(date);
-                const addTrend = (map: Map<string, any>, key: string, attribute: string) => {
-                    const value = map.get(key) ?? { [attribute]: key, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cache_write_tokens: 0, total_tokens: 0, request_count: 0 };
-                    for (const column of ['input_tokens', 'output_tokens', 'cached_tokens', 'cache_write_tokens', 'total_tokens'] as const)
-                        value[column] += event[column] ?? 0;
-                    value.request_count++;
-                    map.set(key, value);
-                };
-                addTrend(daily, day, 'date');
+                addTrend(daily, eventDay, 'date');
                 if (flags[0])
-                    addTrend(hourly, `${day} ${String(date.getHours()).padStart(2, '0')}:00`, 'hour');
+                    addTrend(hourly, `${eventDay} ${String(eventDate.getHours()).padStart(2, '0')}:00`, 'hour');
             }
         }
         if (writeTxOpened) {
@@ -705,17 +811,17 @@ export function aggregateLedger(db: DatabaseSync, options: AggregateOptions): To
         receiptSyncTimes
     );
 
-    for (let index = 0; index < 4; index++) {
-        const result = periods[index]!;
-        const envCounter = periodEnvCounters[index]!;
-        result.by_model = [...models[index]!.values()].map(model => {
+    const finalizeModelMap = (map: Map<string, AggModelBucket>): ModelTokenUsage[] =>
+        [...map.values()].map(({ speedTracker, thinking_effort, ...model }) => {
             const isPriced = model.unpriced_tokens === 0;
             const isPartial = model.unpriced_tokens > 0 && model.unpriced_tokens < model.total_tokens;
             const matchedPricingKey = matchPricingKeys(model.model, extraPriceKeys);
             const entry = options.prices[model.model] ?? options.prices[matchedPricingKey];
             const price = resolvePricingForTimestamp(entry, now, model.model);
+            const speed = speedTracker.summary();
             return {
                 ...model,
+                ...(thinking_effort ? { thinking_effort } : {}),
                 estimated_usd: Math.round(model.estimated_usd * 1e8) / 1e8,
                 priced: isPriced,
                 ...(isPartial ? { partiallyPriced: true } : {}),
@@ -724,8 +830,25 @@ export function aggregateLedger(db: DatabaseSync, options: AggregateOptions): To
                     pricingStatus: price ? priceStatus(price, now * 1000) : 'historical',
                     pricingProvenance: price?.provenance ?? null,
                 } : {}),
+                median_output_tps: speed.median_output_tps,
+                speed_sample_count: speed.speed_sample_count,
             };
-        }).sort((a, b) => b.total_tokens - a.total_tokens);
+        }).sort((a, b) =>
+            b.total_tokens - a.total_tokens ||
+            a.model.localeCompare(b.model) ||
+            (a.thinking_effort ?? '').localeCompare(b.thinking_effort ?? '')
+        );
+
+    for (let index = 0; index < periodCount; index++) {
+        const result = periods[index]!;
+        const envCounter = periodEnvCounters[index]!;
+        const periodSpeed = periodSpeedTrackers[index]!.summary();
+        result.totals.median_output_tps = periodSpeed.median_output_tps;
+        result.totals.speed_sample_count = periodSpeed.speed_sample_count;
+        result.median_output_tps = periodSpeed.median_output_tps;
+        result.speed_sample_count = periodSpeed.speed_sample_count;
+        result.by_model = finalizeModelMap(models[index]!);
+        result.by_model_effort = finalizeModelMap(effortModels[index]!);
         result.priced_models = result.by_model.filter(model => model.priced).length;
         result.unpriced_models = result.by_model.length - result.priced_models;
         result.estimated_usd = Math.round(result.estimated_usd * 1e8) / 1e8;
@@ -753,18 +876,44 @@ export function aggregateLedger(db: DatabaseSync, options: AggregateOptions): To
         if (!daily.has(key))
             daily.set(key, { date: key, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cache_write_tokens: 0, total_tokens: 0, request_count: 0 });
     }
+    if (customRange && customDaily && customRange.dayCount <= 366) {
+        const [sy, sm, sd] = customRange.startDate.split('-').map(Number);
+        const cur = new Date(sy!, sm! - 1, sd!, 0, 0, 0, 0);
+        for (let i = 0; i < customRange.dayCount; i++) {
+            const key = formatLocalDate(cur);
+            if (!customDaily.has(key)) {
+                customDaily.set(key, { date: key, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cache_write_tokens: 0, total_tokens: 0, request_count: 0 });
+            }
+            cur.setDate(cur.getDate() + 1);
+        }
+    }
     const accountId = selectedAccountId;
-    const snapshot: LedgerSnapshot = { revision, generatedAt: now, accountId, environmentId: selectedEnvId, rateRevision };
+    const snapshot: LedgerSnapshot = {
+        revision,
+        generatedAt: now,
+        accountId,
+        environmentId: selectedEnvId,
+        rateRevision,
+        ...(customRange ? { customRange } : {}),
+    };
+    const customHashPart = customRange ? [`custom:${customRange.startDate}:${customRange.endDate}`] : [];
     const hashInput = selectedEnvId === 'all'
-        ? [revision, accountId, formatLocalDate(today), options.prices]
-        : [revision, accountId, selectedEnvId, formatLocalDate(today), options.prices];
+        ? [revision, accountId, formatLocalDate(today), options.prices, ...customHashPart]
+        : [revision, accountId, selectedEnvId, formatLocalDate(today), options.prices, ...customHashPart];
     const hash = createHash('sha256').update(JSON.stringify(hashInput)).digest('hex').slice(0, 20);
     snapshot.snapshotId = hash;
     if (!dryRunLocks) {
         db.prepare('INSERT INTO snapshot_pins VALUES(?,?,?) ON CONFLICT(snapshot_id) DO UPDATE SET expires=excluded.expires').run(hash, revision, Date.now() + 600000);
     }
     const receipts = db.prepare('SELECT COUNT(*) AS count,COALESCE(SUM(l.usd),0) AS usd FROM rate_locks l LEFT JOIN events e ON e.event_key=l.event_key LEFT JOIN event_aliases a ON a.legacy_key=l.event_key WHERE e.event_key IS NULL AND a.legacy_key IS NULL').get();
-    return { unattributed_requests: unattributedRequests, unattributed_tokens: unattributedTokens, historical_amount_receipts: { unmatchedCount: Number(receipts?.count ?? 0), unmatchedUsd: Number(receipts?.usd ?? 0) }, today: periods[0]!, last_7_days: periods[1]!, last_30_days: periods[2]!, all_time: periods[3]!, daily_trends: [...daily.values()].sort((a, b) => a.date.localeCompare(b.date)), today_hourly: [...hourly.values()].sort((a, b) => a.hour.localeCompare(b.hour)),
+    return { unattributed_requests: unattributedRequests, unattributed_tokens: unattributedTokens, historical_amount_receipts: { unmatchedCount: Number(receipts?.count ?? 0), unmatchedUsd: Number(receipts?.usd ?? 0) }, today: periods[0]!, last_7_days: periods[1]!, last_30_days: periods[2]!, all_time: periods[3]!,
+        ...(customRange ? {
+            custom: periods[4]!,
+            custom_range: customRange,
+            custom_daily_trends: customDaily ? [...customDaily.values()].sort((a, b) => a.date.localeCompare(b.date)) : [],
+            ...(customRange.isSingleDay && customHourly ? { custom_hourly: [...customHourly.values()].sort((a, b) => a.hour.localeCompare(b.hour)) } : {}),
+        } : {}),
+        daily_trends: [...daily.values()].sort((a, b) => a.date.localeCompare(b.date)), today_hourly: [...hourly.values()].sort((a, b) => a.hour.localeCompare(b.hour)),
         available_accounts: [...accounts.values()], selected_account_id: accountId,
         available_environments: availableEnvironments, selected_environment_id: selectedEnvId,
         environment_breakdown: periods[3]!.environment_breakdown,
@@ -799,6 +948,7 @@ export function ledgerEventPage(db: DatabaseSync, options: {
     targetEmail?: string;
     accountId?: string;
     environmentId?: string;
+    customRange?: CustomDateRange;
 }) {
     const { snapshot } = options;
     if (!snapshot.snapshotId || !db.prepare('SELECT 1 AS pinned FROM snapshot_pins WHERE snapshot_id=? AND expires>=?').get(snapshot.snapshotId, Date.now()))
@@ -806,6 +956,10 @@ export function ledgerEventPage(db: DatabaseSync, options: {
     db.prepare('UPDATE snapshot_pins SET expires=? WHERE snapshot_id=?').run(Date.now() + 600000, snapshot.snapshotId);
     if (db.prepare('SELECT 1 AS changed FROM rate_changes WHERE version>? AND min_event_seq<=? LIMIT 1').get(snapshot.rateRevision, snapshot.revision))
         throw Error(bt('usage.err.rates_changed_reexport'));
+    const effectiveCustomRange = options.period === 'custom' ? (options.customRange ?? snapshot.customRange) : undefined;
+    if (options.period === 'custom' && !effectiveCustomRange) {
+        throw Error(bt('usage.err.custom_range_required', undefined, 'Custom date range is required'));
+    }
     const snapshotAccId = snapshot.accountId && snapshot.accountId.trim() ? snapshot.accountId.trim() : 'all';
     const requestedAccId = options.accountId && options.accountId.trim() ? options.accountId.trim() : undefined;
     if (snapshotAccId !== 'all' && requestedAccId && requestedAccId !== snapshotAccId) {
@@ -874,7 +1028,10 @@ export function ledgerEventPage(db: DatabaseSync, options: {
         ...likePatterns,
         ...aliasMatches,
     ];
-    if (options.period !== 'all') {
+    if (options.period === 'custom' && effectiveCustomRange) {
+        conditions.push('r.timestamp>=? AND r.timestamp<?');
+        params.push(effectiveCustomRange.startSec, effectiveCustomRange.endExclusiveSec);
+    } else if (options.period !== 'all') {
         conditions.push('r.timestamp>=? AND r.timestamp<?');
         params.push(start.getTime() / 1000, end.getTime() / 1000);
     }
@@ -898,10 +1055,19 @@ export function ledgerEventPage(db: DatabaseSync, options: {
     const total = Number(db.prepare(`SELECT COUNT(*) AS count FROM event_revisions r WHERE ${where}`).get(...params)?.count);
     const rows = db.prepare(`SELECT r.payload,l.unit_price FROM event_revisions r LEFT JOIN rate_locks l ON l.event_key=r.event_key WHERE ${where} ORDER BY r.timestamp DESC,r.seq DESC LIMIT ? OFFSET ?`).all(...params, options.limit, options.offset).map(row => {
         const event = JSON.parse(String(row.payload)) as LedgerEvent;
-        event.model = resolveDatabaseModelFullName(event.model, null);
+        const rawModel = event.model;
+        const thinkingEffort =
+            normalizeThinkingEffort(event.thinking_effort) ??
+            (rawModel ? extractThinkingEffort(rawModel) : undefined);
+        event.model = resolveDatabaseModelFullName(rawModel, null);
         const price = row.unit_price ? JSON.parse(String(row.unit_price)) as ApiPricing : null;
         const cost = event.timestamp_seconds > 0 ? calculateLockedEventUsd(event, price) : null;
         const env = normalizeEventEnvironment(event);
+        const outputTpsRaw = computeEventOutputTps(event);
+        const outputTps =
+            outputTpsRaw !== null
+                ? (Math.round(outputTpsRaw * 100) / 100 || Number(outputTpsRaw.toPrecision(2)))
+                : null;
         const {
             event_key: _key,
             source_id: _source,
@@ -909,10 +1075,13 @@ export function ledgerEventPage(db: DatabaseSync, options: {
             db_file: _dbFile,
             trajectory_id: _traj,
             execution: _exec,
+            thinking_effort: _rawEffort,
             ...publicEvent
         } = event;
         return {
             ...publicEvent,
+            ...(thinkingEffort ? { thinking_effort: thinkingEffort } : {}),
+            ...(outputTps !== null ? { output_tps: outputTps } : {}),
             environment_kind: env.kind,
             environment_id: env.id,
             environment_label: env.label,

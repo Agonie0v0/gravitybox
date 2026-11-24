@@ -5,12 +5,14 @@ import { atomicJson } from './files.js';
 import { cleanHostLabel, sanitizeHostLabel } from './ssh-context.js';
 import type { LiveLanguageServerStatus } from './accounts.js';
 import {
+  parseConnectDurationSeconds,
   parseConnectTimestampSeconds,
   type RemoteGenMetadataRecord,
   type RemoteRpcClientLike,
   type RemoteStepRecord,
   type RemoteTrajectorySummary,
 } from './ssh-remote-rpc.js';
+import { extractThinkingEffort, type ThinkingEffortLevel } from './model-identity.js';
 import { resolveDatabaseModelFullName } from './usage-types.js';
 
 export type RemoteAccountConfidence = 'observed' | 'inferred' | 'unknown';
@@ -66,12 +68,15 @@ export interface RemoteGenerationEvent {
   generation_index: number;
   account_confidence: RemoteAccountConfidence;
   model: string;
+  thinking_effort?: ThinkingEffortLevel;
   input_tokens: number;
   output_tokens: number;
   cached_tokens: number;
   cache_write_tokens?: number;
   total_tokens: number;
   timestamp_seconds: number;
+  streaming_duration_seconds?: number;
+  ttft_seconds?: number;
   account_id?: string;
   account_email?: string;
   account_type?: RemoteAccountType;
@@ -719,30 +724,49 @@ export class RemoteAccountObservationStore {
   }
 }
 
-function resolveEventModelName(
+function resolveEventModelInfo(
   rec: RemoteGenMetadataRecord,
   linkedStep: RemoteStepRecord | undefined,
   summary: RemoteTrajectorySummary,
   siblingModelIds?: ReadonlySet<string>
-): string {
-  const rawId = pickNonEmptyString(
+): { model: string; thinkingEffort?: ThinkingEffortLevel } {
+  const candidates = [
     rec.responseModel,
     typeof rec.model === 'string' ? rec.model : undefined,
     typeof rec.usage?.model === 'string' ? rec.usage.model : undefined,
     rec.plannerModel?.modelName,
     linkedStep?.metadata?.generatorModel,
     linkedStep?.metadata?.requestedModel,
-    summary.requestedModel
-  );
+    summary.requestedModel,
+  ];
+  const rawId = pickNonEmptyString(...candidates);
   const rawLabel = pickNonEmptyString(rec.modelDisplayName);
   const modelEnum =
     (typeof rec.model === 'number' && rec.model > 0 ? rec.model : undefined) ??
     (typeof rec.usage?.model === 'number' && rec.usage.model > 0 ? rec.usage.model : undefined);
 
-  return resolveDatabaseModelFullName(rawId || undefined, rawLabel || undefined, modelEnum, {
+  let thinkingEffort = extractThinkingEffort(rawId || undefined, rawLabel || undefined);
+  if (!thinkingEffort) {
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim()) {
+        thinkingEffort = extractThinkingEffort(candidate.trim(), rawLabel || undefined);
+        if (thinkingEffort) break;
+      }
+    }
+  }
+
+  const model = resolveDatabaseModelFullName(rawId || undefined, rawLabel || undefined, modelEnum, {
     canonicalUnknown: true,
     ...(siblingModelIds && siblingModelIds.size > 0 ? { siblingModelIds } : {}),
   });
+  return { model, thinkingEffort };
+}
+
+function normalizeRemoteDurationSeconds(raw: unknown): number | undefined {
+  const sec = parseConnectDurationSeconds(raw);
+  if (sec === null || !Number.isFinite(sec) || sec <= 0 || sec > 86400) return undefined;
+  const rounded = Math.round(sec * 1e6) / 1e6;
+  return rounded > 0 ? rounded : undefined;
 }
 
 function resolveLinkedStep(
@@ -1297,7 +1321,9 @@ export async function syncRemoteSessionUsage(
 
       const executionId =
         typeof rec.executionId === 'string' && rec.executionId.trim() ? rec.executionId.trim() : undefined;
-      const model = resolveEventModelName(rec, linkedStep, summary, siblingModelIds);
+      const { model, thinkingEffort } = resolveEventModelInfo(rec, linkedStep, summary, siblingModelIds);
+      const ttftSeconds = normalizeRemoteDurationSeconds(rec.timeToFirstToken);
+      const streamingDurationSeconds = normalizeRemoteDurationSeconds(rec.streamingDuration);
       const eventKey = buildRemoteEventKey(remoteSourceId, genIdx, executionId);
 
       let attribution: RemoteAttributionResult;
@@ -1321,12 +1347,15 @@ export async function syncRemoteSessionUsage(
         generation_index: genIdx,
         account_confidence: attribution.account_confidence,
         model,
+        ...(thinkingEffort ? { thinking_effort: thinkingEffort } : {}),
         input_tokens: inputTokens,
         output_tokens: outputTokens,
         cached_tokens: cachedTokens,
         ...(cacheWriteTokens > 0 ? { cache_write_tokens: cacheWriteTokens } : {}),
         total_tokens: totalTokens,
         timestamp_seconds: tsSec,
+        ...(streamingDurationSeconds !== undefined ? { streaming_duration_seconds: streamingDurationSeconds } : {}),
+        ...(ttftSeconds !== undefined ? { ttft_seconds: ttftSeconds } : {}),
         ...(attribution.account_id ? { account_id: attribution.account_id } : {}),
         ...(attribution.account_email ? { account_email: attribution.account_email } : {}),
         ...(attribution.account_type ? { account_type: attribution.account_type } : {}),

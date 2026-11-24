@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 import { withProcessLease } from './process-lock.js';
-import type { GenerationEvent, SyncReceipt, TokenUsageSummary } from './usage-types.js';
+import type { CustomDateRange, GenerationEvent, SyncReceipt, TokenUsageSummary } from './usage-types.js';
 import type { ApiPricingEntry } from './pricing.js';
 import type { AggregateOptions, LedgerSnapshot } from './usage-aggregate.js';
 import { bt, getActiveLocale } from './i18n.js';
@@ -179,6 +179,7 @@ export class UsageLedger {
         targetEmail?: string;
         accountId?: string;
         environmentId?: string;
+        customRange?: CustomDateRange;
     }): Promise<{
         rows: any[];
         total: number;

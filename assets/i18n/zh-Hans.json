@@ -955,7 +955,15 @@
     "usage.env.historical_fallback_notice": "历史主机暂无实时配额，已切回本机配额。",
     "menu_panel.usage.scope_all_summary": "全部环境用量",
     "menu_panel.usage.scope_local_summary": "本机用量",
-    "menu_panel.usage.scope_remote_summary": "{host} 用量"
+    "menu_panel.usage.scope_remote_summary": "{host} 用量",
+    "usage.period.custom": "自定义",
+    "usage.custom.start_date": "开始日期",
+    "usage.custom.end_date": "结束日期",
+    "usage.custom.invalid_range": "开始日期不能晚于结束日期",
+    "usage.trend_title.custom": "自定义时段用量",
+    "usage.section.output_speed": "输出速率",
+    "usage.speed.median_desc": "最近 {count} 次回复中位数",
+    "usage.speed.no_samples": "暂无流式耗时样本"
   },
   "backend": {
     "status.starting": "正在连接本机服务…",
@@ -1698,7 +1706,12 @@
     "proxy.err.invalid_host_port": "代理主机或端口无效",
     "proxy.err.invalid_port": "代理端口无效（需为 1–65535 之间的整数）",
     "proxy.err.invalid_mode": "代理模式无效（仅支持 off、system 或 manual）",
-    "proxy.err.manual_url_must_be_string": "手动代理地址必须为字符串"
+    "proxy.err.manual_url_must_be_string": "手动代理地址必须为字符串",
+    "usage.err.invalid_date_format": "{field} 格式无效：需要 YYYY-MM-DD",
+    "usage.err.invalid_calendar_date": "无效的日历日期：{date}",
+    "usage.err.invalid_date_range": "开始日期不能晚于结束日期",
+    "usage.err.date_range_too_large": "自定义日期范围不能超过 {max} 天",
+    "usage.err.custom_range_required": "必须提供自定义日期范围"
   },
   "hud": {
     "toolbarLabel": "Antigravity 对话遥测状态栏",

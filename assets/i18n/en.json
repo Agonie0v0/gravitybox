@@ -955,7 +955,15 @@
     "usage.env.historical_fallback_notice": "Historical hosts have no live quota; switched back to local.",
     "menu_panel.usage.scope_all_summary": "All environments usage",
     "menu_panel.usage.scope_local_summary": "Local usage",
-    "menu_panel.usage.scope_remote_summary": "{host} usage"
+    "menu_panel.usage.scope_remote_summary": "{host} usage",
+    "usage.period.custom": "Custom",
+    "usage.custom.start_date": "Start Date",
+    "usage.custom.end_date": "End Date",
+    "usage.custom.invalid_range": "Start date cannot be later than end date",
+    "usage.trend_title.custom": "Custom Range Usage",
+    "usage.section.output_speed": "Output Speed",
+    "usage.speed.median_desc": "Median of last {count} replies",
+    "usage.speed.no_samples": "No streaming speed samples yet"
   },
   "backend": {
     "status.starting": "Connecting to local service…",
@@ -1698,7 +1706,12 @@
     "proxy.err.invalid_host_port": "Invalid proxy host or port",
     "proxy.err.invalid_port": "Invalid proxy port (expected 1-65535)",
     "proxy.err.invalid_mode": "Invalid proxy mode (expected \"off\", \"system\", or \"manual\")",
-    "proxy.err.manual_url_must_be_string": "Proxy manualUrl must be a string"
+    "proxy.err.manual_url_must_be_string": "Proxy manualUrl must be a string",
+    "usage.err.invalid_date_format": "Invalid {field}: expected YYYY-MM-DD",
+    "usage.err.invalid_calendar_date": "Invalid calendar date: {date}",
+    "usage.err.invalid_date_range": "Start date must be on or before end date",
+    "usage.err.date_range_too_large": "Custom date range cannot exceed {max} days",
+    "usage.err.custom_range_required": "Custom date range is required"
   },
   "hud": {
     "toolbarLabel": "Antigravity Conversation Telemetry Bar",

@@ -4,7 +4,9 @@ import {
   stripModelProviderPrefix,
   THINKING_EFFORT_SUFFIX_RE,
   TIERED_OR_THINKING_EFFORT_SUFFIX_RE,
+  type ThinkingEffortLevel,
 } from './model-identity.js';
+export type { ThinkingEffortLevel };
 import {
   getEffectiveModelAliasKeys,
   getEffectiveModelPriceAlias,
@@ -15,6 +17,15 @@ import type { LedgerEvent } from './usage-ledger.js';
 import { USAGE_PROJECTION_VERSION } from './protobuf-projection.js';
 import { bt } from './i18n.js';
 
+export interface CustomDateRange {
+  startDate: string;
+  endDate: string;
+  startSec: number;
+  endExclusiveSec: number;
+  isSingleDay: boolean;
+  dayCount: number;
+}
+
 export interface TokenUsageTotals {
   input_tokens: number;
   output_tokens: number;
@@ -22,10 +33,13 @@ export interface TokenUsageTotals {
   cache_write_tokens?: number;
   total_tokens: number;
   request_count: number;
+  median_output_tps?: number | null;
+  speed_sample_count?: number;
 }
 
 export interface ModelTokenUsage {
   model: string;
+  thinking_effort?: ThinkingEffortLevel | null;
   input_tokens: number;
   output_tokens: number;
   cached_tokens: number;
@@ -37,6 +51,8 @@ export interface ModelTokenUsage {
   partiallyPriced?: boolean;
   unpriced_tokens?: number;
   pricingKey?: string; pricingStatus?: string; pricingProvenance?: ApiPricing["provenance"] | null;
+  median_output_tps?: number | null;
+  speed_sample_count?: number;
 }
 
 export interface DailyTokenUsage {
@@ -143,7 +159,10 @@ export interface EnvironmentShareBreakdown {
 export interface TokenUsagePeriod {
   totals: TokenUsageTotals;
   estimated_usd: number;
+  median_output_tps?: number | null;
+  speed_sample_count?: number;
   by_model: ModelTokenUsage[];
+  by_model_effort?: ModelTokenUsage[];
   priced_models?: number;
   unpriced_models?: number;
   environment_breakdown?: EnvironmentShareBreakdown;
@@ -154,6 +173,10 @@ export interface TokenUsageSummary {
   last_7_days: TokenUsagePeriod;
   last_30_days: TokenUsagePeriod;
   all_time: TokenUsagePeriod;
+  custom?: TokenUsagePeriod;
+  custom_range?: CustomDateRange;
+  custom_daily_trends?: DailyTokenUsage[];
+  custom_hourly?: HourlyTokenUsage[];
   daily_trends: DailyTokenUsage[];
   today_hourly: HourlyTokenUsage[];
   databases_scanned: number;
@@ -213,12 +236,15 @@ export interface GenerationEvent {
   trajectory_id?: string;
   execution?: string;
   model: string;
+  thinking_effort?: ThinkingEffortLevel;
   input_tokens: number;
   output_tokens: number;
   cached_tokens: number;
   cache_write_tokens?: number;
   total_tokens: number;
   timestamp_seconds: number;
+  streaming_duration_seconds?: number;
+  ttft_seconds?: number;
   account_id?: string;
   account_email?: string;
   account_type?: 'consumer' | 'enterprise_vertex' | 'unknown';

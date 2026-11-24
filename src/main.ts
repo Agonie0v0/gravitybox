@@ -3,6 +3,7 @@ import { GoogleAccountLogin } from './account-oauth.js';
 import { AccountSwitchService } from './account-switch.js';
 import { AccountsManager, accountCredentialReadiness, accountErrorCode, cleanAndLocalizeRefreshError, computeStandbyRefreshStatus, getGoogleClientId, getGoogleClientSecret, hasExpiredQuotaWindow, type Account, type QuotaData } from './accounts.js';
 import { UsageStatsManager } from './usage.js';
+import { parseLocalDateRange } from './usage-speed.js';
 import {
   buildPricingCatalogPayloadSnapshot,
   readInstalledAppBundleVersion,
@@ -1864,7 +1865,8 @@ async function run() {
           }
           if (command === 'usage_snapshot_release') { usageManager.releaseSnapshot(String(parsed.snapshotId ?? '')); reply({ ok: true }); return; }
           if (command === 'usage_events') {
-            const period = ['today', '7d', '30d', 'all'].includes(String(parsed.period)) ? String(parsed.period) : 'today';
+            const period = ['today', '7d', '30d', 'all', 'custom'].includes(String(parsed.period)) ? String(parsed.period) : 'today';
+            const customRange = period === 'custom' ? parseLocalDateRange(parsed.startDate, parsed.endDate) : undefined;
             const force = Boolean(parsed.force);
             const targetAccountId = typeof parsed.accountId === 'string' && parsed.accountId ? parsed.accountId : undefined;
             const targetEnvironmentId = typeof parsed.environmentId === 'string' && parsed.environmentId ? parsed.environmentId : undefined;
@@ -1885,12 +1887,15 @@ async function run() {
                 parsed.pinSnapshot === true,
                 force,
                 targetAccountId,
-                targetEnvironmentId
+                targetEnvironmentId,
+                customRange
               ),
             });
             return;
           }
           if (command === 'usage_summary') {
+            const period = typeof parsed.period === 'string' ? parsed.period : 'all';
+            const customRange = period === 'custom' ? parseLocalDateRange(parsed.startDate, parsed.endDate) : undefined;
             const force = Boolean(parsed.force);
             const targetAccountId = typeof parsed.accountId === 'string' && parsed.accountId ? parsed.accountId : undefined;
             const targetEnvironmentId = typeof parsed.environmentId === 'string' && parsed.environmentId ? parsed.environmentId : undefined;
@@ -1900,7 +1905,7 @@ async function run() {
             } else {
               syncRemoteTargetStateAndMaybeTriggerSync();
             }
-            const usage = await usageManager.getUsageSummary(force, targetAccountId, targetEnvironmentId);
+            const usage = await usageManager.getUsageSummary(force, targetAccountId, targetEnvironmentId, customRange);
             if (usage.generated_at && usage.generated_at > 0) {
               cachedLocalUsageSyncedAtSec = usage.generated_at;
             }

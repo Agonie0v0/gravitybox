@@ -10,9 +10,16 @@ import { matchPricingKeys, priceStatus, type ApiPricing, type ApiPricingEntry } 
 import { bt } from './i18n.js';
 import { cleanHostLabel } from './ssh-context.js';
 import {
+  extractThinkingEffort,
+  normalizeThinkingEffort,
+  type ThinkingEffortLevel,
+} from './model-identity.js';
+import { RecentSpeedTracker } from './usage-speed.js';
+import {
   normalizeEventEnvironment,
   resolveDatabaseModelFullName,
   type AvailableAccountUsageOption,
+  type CustomDateRange,
   type DailyTokenUsage,
   type GenerationEvent,
   type HourlyTokenUsage,
@@ -55,6 +62,7 @@ export interface BuildUsageReportInput {
   environments?: KnownEnvironmentContext[];
   remoteSyncRevision?: number;
   receiptSyncTimes?: ReadonlyMap<string, number>;
+  customRange?: CustomDateRange;
 }
 
 export function classifyUsageWarningCode(message: string): string {
@@ -108,6 +116,7 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
     environments,
     remoteSyncRevision,
     receiptSyncTimes,
+    customRange,
   } = input;
 
   // 局部浅拷贝防止本次计算的临时告警（如 receipts_unmatched）永久污染调用方的持久 storageWarnings 集合
@@ -166,6 +175,8 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
   const thirtyDaysStart = Math.floor(thirtyDaysDate.getTime() / 1000);
 
   type ModelStatsBucket = {
+    model: string;
+    thinkingEffort?: ThinkingEffortLevel;
     in: number;
     out: number;
     cached: number;
@@ -174,9 +185,12 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
     count: number;
     cost: number;
     unpricedTokens: number;
+    speedTracker: RecentSpeedTracker;
   };
   type PeriodBucket = {
     modelMap: Map<string, ModelStatsBucket>;
+    effortModelMap: Map<string, ModelStatsBucket>;
+    speedTracker: RecentSpeedTracker;
     totalIn: number;
     totalOut: number;
     totalCached: number;
@@ -193,6 +207,8 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
   };
   const makePeriodBucket = (): PeriodBucket => ({
     modelMap: new Map(),
+    effortModelMap: new Map(),
+    speedTracker: new RecentSpeedTracker(),
     totalIn: 0,
     totalOut: 0,
     totalCached: 0,
@@ -207,32 +223,30 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
     localUsd: 0,
     sshUsd: 0,
   });
-  const recordToBucket = (
-    bucket: PeriodBucket,
+  const addEventToModelStats = (
+    map: Map<string, ModelStatsBucket>,
+    bucketKey: string,
+    modelName: string,
     ev: GenerationEvent,
     evCost: number | null,
-    modelName: string,
-    envKind: 'local' | 'ssh'
+    thinkingEffort?: ThinkingEffortLevel
   ) => {
-    bucket.totalIn += ev.input_tokens;
-    bucket.totalOut += ev.output_tokens;
-    bucket.totalCached += ev.cached_tokens;
-    bucket.totalWrite += ev.cache_write_tokens ?? 0;
-    bucket.totalAll += ev.total_tokens;
-    bucket.totalCount++;
-    if (envKind === 'ssh') {
-      bucket.sshTokens += ev.total_tokens;
-      bucket.sshRequests++;
-      if (evCost !== null) bucket.sshUsd += evCost;
-    } else {
-      bucket.localTokens += ev.total_tokens;
-      bucket.localRequests++;
-      if (evCost !== null) bucket.localUsd += evCost;
-    }
-    let entry = bucket.modelMap.get(modelName);
+    let entry = map.get(bucketKey);
     if (!entry) {
-      entry = { in: 0, out: 0, cached: 0, write: 0, total: 0, count: 0, cost: 0, unpricedTokens: 0 };
-      bucket.modelMap.set(modelName, entry);
+      entry = {
+        model: modelName,
+        ...(thinkingEffort ? { thinkingEffort } : {}),
+        in: 0,
+        out: 0,
+        cached: 0,
+        write: 0,
+        total: 0,
+        count: 0,
+        cost: 0,
+        unpricedTokens: 0,
+        speedTracker: new RecentSpeedTracker(),
+      };
+      map.set(bucketKey, entry);
     }
     entry.in += ev.input_tokens;
     entry.out += ev.output_tokens;
@@ -242,19 +256,59 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
     entry.count++;
     if (evCost !== null) {
       entry.cost += evCost;
-      bucket.periodUsd += evCost;
     } else {
       entry.unpricedTokens += ev.total_tokens;
     }
+    entry.speedTracker.add(ev);
+  };
+  const recordToBucket = (
+    bucket: PeriodBucket,
+    ev: GenerationEvent,
+    evCost: number | null,
+    modelName: string,
+    effort: ThinkingEffortLevel | undefined,
+    envKind: 'local' | 'ssh'
+  ) => {
+    bucket.totalIn += ev.input_tokens;
+    bucket.totalOut += ev.output_tokens;
+    bucket.totalCached += ev.cached_tokens;
+    bucket.totalWrite += ev.cache_write_tokens ?? 0;
+    bucket.totalAll += ev.total_tokens;
+    bucket.totalCount++;
+    bucket.speedTracker.add(ev);
+    if (envKind === 'ssh') {
+      bucket.sshTokens += ev.total_tokens;
+      bucket.sshRequests++;
+      if (evCost !== null) bucket.sshUsd += evCost;
+    } else {
+      bucket.localTokens += ev.total_tokens;
+      bucket.localRequests++;
+      if (evCost !== null) bucket.localUsd += evCost;
+    }
+    if (evCost !== null) {
+      bucket.periodUsd += evCost;
+    }
+    addEventToModelStats(bucket.modelMap, modelName, modelName, ev, evCost);
+    addEventToModelStats(
+      bucket.effortModelMap,
+      `${modelName}\0${effort ?? ''}`,
+      modelName,
+      ev,
+      evCost,
+      effort
+    );
   };
 
   const allTimeBucket = makePeriodBucket();
   const todayBucket = makePeriodBucket();
   const sevenDaysBucket = makePeriodBucket();
   const thirtyDaysBucket = makePeriodBucket();
+  const customBucket = customRange ? makePeriodBucket() : null;
 
   const hourlyMap = new Map<string, HourlyTokenUsage>();
   const dailyMap = new Map<string, DailyTokenUsage>();
+  const customDailyMap = customRange ? new Map<string, DailyTokenUsage>() : null;
+  const customHourlyMap = customRange?.isSingleDay ? new Map<string, HourlyTokenUsage>() : null;
   let earliestStartDate = new Date(thirtyDaysDate);
   const maxBackfillDate = new Date(todayDate);
   maxBackfillDate.setDate(maxBackfillDate.getDate() - 365);
@@ -371,13 +425,17 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
         allSshEnvsSeen.set(evEnv.id, cleanedLabel);
       }
     }
-    const modelName = resolveDatabaseModelFullName(ev.model, null);
+    const rawModel = ev.model;
+    const effort =
+      normalizeThinkingEffort(ev.thinking_effort) ??
+      (rawModel ? extractThinkingEffort(rawModel) : undefined);
+    const modelName = resolveDatabaseModelFullName(rawModel, null);
     const ts = ev.timestamp_seconds;
     const evCost = ts > 0
       ? lockedCost(ev, resolvePricing(rawPricing, modelName, ts))
       : null;
     recordEnvStat(evEnv, ev.total_tokens, evCost);
-    recordToBucket(allTimeBucket, ev, evCost, modelName, evEnv.kind);
+    recordToBucket(allTimeBucket, ev, evCost, modelName, effort, evEnv.kind);
 
     if (ts <= 0) {
       unknownTimeRecords++;
@@ -386,17 +444,9 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
     }
 
     const d = new Date(ts * 1000);
-    if (ts < tomorrowStart) {
-      if (!capturedEarliestPositive) {
-        capturedEarliestPositive = true;
-        const evDay = new Date(d);
-        evDay.setHours(0, 0, 0, 0);
-        const clamped = evDay < maxBackfillDate ? maxBackfillDate : evDay;
-        if (clamped < earliestStartDate) earliestStartDate = clamped;
-      }
-
-      const dateStr = formatLocalDate(d);
-      let dEntry = dailyMap.get(dateStr);
+    const dateStr = formatLocalDate(d);
+    const addDailyTrend = (map: Map<string, DailyTokenUsage>) => {
+      let dEntry = map.get(dateStr);
       if (!dEntry) {
         dEntry = {
           date: dateStr,
@@ -406,7 +456,7 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
           total_tokens: 0,
           request_count: 0,
         };
-        dailyMap.set(dateStr, dEntry);
+        map.set(dateStr, dEntry);
       }
       dEntry.input_tokens += ev.input_tokens;
       dEntry.output_tokens += ev.output_tokens;
@@ -414,34 +464,53 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
       if (ev.cache_write_tokens) dEntry.cache_write_tokens = (dEntry.cache_write_tokens ?? 0) + ev.cache_write_tokens;
       dEntry.total_tokens += ev.total_tokens;
       dEntry.request_count++;
+    };
+    const addHourlyTrend = (map: Map<string, HourlyTokenUsage>) => {
+      const hourStr = `${dateStr} ${String(d.getHours()).padStart(2, '0')}:00`;
+      let hEntry = map.get(hourStr);
+      if (!hEntry) {
+        hEntry = {
+          hour: hourStr,
+          input_tokens: 0,
+          output_tokens: 0,
+          cached_tokens: 0,
+          total_tokens: 0,
+          request_count: 0,
+        };
+        map.set(hourStr, hEntry);
+      }
+      hEntry.input_tokens += ev.input_tokens;
+      hEntry.output_tokens += ev.output_tokens;
+      hEntry.cached_tokens += ev.cached_tokens;
+      if (ev.cache_write_tokens) hEntry.cache_write_tokens = (hEntry.cache_write_tokens ?? 0) + ev.cache_write_tokens;
+      hEntry.total_tokens += ev.total_tokens;
+      hEntry.request_count++;
+    };
+
+    if (customRange && customBucket && ts >= customRange.startSec && ts < customRange.endExclusiveSec) {
+      recordToBucket(customBucket, ev, evCost, modelName, effort, evEnv.kind);
+      if (customDailyMap) addDailyTrend(customDailyMap);
+      if (customHourlyMap) addHourlyTrend(customHourlyMap);
+    }
+
+    if (ts < tomorrowStart) {
+      if (!capturedEarliestPositive) {
+        capturedEarliestPositive = true;
+        const evDay = new Date(d);
+        evDay.setHours(0, 0, 0, 0);
+        const clamped = evDay < maxBackfillDate ? maxBackfillDate : evDay;
+        if (clamped < earliestStartDate) earliestStartDate = clamped;
+      }
+      addDailyTrend(dailyMap);
     }
 
     if (ts >= thirtyDaysStart && ts < tomorrowStart) {
-      recordToBucket(thirtyDaysBucket, ev, evCost, modelName, evEnv.kind);
+      recordToBucket(thirtyDaysBucket, ev, evCost, modelName, effort, evEnv.kind);
       if (ts >= sevenDaysStart) {
-        recordToBucket(sevenDaysBucket, ev, evCost, modelName, evEnv.kind);
+        recordToBucket(sevenDaysBucket, ev, evCost, modelName, effort, evEnv.kind);
         if (ts >= todayStart) {
-          recordToBucket(todayBucket, ev, evCost, modelName, evEnv.kind);
-          const dateStr = formatLocalDate(d);
-          const hourStr = `${dateStr} ${String(d.getHours()).padStart(2, '0')}:00`;
-          let hEntry = hourlyMap.get(hourStr);
-          if (!hEntry) {
-            hEntry = {
-              hour: hourStr,
-              input_tokens: 0,
-              output_tokens: 0,
-              cached_tokens: 0,
-              total_tokens: 0,
-              request_count: 0,
-            };
-            hourlyMap.set(hourStr, hEntry);
-          }
-          hEntry.input_tokens += ev.input_tokens;
-          hEntry.output_tokens += ev.output_tokens;
-          hEntry.cached_tokens += ev.cached_tokens;
-          if (ev.cache_write_tokens) hEntry.cache_write_tokens = (hEntry.cache_write_tokens ?? 0) + ev.cache_write_tokens;
-          hEntry.total_tokens += ev.total_tokens;
-          hEntry.request_count++;
+          recordToBucket(todayBucket, ev, evCost, modelName, effort, evEnv.kind);
+          addHourlyTrend(hourlyMap);
         }
       }
     }
@@ -459,6 +528,24 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
         total_tokens: 0,
         request_count: 0,
       });
+    }
+  }
+  if (customRange && customDailyMap && customRange.dayCount <= 366) {
+    const [sy, sm, sd] = customRange.startDate.split('-').map(Number);
+    const cur = new Date(sy!, sm! - 1, sd!, 0, 0, 0, 0);
+    for (let i = 0; i < customRange.dayCount; i++) {
+      const curStr = formatLocalDate(cur);
+      if (!customDailyMap.has(curStr)) {
+        customDailyMap.set(curStr, {
+          date: curStr,
+          input_tokens: 0,
+          output_tokens: 0,
+          cached_tokens: 0,
+          total_tokens: 0,
+          request_count: 0,
+        });
+      }
+      cur.setDate(cur.getDate() + 1);
     }
   }
 
@@ -483,19 +570,27 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
     return cachedMeta;
   };
 
-  const finalizePeriod = (bucket: PeriodBucket): TokenUsagePeriod => {
-    const byModel: ModelTokenUsage[] = [];
+  const finalizeModelMap = (
+    map: Map<string, ModelStatsBucket>,
+    countPricingStatus: boolean
+  ): { items: ModelTokenUsage[]; pricedCount: number; unpricedCount: number } => {
+    const items: ModelTokenUsage[] = [];
     let pricedCount = 0;
     let unpricedCount = 0;
 
-    for (const [mName, stats] of bucket.modelMap.entries()) {
+    for (const stats of map.values()) {
+      const mName = stats.model;
       const { currentPrice, canonicalKey } = getCurrentModelMeta(mName);
       const isPriced = stats.unpricedTokens === 0;
+      const speed = stats.speedTracker.summary();
       if (isPriced || stats.cost > 0) {
-        if (isPriced) pricedCount++; else unpricedCount++;
+        if (countPricingStatus) {
+          if (isPriced) pricedCount++; else unpricedCount++;
+        }
         const mUsd = Math.round(stats.cost * 1e8) / 1e8;
-        byModel.push({
+        items.push({
           model: mName,
+          ...(stats.thinkingEffort ? { thinking_effort: stats.thinkingEffort } : {}),
           input_tokens: stats.in,
           output_tokens: stats.out,
           cached_tokens: stats.cached,
@@ -509,11 +604,14 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
           pricingKey: canonicalKey || mName,
           pricingStatus: currentPrice ? priceStatus(currentPrice, now * 1000) : 'historical',
           pricingProvenance: currentPrice?.provenance ?? null,
+          median_output_tps: speed.median_output_tps,
+          speed_sample_count: speed.speed_sample_count,
         });
       } else {
-        unpricedCount++;
-        byModel.push({
+        if (countPricingStatus) unpricedCount++;
+        items.push({
           model: mName,
+          ...(stats.thinkingEffort ? { thinking_effort: stats.thinkingEffort } : {}),
           input_tokens: stats.in,
           output_tokens: stats.out,
           cached_tokens: stats.cached,
@@ -523,11 +621,24 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
           estimated_usd: 0,
           priced: false,
           unpriced_tokens: stats.unpricedTokens,
+          median_output_tps: speed.median_output_tps,
+          speed_sample_count: speed.speed_sample_count,
         });
       }
     }
 
-    byModel.sort((a, b) => b.total_tokens - a.total_tokens);
+    items.sort((a, b) =>
+      b.total_tokens - a.total_tokens ||
+      a.model.localeCompare(b.model) ||
+      (a.thinking_effort ?? '').localeCompare(b.thinking_effort ?? '')
+    );
+    return { items, pricedCount, unpricedCount };
+  };
+
+  const finalizePeriod = (bucket: PeriodBucket): TokenUsagePeriod => {
+    const { items: byModel, pricedCount, unpricedCount } = finalizeModelMap(bucket.modelMap, true);
+    const { items: byModelEffort } = finalizeModelMap(bucket.effortModelMap, false);
+    const periodSpeed = bucket.speedTracker.summary();
 
     return {
       totals: {
@@ -537,9 +648,14 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
         ...(bucket.totalWrite > 0 ? { cache_write_tokens: bucket.totalWrite } : {}),
         total_tokens: bucket.totalAll,
         request_count: bucket.totalCount,
+        median_output_tps: periodSpeed.median_output_tps,
+        speed_sample_count: periodSpeed.speed_sample_count,
       },
       estimated_usd: Math.round(bucket.periodUsd * 1e8) / 1e8,
+      median_output_tps: periodSpeed.median_output_tps,
+      speed_sample_count: periodSpeed.speed_sample_count,
       by_model: byModel,
+      by_model_effort: byModelEffort,
       priced_models: pricedCount,
       unpriced_models: unpricedCount,
       environment_breakdown: buildPeriodEnvironmentBreakdown(
@@ -560,6 +676,7 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
   const todayPeriod = finalizePeriod(todayBucket);
   const sevenDaysPeriod = finalizePeriod(sevenDaysBucket);
   const thirtyDaysPeriod = finalizePeriod(thirtyDaysBucket);
+  const customPeriod = customBucket ? finalizePeriod(customBucket) : undefined;
   const unmatchedReceipts = Object.entries(rateLocks).filter(([key]) => !knownReceiptKeys.has(key));
   if (unmatchedReceipts.length) reportStorageWarnings.add(bt('usage.warn.receipts_unmatched'));
   const hasUnknownTime = unknownTimeRecords > 0;
@@ -569,6 +686,12 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
     last_7_days: sevenDaysPeriod,
     last_30_days: thirtyDaysPeriod,
     all_time: allTimePeriod,
+    ...(customRange && customPeriod ? {
+      custom: customPeriod,
+      custom_range: customRange,
+      custom_daily_trends: customDailyMap ? [...customDailyMap.values()].sort((a, b) => a.date.localeCompare(b.date)) : [],
+      ...(customRange.isSingleDay && customHourlyMap ? { custom_hourly: [...customHourlyMap.values()].sort((a, b) => a.hour.localeCompare(b.hour)) } : {}),
+    } : {}),
     unattributed_requests: effectiveUnattributedRequests,
     unattributed_tokens: effectiveUnattributedTokens,
     historical_amount_receipts: { unmatchedCount: unmatchedReceipts.length, unmatchedUsd: unmatchedReceipts.reduce((sum, [, receipt]) => sum + receipt.usd, 0) },
@@ -604,8 +727,9 @@ export function buildUsageSummaryReport(input: BuildUsageReportInput): TokenUsag
       const hash = createHash('sha256');
       hash.update(`account:${accKey}\n`);
       if (selectedEnvId !== 'all') hash.update(`env:${selectedEnvId}\n`);
+      if (customRange) hash.update(`custom:${customRange.startDate}:${customRange.endDate}\n`);
       for (const ev of allEvents) {
-        hash.update(`${ev.model}|${ev.timestamp_seconds}|${ev.input_tokens}|${ev.output_tokens}|${ev.cached_tokens}|${ev.cache_write_tokens ?? 0}|${ev.total_tokens}\n`);
+        hash.update(`${ev.model}|${ev.thinking_effort ?? ''}|${ev.timestamp_seconds}|${ev.input_tokens}|${ev.output_tokens}|${ev.cached_tokens}|${ev.cache_write_tokens ?? 0}|${ev.total_tokens}|${ev.streaming_duration_seconds ?? ''}|${ev.ttft_seconds ?? ''}\n`);
         hash.update(`locked-cost:${ev.event_key ? rateLocks[ev.event_key]?.usd ?? 'unpriced' : 'unpriced'}\n`);
       }
       hash.update(JSON.stringify([pricing, calKey]));

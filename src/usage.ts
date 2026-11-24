@@ -24,6 +24,8 @@ import {
   type ApiPricingEntry,
   type ApiPricingInterval,
 } from './pricing.js';
+import { extractThinkingEffort, normalizeThinkingEffort } from './model-identity.js';
+import { computeEventOutputTps } from './usage-speed.js';
 import {
   isFileCacheEntryReusable,
   ledgerEventsEqual,
@@ -31,6 +33,7 @@ import {
   resolveDatabaseModelFullName,
   type AvailableAccountUsageOption,
   type AvailableEnvironmentUsageOption,
+  type CustomDateRange,
   type DailyTokenUsage,
   type EnvironmentShareBreakdown,
   type FileCacheEntry,
@@ -66,6 +69,7 @@ export {
   resolveDatabaseModelFullName,
   type AvailableAccountUsageOption,
   type AvailableEnvironmentUsageOption,
+  type CustomDateRange,
   type DailyTokenUsage,
   type EnvironmentShareBreakdown,
   type GenerationEvent,
@@ -95,6 +99,7 @@ export class UsageStatsManager {
   private inFlightForced = false;
   private inFlightAccountKey = 'all';
   private inFlightEnvironmentKey = 'all';
+  private inFlightCustomRangeKey = '';
   private pendingForced?: Promise<TokenUsageSummary>;
   private pricingMutation?: Promise<unknown>;
   private pricingRevalueApplying?: Promise<void>;
@@ -279,8 +284,9 @@ export class UsageStatsManager {
     return this.ledger.revalue({ action: 'preview', mode, prices: await this.getBillingPricingTable(), accounts: [], liveFiles, now: Math.floor(Date.now() / 1000) });
   }
 
-  private getSummaryCacheKey(accountId?: string, environmentId?: string): string {
-    return `${accountId || 'all'}|env:${environmentId || 'all'}`;
+  private getSummaryCacheKey(accountId?: string, environmentId?: string, customRange?: CustomDateRange): string {
+    const base = `${accountId || 'all'}|env:${environmentId || 'all'}`;
+    return customRange ? `${base}|custom:${customRange.startDate}:${customRange.endDate}` : base;
   }
 
   private runSerializedLedgerSave<T>(fn: () => Promise<T>): Promise<T> {
@@ -568,7 +574,12 @@ export class UsageStatsManager {
         );
         if (validEvents.length !== entry.events.length) throw Error(bt('usage.err.archive_corrupt_event'));
         for (const e of validEvents) {
-          e.model = resolveDatabaseModelFullName(e.model, null);
+          const rawModel = e.model;
+          const inferredEffort =
+            normalizeThinkingEffort(e.thinking_effort) ??
+            (rawModel ? extractThinkingEffort(rawModel) : undefined);
+          if (inferredEffort) e.thinking_effort = inferredEffort;
+          e.model = resolveDatabaseModelFullName(rawModel, null);
         }
         this.archivedByDb.set(key, {
           archivedAt: typeof entry.archivedAt === 'string' ? entry.archivedAt : new Date(0).toISOString(),
@@ -693,7 +704,12 @@ export class UsageStatsManager {
           continue;
         }
         if (event.account_confidence === 'legacy') this.storageWarnings.add(bt('usage.warn.legacy_account_confidence'));
-        event.model = resolveDatabaseModelFullName(event.model, null);
+        const rawModel = event.model;
+        const inferredEffort =
+          normalizeThinkingEffort(event.thinking_effort) ??
+          (rawModel ? extractThinkingEffort(rawModel) : undefined);
+        if (inferredEffort) event.thinking_effort = inferredEffort;
+        event.model = resolveDatabaseModelFullName(rawModel, null);
         this.setLedgerEventInMap(event.event_key!, event);
       }
       this.usageLedgerLoaded = true;
@@ -800,7 +816,21 @@ export class UsageStatsManager {
       if (previous.trajectory_id) {
         next.trajectory_id = previous.trajectory_id;
       }
+      if (!next.thinking_effort && previous.thinking_effort) {
+        next.thinking_effort = previous.thinking_effort;
+      } else if (next.thinking_effort === 'thinking' && previous.thinking_effort && previous.thinking_effort !== 'thinking') {
+        next.thinking_effort = previous.thinking_effort;
+      }
+      if (next.streaming_duration_seconds === undefined && previous.streaming_duration_seconds !== undefined) {
+        next.streaming_duration_seconds = previous.streaming_duration_seconds;
+      }
+      if (next.ttft_seconds === undefined && previous.ttft_seconds !== undefined) {
+        next.ttft_seconds = previous.ttft_seconds;
+      }
     }
+    if (next.thinking_effort === undefined) delete next.thinking_effort;
+    if (next.streaming_duration_seconds === undefined) delete next.streaming_duration_seconds;
+    if (next.ttft_seconds === undefined) delete next.ttft_seconds;
     return next;
   }
 
@@ -907,9 +937,14 @@ export class UsageStatsManager {
           environment_id: raw.environment_id,
           environment_label: raw.environment_label,
         });
+        const rawModel = raw.model;
+        const resolvedEffort =
+          normalizeThinkingEffort(raw.thinking_effort) ??
+          (typeof rawModel === 'string' && rawModel ? extractThinkingEffort(rawModel) : undefined);
         return {
           ...raw,
-          model: resolveDatabaseModelFullName(raw.model, null, undefined, { canonicalUnknown: true }),
+          model: resolveDatabaseModelFullName(rawModel, null, undefined, { canonicalUnknown: true }),
+          ...(resolvedEffort ? { thinking_effort: resolvedEffort } : {}),
           environment_kind: raw.environment_kind ?? env.kind,
           environment_id: raw.environment_id ?? env.id,
           environment_label: raw.environment_label ?? env.label,
@@ -1018,6 +1053,17 @@ export class UsageStatsManager {
           }
           if ((candidate.source_observed_at ?? 0) > (previous.source_observed_at ?? 0)) {
             previous = { ...previous, source_observed_at: candidate.source_observed_at };
+          }
+          if (!previous.thinking_effort && candidate.thinking_effort) {
+            previous = { ...previous, thinking_effort: candidate.thinking_effort };
+          } else if (previous.thinking_effort === 'thinking' && candidate.thinking_effort && candidate.thinking_effort !== 'thinking') {
+            previous = { ...previous, thinking_effort: candidate.thinking_effort };
+          }
+          if (previous.streaming_duration_seconds === undefined && candidate.streaming_duration_seconds !== undefined) {
+            previous = { ...previous, streaming_duration_seconds: candidate.streaming_duration_seconds };
+          }
+          if (previous.ttft_seconds === undefined && candidate.ttft_seconds !== undefined) {
+            previous = { ...previous, ttft_seconds: candidate.ttft_seconds };
           }
         }
       }
@@ -1660,18 +1706,28 @@ export class UsageStatsManager {
     pin = false,
     force = false,
     accountId?: string,
-    environmentId?: string
+    environmentId?: string,
+    customRange?: CustomDateRange
   ) {
+    if (period === 'custom' && !snapshotId && !customRange) {
+      throw Error(bt('usage.err.custom_range_required', undefined, 'Custom date range is required'));
+    }
     const accKey = accountId || 'all';
     const envKey = environmentId || 'all';
-    const cacheKey = this.getSummaryCacheKey(accKey, envKey);
-    if (!snapshotId || force) await this.getUsageSummary(force, accountId, environmentId);
+    const cacheKey = this.getSummaryCacheKey(accKey, envKey, period === 'custom' ? customRange : undefined);
+    if (!snapshotId || force) await this.getUsageSummary(force, accountId, environmentId, period === 'custom' ? customRange : undefined);
     const snapshot = (!force && snapshotId)
       ? this.snapshots.get(snapshotId)
       : this.snapshots.get(this.cachedSummariesByAccount.get(cacheKey)?.data.snapshot_id ?? '');
     if (!snapshot || snapshot.expires<Date.now()) throw Error(bt('usage.err.snapshot_expired'));
     if (pin) snapshot.pins++;
     if (snapshot.pins > 0) snapshot.expires = Date.now()+600000;
+    const effectiveCustomRange = period === 'custom'
+      ? (customRange ?? snapshot.ledger?.customRange ?? snapshot.summary.custom_range)
+      : undefined;
+    if (period === 'custom' && !effectiveCustomRange) {
+      throw Error(bt('usage.err.custom_range_required', undefined, 'Custom date range is required'));
+    }
     if (snapshot.ledger) {
       const snapshotAccountId = snapshot.ledger.accountId ?? 'all';
       if (accountId && snapshotAccountId !== 'all' && accountId !== snapshotAccountId) {
@@ -1695,6 +1751,7 @@ export class UsageStatsManager {
         limit: Math.min(500, Math.max(1, Math.floor(limit) || 200)),
         targetEmail,
         environmentId: effectiveEnvironmentId,
+        ...(effectiveCustomRange ? { customRange: effectiveCustomRange } : {}),
       });
       return { ...page, generated_at: snapshot.summary.generated_at, snapshot_id: snapshot.summary.snapshot_id, availability: snapshot.summary.availability, scope: snapshot.summary.scan_scope_description };
     }
@@ -1712,9 +1769,9 @@ export class UsageStatsManager {
     const start = new Date(summary.generated_at*1000); start.setHours(0, 0, 0, 0);
     if (period === '7d') start.setDate(start.getDate() - 6);
     if (period === '30d') start.setDate(start.getDate() - 29);
-    const cutoff = period === 'all' ? 0 : start.getTime() / 1000;
+    const cutoff = period === 'custom' && effectiveCustomRange ? effectiveCustomRange.startSec : (period === 'all' ? 0 : start.getTime() / 1000);
     const end = new Date(summary.generated_at*1000); end.setHours(24,0,0,0);
-    const upper = end.getTime()/1000;
+    const upper = period === 'custom' && effectiveCustomRange ? effectiveCustomRange.endExclusiveSec : (end.getTime()/1000);
     const matcher = createModelQueryMatcher(query);
     let events = snapshot.events.filter(e => (period === 'all' || (e.timestamp_seconds >= cutoff && e.timestamp_seconds < upper)) && matcher(e.model));
     if (effectiveAccountId === 'unattributed') {
@@ -1735,9 +1792,19 @@ export class UsageStatsManager {
     const safeLimit = Math.min(500, Math.max(1, Math.floor(limit) || 200));
     const pricingSource = rawPricing ?? prices;
     const rows = events.slice().reverse().slice(safeOffset, safeOffset + safeLimit).map(e => {
-      const price = this.resolvePricing(pricingSource, e.model, e.timestamp_seconds);
+      const rawModel = e.model;
+      const thinkingEffort =
+        normalizeThinkingEffort(e.thinking_effort) ??
+        (rawModel ? extractThinkingEffort(rawModel) : undefined);
+      const resolvedModel = resolveDatabaseModelFullName(rawModel, null);
+      const price = this.resolvePricing(pricingSource, resolvedModel, e.timestamp_seconds);
       const cost = this.lockedCost(e, price);
       const env = normalizeEventEnvironment(e);
+      const outputTpsRaw = computeEventOutputTps(e);
+      const outputTps =
+        outputTpsRaw !== null
+          ? (Math.round(outputTpsRaw * 100) / 100 || Number(outputTpsRaw.toPrecision(2)))
+          : null;
       const {
         event_key: _key,
         source_id: _source,
@@ -1745,10 +1812,14 @@ export class UsageStatsManager {
         db_file: _dbFile,
         trajectory_id: _traj,
         execution: _exec,
+        thinking_effort: _rawEffort,
         ...publicEvent
       } = e as LedgerEvent;
       return {
         ...publicEvent,
+        model: resolvedModel,
+        ...(thinkingEffort ? { thinking_effort: thinkingEffort } : {}),
+        ...(outputTps !== null ? { output_tps: outputTps } : {}),
         environment_kind: env.kind,
         environment_id: env.id,
         environment_label: env.label,
@@ -1780,29 +1851,32 @@ export class UsageStatsManager {
    * 收集并聚合全量 Token 统计与 API 账单报告（带 30 秒内存 TTL 缓存）
    */
   cancelRead() { this.scanAbort?.abort(new Error(bt('usage.err.read_cancelled'))); return !!this.scanAbort; }
-  async getUsageSummary(forceRefresh = false, accountId?: string, environmentId?: string): Promise<TokenUsageSummary> {
+  async getUsageSummary(forceRefresh = false, accountId?: string, environmentId?: string, customRange?: CustomDateRange): Promise<TokenUsageSummary> {
     while (this.pricingMutation) await this.pricingMutation.catch(() => {});
     const accKey = accountId || 'all';
     const envKey = environmentId || 'all';
+    const customKey = customRange ? `${customRange.startDate}:${customRange.endDate}` : '';
     if(this.inFlight) {
-      if(this.inFlightAccountKey===accKey && this.inFlightEnvironmentKey===envKey && (!forceRefresh||this.inFlightForced)) return this.inFlight;
-      if(this.inFlightAccountKey!==accKey || this.inFlightEnvironmentKey!==envKey) {
-        return this.inFlight.catch(()=>{}).then(()=>this.getUsageSummary(forceRefresh, accountId, environmentId));
+      if(this.inFlightAccountKey===accKey && this.inFlightEnvironmentKey===envKey && this.inFlightCustomRangeKey===customKey && (!forceRefresh||this.inFlightForced)) return this.inFlight;
+      if(this.inFlightAccountKey!==accKey || this.inFlightEnvironmentKey!==envKey || this.inFlightCustomRangeKey!==customKey) {
+        return this.inFlight.catch(()=>{}).then(()=>this.getUsageSummary(forceRefresh, accountId, environmentId, customRange));
       }
-      if(!this.pendingForced)this.pendingForced=this.inFlight.catch(()=>{}).then(()=>this.getUsageSummary(true, accountId, environmentId)).finally(()=>{this.pendingForced=undefined;});
+      if(!this.pendingForced)this.pendingForced=this.inFlight.catch(()=>{}).then(()=>this.getUsageSummary(true, accountId, environmentId, customRange)).finally(()=>{this.pendingForced=undefined;});
       return this.pendingForced;
     }
     const abort=this.scanAbort=new AbortController(), timer=setTimeout(()=>abort.abort(new Error(bt('usage.err.read_timeout_budget'))),30000);timer.unref();
     this.inFlightForced=forceRefresh;
     this.inFlightAccountKey=accKey;
     this.inFlightEnvironmentKey=envKey;
-    const work=this.collectUsage(forceRefresh,abort.signal,accountId,environmentId);this.inFlight=work;
-    try{return await work;}finally{clearTimeout(timer);if(this.inFlight===work){this.inFlight=undefined;this.scanAbort=undefined;this.inFlightForced=false;this.inFlightAccountKey='all';this.inFlightEnvironmentKey='all';}}
+    this.inFlightCustomRangeKey=customKey;
+    const work=this.collectUsage(forceRefresh,abort.signal,accountId,environmentId,customRange);this.inFlight=work;
+    try{return await work;}finally{clearTimeout(timer);if(this.inFlight===work){this.inFlight=undefined;this.scanAbort=undefined;this.inFlightForced=false;this.inFlightAccountKey='all';this.inFlightEnvironmentKey='all';this.inFlightCustomRangeKey='';}}
   }
-  private async collectUsage(forceRefresh: boolean, signal: AbortSignal, accountId?: string, environmentId?: string): Promise<TokenUsageSummary> {
+  private async collectUsage(forceRefresh: boolean, signal: AbortSignal, accountId?: string, environmentId?: string, customRange?: CustomDateRange): Promise<TokenUsageSummary> {
     const accKey = accountId || 'all';
     const envKey = environmentId || 'all';
-    const cacheKey = this.getSummaryCacheKey(accKey, envKey);
+    const customKey = customRange ? `${customRange.startDate}:${customRange.endDate}` : '';
+    const cacheKey = this.getSummaryCacheKey(accKey, envKey, customRange);
     const nowMs = Date.now();
     const cachedByAcc = this.cachedSummariesByAccount.get(cacheKey);
     if (
@@ -1978,7 +2052,7 @@ export class UsageStatsManager {
       const rawPricing = await this.getBillingPricingTable();
       if (this.rateLocksUnavailable && !this.pricingWarnings.some(w => /费率账本|rate ledger/i.test(w))) this.pricingWarnings.push(bt('usage.warn.rate_ledger_unreadable_no_reprice'));
       const revision = await this.ledger.version();
-      const aggregateKey = JSON.stringify([revision, this.calendarKey(), rawPricing, accKey, envKey, this.knownAccounts, this.remoteSyncRevision, this.onlineRemoteEnvSig, skippedLargeRecords]);
+      const aggregateKey = JSON.stringify([revision, this.calendarKey(), rawPricing, accKey, envKey, this.knownAccounts, this.remoteSyncRevision, this.onlineRemoteEnvSig, skippedLargeRecords, customKey]);
       const prior = this.cachedSummariesByAccount.get(cacheKey)?.data;
       const existingSnapshot = prior?.snapshot_id ? this.snapshots.get(prior.snapshot_id) : undefined;
       const effectiveDbCount = reuseRecentLargeScan ? this.lastLargeLedgerScanMeta!.dbPathsCount : dbPaths.length;
@@ -2008,6 +2082,7 @@ export class UsageStatsManager {
         accounts: this.knownAccounts,
         liveFiles: liveFileNames,
         now: Math.floor(Date.now() / 1000),
+        ...(customRange ? { customRange } : {}),
       });
       const largeStorageWarnings = new Set(this.storageWarnings);
       if (aggregated.ledger_review_records) largeStorageWarnings.add(bt('usage.warn.ledger_review_needed'));
@@ -2028,7 +2103,7 @@ export class UsageStatsManager {
       this.snapshots.set(id, { summary: result, ledger: aggregated.ledger_snapshot, events: [], prices: {}, rawPricing,
         expires: Date.now() + 600000, pins: previous?.pins ?? 0 });
       const ledgerVersion = JSON.stringify([aggregated.ledger_snapshot.revision, aggregated.ledger_snapshot.rateRevision]);
-      this.lastAggregationKeysByAccount.set(cacheKey, JSON.stringify([ledgerVersion, this.calendarKey(), rawPricing, accKey, envKey, this.knownAccounts, this.remoteSyncRevision, this.onlineRemoteEnvSig, skippedLargeRecords]));
+      this.lastAggregationKeysByAccount.set(cacheKey, JSON.stringify([ledgerVersion, this.calendarKey(), rawPricing, accKey, envKey, this.knownAccounts, this.remoteSyncRevision, this.onlineRemoteEnvSig, skippedLargeRecords, customKey]));
       this.cachedSummariesByAccount.set(cacheKey, { data: result, expiresAt: Date.now() + (failedDatabasesCount > 0 ? 2000 : 30000) });
       this.periodKey = this.calendarKey();
       this.clearLedgerEventsMap();
@@ -2292,6 +2367,7 @@ export class UsageStatsManager {
       archivedUnavailable: this.archivedUnavailable,
       storageWarnings: this.storageWarnings,
       pricingWarnings: this.pricingWarnings,
+      ...(customRange ? { customRange } : {}),
     });
 
 

@@ -28,9 +28,13 @@ import {
     type ApiPricing,
     type ApiPricingEntry,
 } from './pricing.js';
+import { normalizeThinkingEffort } from './model-identity.js';
 import { resolveDatabaseModelFullName, type SyncReceipt } from './usage-types.js';
 import { compareFeedFreshness } from './usage-pricing.js';
 import { bt, setActiveLocale } from './i18n.js';
+function isValidOptionalDuration(value: unknown): boolean {
+    return value === undefined || (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 86400);
+}
 export function validLedgerEvent(event: unknown): event is LedgerEvent {
     if (!event || typeof event !== 'object')
         return false;
@@ -40,6 +44,9 @@ export function validLedgerEvent(event: unknown): event is LedgerEvent {
             const value = row[key as keyof LedgerEvent];
             return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
         }) && (row.cache_write_tokens === undefined || Number.isSafeInteger(row.cache_write_tokens) && row.cache_write_tokens >= 0)
+        && (row.thinking_effort === undefined || normalizeThinkingEffort(row.thinking_effort) !== undefined)
+        && isValidOptionalDuration(row.streaming_duration_seconds)
+        && isValidOptionalDuration(row.ttft_seconds)
         && row.total_tokens === row.input_tokens + row.output_tokens + row.cached_tokens + (row.cache_write_tokens ?? 0);
 }
 export function validSyncReceipt(item: unknown): item is SyncReceipt {
@@ -385,6 +392,17 @@ function mergeLegacyMetadataIntoEvent(
     }
     if (!target.timestamp_seconds && old.timestamp_seconds > 0) {
         target.timestamp_seconds = old.timestamp_seconds;
+    }
+    if (!target.thinking_effort && old.thinking_effort) {
+        target.thinking_effort = old.thinking_effort;
+    } else if (target.thinking_effort === 'thinking' && old.thinking_effort && old.thinking_effort !== 'thinking') {
+        target.thinking_effort = old.thinking_effort;
+    }
+    if (target.streaming_duration_seconds === undefined && old.streaming_duration_seconds !== undefined) {
+        target.streaming_duration_seconds = old.streaming_duration_seconds;
+    }
+    if (target.ttft_seconds === undefined && old.ttft_seconds !== undefined) {
+        target.ttft_seconds = old.ttft_seconds;
     }
     if (options?.preserveTargetEnvironment) {
         if (!target.environment_kind && old.environment_kind) target.environment_kind = old.environment_kind;

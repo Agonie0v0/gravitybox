@@ -3,8 +3,9 @@ import { basename, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { DataDirectoryName } from './application-target.js';
 import { runUsageDbScanInWorker } from './sqlite-read.js';
-import { ProtobufReader } from './protobuf.js';
+import { ProtobufReader, skipProtobufField } from './protobuf.js';
 import { USAGE_PROJECTION_VERSION } from './protobuf-projection.js';
+import { extractThinkingEffort } from './model-identity.js';
 import type { LedgerEvent } from './usage-ledger.js';
 import {
   isFileCacheEntryReusable,
@@ -14,6 +15,47 @@ import {
   type TokenUsageSummary,
 } from './usage-types.js';
 import { bt } from './i18n.js';
+
+const MAX_DURATION_SECONDS = 86400;
+
+/**
+ * Parse a google.protobuf.Duration message (varint field 1 seconds + varint field 2 nanos)
+ * bounded to [0, 86400] seconds; returns rounded positive seconds or undefined.
+ */
+export function parseProtobufDurationSeconds(buf: Buffer | Uint8Array | null | undefined): number | undefined {
+  if (!buf || buf.length === 0) return undefined;
+  const rawBuf = Buffer.isBuffer(buf) ? buf : Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
+  let offset = 0;
+  let seconds = 0;
+  let nanos = 0;
+  while (offset < rawBuf.length) {
+    const tagRes = ProtobufReader.readVarint(rawBuf, offset);
+    if (!tagRes) return undefined;
+    const [tag, afterTag] = tagRes;
+    if (!Number.isSafeInteger(tag) || tag <= 0) return undefined;
+    const fieldNum = tag >>> 3;
+    const wireType = tag & 0x07;
+    if (wireType === 0) {
+      const valRes = ProtobufReader.readVarint(rawBuf, afterTag);
+      if (!valRes) return undefined;
+      const [val, nextOffset] = valRes;
+      if (fieldNum === 1) seconds = val;
+      else if (fieldNum === 2) nanos = val;
+      offset = nextOffset;
+    } else {
+      const cursor = { pos: afterTag };
+      if (!skipProtobufField(rawBuf, cursor, wireType)) return undefined;
+      offset = cursor.pos;
+    }
+  }
+  if (!Number.isFinite(seconds) || !Number.isFinite(nanos) || seconds < 0 || nanos < 0 || seconds > MAX_DURATION_SECONDS) {
+    return undefined;
+  }
+  const total = seconds + nanos / 1e9;
+  if (!Number.isFinite(total) || total < 0 || total > MAX_DURATION_SECONDS) return undefined;
+  const rounded = Math.round(total * 1e6) / 1e6;
+  return rounded > 0 ? rounded : undefined;
+}
 
 export interface DiscoveredDbStat {
   dev: number;
@@ -480,6 +522,9 @@ async function scanDatabaseEventsOnce(ctx: UsageScanContext, dbPath: string, byp
     if (!validTimestamp(timestamp)) timestamp = 0;
 
     const modelEnum = ProtobufReader.findVarint(wrapped, 3) ?? ProtobufReader.findVarint(usage, 1) ?? null;
+    const thinkingEffort = extractThinkingEffort(modelId, label);
+    const ttftSeconds = parseProtobufDurationSeconds(ProtobufReader.findField(wrapped, 11));
+    const streamingDurationSeconds = parseProtobufDurationSeconds(ProtobufReader.findField(wrapped, 12));
     const assignedModel = resolveDatabaseModelFullName(modelId, label, modelEnum, {
       canonicalUnknown: true,
       ...(siblingModelIds.size > 0 ? { siblingModelIds } : {}),
@@ -502,12 +547,15 @@ async function scanDatabaseEventsOnce(ctx: UsageScanContext, dbPath: string, byp
       source_id: sourceId, generation_index: Number(row.idx), legacy_event_key: legacyKey,
       account_confidence: canAttributeToCurrent ? 'observed' : 'unknown',
       model: assignedModel,
+      ...(thinkingEffort ? { thinking_effort: thinkingEffort } : {}),
       input_tokens: inputTokens,
       output_tokens: outputTokens,
       cached_tokens: cachedTokens,
       ...(cacheWriteTokens > 0 ? { cache_write_tokens: cacheWriteTokens } : {}),
       total_tokens: totalTokens,
       timestamp_seconds: timestamp,
+      ...(streamingDurationSeconds !== undefined ? { streaming_duration_seconds: streamingDurationSeconds } : {}),
+      ...(ttftSeconds !== undefined ? { ttft_seconds: ttftSeconds } : {}),
       ...(accountId ? { account_id: accountId, account_email: accountEmail } : (accountEmail ? { account_email: accountEmail } : {})),
       ...(accountType ? { account_type: accountType } : {}),
     };

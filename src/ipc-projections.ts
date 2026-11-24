@@ -215,11 +215,21 @@ export function projectSingleUsagePeriod(
   periodInput: unknown,
   environmentsSnapshot?: UsageProjectionEnvironmentsSnapshot
 ) {
-  const periodKey: 'today' | 'last_7_days' | 'last_30_days' | 'all_time' =
-    periodInput === 'today' ? 'today' : periodInput === '7d' ? 'last_7_days' : periodInput === '30d' ? 'last_30_days' : 'all_time';
+  const isCustomPeriod = periodInput === 'custom' && Boolean(usage.custom);
+  const periodKey: 'today' | 'last_7_days' | 'last_30_days' | 'all_time' | 'custom' =
+    periodInput === 'today'
+      ? 'today'
+      : periodInput === '7d'
+        ? 'last_7_days'
+        : periodInput === '30d'
+          ? 'last_30_days'
+          : isCustomPeriod
+            ? 'custom'
+            : 'all_time';
   const p: TokenUsagePeriod = usage[periodKey] ?? usage.all_time;
-  const byModel = p.by_model.map((m: ModelTokenUsage) => ({
+  const projectModelRow = (m: ModelTokenUsage) => ({
     model: m.model,
+    ...(m.thinking_effort ? { thinkingEffort: m.thinking_effort, thinking_effort: m.thinking_effort } : {}),
     promptTokens: m.input_tokens,
     candidatesTokens: m.output_tokens,
     cachedTokens: m.cached_tokens,
@@ -233,6 +243,10 @@ export function projectSingleUsagePeriod(
     pricingKey: m.pricingKey,
     pricingStatus: m.pricingStatus,
     pricingProvenance: localizePricingProvenance(m.pricingProvenance) ?? null,
+    medianOutputTps: m.median_output_tps ?? null,
+    median_output_tps: m.median_output_tps ?? null,
+    speedSampleCount: m.speed_sample_count ?? 0,
+    speed_sample_count: m.speed_sample_count ?? 0,
     input_tokens: m.input_tokens,
     output_tokens: m.output_tokens,
     cached_tokens: m.cached_tokens,
@@ -240,7 +254,11 @@ export function projectSingleUsagePeriod(
     total_tokens: m.total_tokens,
     request_count: m.request_count,
     estimated_usd: m.estimated_usd,
-  }));
+  });
+  const byModel = p.by_model.map(projectModelRow);
+  const byModelEffort = (p.by_model_effort ?? p.by_model).map(projectModelRow);
+  const medianOutputTps = p.median_output_tps ?? p.totals.median_output_tps ?? null;
+  const speedSampleCount = p.speed_sample_count ?? p.totals.speed_sample_count ?? 0;
   const cacheDenom = p.totals.input_tokens + p.totals.cached_tokens + (p.totals.cache_write_tokens ?? 0);
   const cacheHitRate = cacheDenom > 0 ? Math.round((p.totals.cached_tokens / cacheDenom) * 1000) / 10 : 0;
   const lastScannedAt = (usage.availability === 'cached'
@@ -266,6 +284,10 @@ export function projectSingleUsagePeriod(
     requestCount: p.totals.request_count,
     estimatedUsd: p.estimated_usd,
     cacheHitRate,
+    medianOutputTps,
+    median_output_tps: medianOutputTps,
+    speedSampleCount,
+    speed_sample_count: speedSampleCount,
     total_tokens: p.totals.total_tokens,
     input_tokens: p.totals.input_tokens,
     output_tokens: p.totals.output_tokens,
@@ -307,11 +329,30 @@ export function projectSingleUsagePeriod(
     unattributedTokens: usage.unattributed_tokens ?? 0,
     unattributed_tokens: usage.unattributed_tokens ?? 0,
   };
-  const { today: _t, last_7_days: _w, last_30_days: _m, all_time: _a, daily_trends, today_hourly, ...selectedSummary } = periodSummary;
+  const {
+    today: _t,
+    last_7_days: _w,
+    last_30_days: _m,
+    all_time: _a,
+    custom: _c,
+    custom_range,
+    custom_daily_trends,
+    custom_hourly,
+    daily_trends,
+    today_hourly,
+    ...selectedSummary
+  } = periodSummary;
   const safeDailyTrends = Array.isArray(daily_trends) ? daily_trends : [];
   const safeTodayHourly = Array.isArray(today_hourly) ? today_hourly : [];
   const days = periodInput === 'today' ? 1 : periodInput === '7d' ? 7 : periodInput === '30d' ? 30 : null;
-  const selectedTrends = days ? safeDailyTrends.slice(-days) : safeDailyTrends;
+  const selectedTrends =
+    periodInput === 'custom'
+      ? (Array.isArray(custom_daily_trends) ? custom_daily_trends : [])
+      : (days ? safeDailyTrends.slice(-days) : safeDailyTrends);
+  const selectedHourly =
+    periodInput === 'custom'
+      ? (custom_range?.isSingleDay && Array.isArray(custom_hourly) ? custom_hourly : [])
+      : (periodInput === 'today' ? safeTodayHourly : []);
   return {
     ok: true,
     period: typeof periodInput === 'string' ? periodInput : 'all',
@@ -339,8 +380,11 @@ export function projectSingleUsagePeriod(
     summary: selectedSummary,
     byModel,
     models: byModel,
+    byModelEffort,
+    by_model_effort: byModelEffort,
+    ...(periodInput === 'custom' && custom_range ? { customRange: custom_range, custom_range } : {}),
     dailyTrends: selectedTrends,
-    todayHourly: periodInput === 'today' ? safeTodayHourly : [],
+    todayHourly: selectedHourly,
   };
 }
 

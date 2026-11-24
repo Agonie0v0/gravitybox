@@ -66,8 +66,8 @@ async function withFixture(t, fn) {
   return fn({ root, stateDir, geminiDir, convDir });
 }
 
-test('USAGE_PROJECTION_VERSION bumped to 3 invalidates v2 fileCache entries', () => {
-  assert.equal(USAGE_PROJECTION_VERSION, 3);
+test('USAGE_PROJECTION_VERSION bumped to 4 invalidates v2/v3 fileCache entries', () => {
+  assert.equal(USAGE_PROJECTION_VERSION, 4);
   assert.equal(
     isFileCacheEntryReusable({
       hasError: false,
@@ -83,6 +83,15 @@ test('USAGE_PROJECTION_VERSION bumped to 3 invalidates v2 fileCache entries', ()
       skippedLargeRecords: 0,
       size: 4096,
       projectionVersion: 3,
+    }),
+    false
+  );
+  assert.equal(
+    isFileCacheEntryReusable({
+      hasError: false,
+      skippedLargeRecords: 0,
+      size: 4096,
+      projectionVersion: 4,
     }),
     true
   );
