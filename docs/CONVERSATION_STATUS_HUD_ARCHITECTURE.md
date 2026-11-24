@@ -1,6 +1,6 @@
 # Conversation Status HUD 指标与展示合同
 
-适用分支：main / 1.2.0。更新日期：2026-11-24。
+适用分支：main / 1.2.1（兼容 1.2.0+）。更新日期：2026-11-24。
 
 ## 统计范围
 
@@ -72,8 +72,9 @@ Token 账本仅从步骤用量累计一次。生成记录用于匹配计时和�
 - **分区标题收敛**：当全部可见非活跃阶段均尚无实测用量（`hasUsageData !== true`）时，分区标题（`#lbl-ctx-stages`）展示为“待切换模型 / Pending Model”；只要存在至少一个具备实测用量的非活跃模型，统一展示为“曾用模型上下文 / Prior Model Context”。
 - **物理模型去重与角色保留**：按物理 `modelId` 做 1:1 去重（待介入的 Orchestrator 阶段槽位直接吸收同 `modelId` 历史步骤并保留 `planner`/`executor` 角色），列表中每个曾经在 Orchestrator 中担任 `planner` / `executor` 的具名模型在模型名右侧渲染 `.hud-role-badge` 角色胶囊（无具名模型的待介入占位保留“规划阶段 / 执行阶段”）。
 
-## v1.2.0 BTW 分栏与 SSH 远程窗口合同
+## v1.2.0 / v1.2.1 BTW 分栏、SSH 远程窗口与历史角色合同
 
 - **BTW 侧边提问分栏（`2.34.0+`）**：分栏类型扩展为 `HudPaneKind = 'main' | 'subagent' | 'btw'`（`session.isBtwTrajectory`），BTW 侧边提问拥有独立物理 DOM 槽位与 HUD 实例，并在用量核算中自动去重克隆前缀生成记录，避免重复计入主会话账本。
 - **SSH 远程窗口观测与降级态**：面向 Antigravity `2.33.0+` SSH 远程窗口，全程经本机 CDP 通道与同源 RPC 获取远端指标（`sourceKind: 'remote'` 与脱敏 `remoteHostLabel`），严禁拉起外部 `ssh` 进程；`HudDataAvailability` 显式区分 `remote_unbridged`（未建立远端桥接）与 `remote_stale`（远端快照陈旧），不以本机数据冒充远端会话。
 - **统一 `CortexStepStatus` 枚举真源**：前后端及本机/远端路径统一经 `src/hud/cortex-status.ts` 归一化 `CortexStepStatus`（含 `11=QUEUED`、`12=INTERRUPTED`），未知枚举值显式降级为 `UNSPECIFIED(0)`，绝不静默伪装为 `DONE(3)` 或活跃态。
+- **`executor_metadata` 增量扫描与历史编排器角色保留（`v1.2.1`）**：当长对话触发回退、步骤截断或切换回普通模型时，通过增量扫描 `executor_metadata` 保留历史上曾参与 Orchestrator 的模型及其 `planner` / `executor` 角色标识，防止重扫或上下文裁剪后丢失历史角色胶囊。

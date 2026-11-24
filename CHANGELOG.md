@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-24
+
+### Added
+- **Windows x64 社区共建跨平台支持（`#17`、`#27`、`#30`、`#32`，致谢 `@dysonkai` 提议与 `@Agonie0v0` 贡献实现）**：引入同仓隔离的跨平台后端抽象（`src/platform/`）、原生 Rust Win32 助手（`windows/win-helper`，提供 Credential Manager 凭据存取、Named Pipe 同用户 SID / 完整性校验、非破坏性回收站迁移、严格优雅退出边界与进程/端口检查）、Tauri 2 Windows 桌面客户端与系统托盘浮窗（`windows/app`），以及独立非阻塞 `windows-latest` CI 与自包含 ZIP / NSIS 安装包构建流（`tools/package-win.mjs` / `tools/gravitybox-win.nsi`）。macOS 原生主线持续由作者主导并完成实机验证，Windows 预构建自包含安装/便携包待社区真机验收后随 GitHub Releases 分发（普通用户无需自行构建）。
+
+### Fixed
+- **进程隔离与安全边界（`#28`，致谢 `@lvyandev`）**：在账号切换、回滚与存储维护期间隔离 `chrome_crashpad_handler` 与已脱离主进程树的后台守护进程（`language_server` / `sidecar`），修复非英语区域 `ps` 数值解析、孤立子进程清理以及 Windows UIPI 越权关闭提示。
+- **双语热适配与视图保护（`#33`，致谢 `@MongoRolls`）**：细化本地权限四档翻译与默认徽章隔离，新增代码查看、Diff、CSV 视口、LSP 引用与 Notebook 代码/输出区域防误译保护。
+- **HUD 与多环境用量准确性**：修复 `executor_metadata` 增量扫描在对话回退/截断场景下的历史编排器角色保留；对齐 Windows 凭据 2560 字节容量裁剪、Named Pipe 服务端完整性校验、NTFS 文件锁退避重试及请求明细全量分页导出。
+
 ## [1.2.0] - 2026-11-23
 
 ### Added
@@ -25,17 +35,17 @@
 ## [1.1.3] - 2026-11-21
 
 ### Added
-- **JSON Account Import & `0600` Backup Export (`#20`)**：由账号页头部统一「管理账号…」入口唤起三卡式 `AddAccountSheet`（「保存当前账号 + 导入账号 + 导出账号」）；后端 `importAccountsFromJson` / `exportAccountsBackup` 支持单文件、多文件与目录批量导入（单锁批量事务、按标准化邮箱去重以隔离外部 ID 碰撞），导出需经二次交互确认并由后端直接以 `0600` 权限原子落盘（IPC 零凭据返回，且禁止覆写内部状态目录文件）。
+- **JSON Account Import & `0600` Backup Export（`#20`，致谢 `@Allenbayern`）**：由账号页头部统一「管理账号…」入口唤起三卡式 `AddAccountSheet`（「保存当前账号 + 导入账号 + 导出账号」）；后端 `importAccountsFromJson` / `exportAccountsBackup` 支持单文件、多文件与目录批量导入（单锁批量事务、按标准化邮箱去重以隔离外部 ID 碰撞），导出需经二次交互确认并由后端直接以 `0600` 权限原子落盘（IPC 零凭据返回，且禁止覆写内部状态目录文件）。
 
 ### Changed
 - **Antigravity `2.34.0` Runtime Auto-Adaptation & Orchestrator Plan & Execute HUD**：支持运行期自动感知新版本宿主模型元数据与动态容量（含 `-tiered` 分级变体统一归一）、自适应高覆盖率全量翻译（含词典重载保活）及 Orchestrator + Executor 双阶段对话上下文与模型简称精准呈现（`src/hud/` / `src/model-catalog.ts` / `src/controller.ts` / `runtime/hud-*.js`）。
 - **Upstream `QuotaSummaryGroup` SSOT & Future Pool Presentation**：以官方 `RetrieveUserQuotaSummary.groups[]` 为配额分组单一事实源，准确投影独立多窗口配额池并彻底隔离 `Orchestrator` 编排器元模型（`src/quota.ts` / `src/account-quota.ts` / `native/QuotaPresentation.swift` / `native/ModelIcons.swift`）。
 - **Authoritative Remote Pricing Catalog & Official Host Watch**：`assets/pricing-feed.json`（保留 `schema: 1`）支持随包冷启动水合与完整生效快照接管，远端同步可直接热更新公开模型清单、别名、容量与中英定价依据（`ETag` / `304` + SHA-256 去重 + `pricingRevision` 实时联动界面与 HUD）；GitHub Actions 价格巡检改以 Antigravity 官方模型文档为权威真值源做原文精确核对与宿主过滤（忽略非宿主模型），核验通过后自动合入公开费率。
 - **Thinking-Variant Usage Summary Folding**：原生主窗口用量页、总览热门模型卡片及常驻菜单栏面板（`ModelUsageFold`）自动将同一基础模型的思考程度变体（`-low`、`-medium`、`-high`、`-xhigh`、`-extra-high`、`-extra-low`、`-thinking`、`-max`、`-tiered`）合并汇总按消耗降序展示 Token、请求数与费用并同步折叠后待定价模型计数，同时保留请求明细流水原始模型标识。
-- **Same-Origin `agy` CLI Credential Sync & Compliant Switching (`#19`)**：切号与回滚时按非侵入原则同步已存在的同源 CLI 凭据文件（`~/.gemini/antigravity-cli/antigravity-oauth-token` 与 `~/.gemini/jetski-standalone-oauth-token`，不主动新建且完全隔离 `@google/gemini-cli` 凭据）；无 `.env` 凭据配置时允许持有有效 `refresh_token` 但 `access_token` 已过期的账号正常切号，并将 CLI 同步隔离于桌面端 7 天回滚文件摘要锁之外，确保 CLI 外部续期后仍可完整对称回滚。
+- **Same-Origin `agy` CLI Credential Sync & Compliant Switching（`#19`，致谢 `@Allenbayern`）**：切号与回滚时按非侵入原则同步已存在的同源 CLI 凭据文件（`~/.gemini/antigravity-cli/antigravity-oauth-token` 与 `~/.gemini/jetski-standalone-oauth-token`，不主动新建且完全隔离 `@google/gemini-cli` 凭据）；无 `.env` 凭据配置时允许持有有效 `refresh_token` 但 `access_token` 已过期的账号正常切号，并将 CLI 同步隔离于桌面端 7 天回滚文件摘要锁之外，确保 CLI 外部续期后仍可完整对称回滚。
 - **Three-Tier Periodic Quota Refresh & Dynamic Stale Threshold Alignment**：建立「后端过期待刷巡检（启动 5 秒 + 30 秒周期，按配置间隔冷却防离线/报错重试风暴）+ 原生 `Assistant` 定时刷新与唤醒补刷 + 手动按需刷新」三层配额刷新机制；前后端统一将配额过期阈值动态对齐所选刷新间隔（`resolveQuotaStaleSeconds` / `quotaStaleThresholdSeconds`，默认 15 分钟，间隔大于 15 分钟时自动放宽为 `interval + 2m`），覆盖后端配额概览、Argon/Carbon 独立池、主窗口账号卡片与常驻菜单栏面板并在切换刷新周期后即时生效。
 - **Menu Bar Floating Panel & Keyboard Polish (`MenuFloatingPanel`)**：将菜单栏展开面板由 `NSPopover` 重构为非激活可聚焦浮窗 `MenuFloatingPanel`（顶边锚定自适应平滑伸缩，保持 `.statusBar` 窗口层级，支持全屏、跨空间与台前调度可达），并新增主窗口与菜单面板 `⌘1/2/3` 快捷键、分段控件左右键切换与焦点环重绘、状态栏微点提示、15 秒用量缓存自动刷新及过期定价页脚提醒（`Assistant` / `MenuPanelController` / `MenuPanelComponents` / `DesignControls`）。
-- **Safe Relaunch Banner & Closed-Loop Trigger (`#21`)**：优化未开启调试端口提示横幅的紧凑排版，将「安全重启以连接」精简为点击后直接优雅退出重连（移除冗余二次确认弹窗）；修复 Antigravity 无调试端口运行时点击「打开 Antigravity」仅激活原窗口却忽略 `--remote-debugging-port=0` 的问题（自动转入安全重启流程）、避免外部独立/残留 `language_server` 进程导致 10 秒退出等待误超时，并在重启完成后主动校验 `DevToolsActivePort` 监听与调试参数是否真正生效（`AssistantProcessLifecycle` / `MenuPanelController` / `Pages`）。
+- **Safe Relaunch Banner & Closed-Loop Trigger（`#21`，致谢 `@willingning-coder`）**：优化未开启调试端口提示横幅的紧凑排版，将「安全重启以连接」精简为点击后直接优雅退出重连（移除冗余二次确认弹窗）；修复 Antigravity 无调试端口运行时点击「打开 Antigravity」仅激活原窗口却忽略 `--remote-debugging-port=0` 的问题（自动转入安全重启流程）、避免外部独立/残留 `language_server` 进程导致 10 秒退出等待误超时，并在重启完成后主动校验 `DevToolsActivePort` 监听与调试参数是否真正生效（`AssistantProcessLifecycle` / `MenuPanelController` / `Pages`）。
 - **Antigravity IDE Runtime Localization & Future Model Compatibility**：补充 Orchestrator / Input Box 等新增交互界面词典、上下文动态模板规则与模型名保护白名单，保留 `Orchestrator` / `Executor` 英文术语、推理档位标签（`Low` / `Medium` / `High` / `Extra` / `Max`）及 `Enter` / `Cmd+Enter` 发送快捷键，放行系统设置内 `Orchestrator/Executor Model` 设置行，并支持动态识别 Ultra Gemini 共享池模型与未来世代模型（Claude Mythos / Fable、GPT-6+ 等）归类排序（`dict/base.json` / `runtime/engine.js` / `src/bundle.ts` / `src/coverage.ts` / `PricingSyncSheetController` / `QuotaPresentation`）。
 - **Standby Account Quota Tracking, Pre-Expiry Refresh & Recommendations**：针对 Antigravity `2.34.0` 环境变量本地通信与单一 macOS 钥匙串活跃会话限制下未激活备用账号访问令牌约 1 小时后无法后台续期的边界，新增备用账号自动跳过过期云端刷新、临近过期自动补采末班车快照、切入/切出时顺手同步最新登录态、已过重置时间标示「预计已重置」（底层保留原始快照不虚构满额数值），以及三层智能切号推荐与通俗易懂的双语提示（`account-quota.ts` / `accounts.ts` / `account-switch.ts` / `ipc-projections.ts` / `main.ts` / `native/` / `assets/i18n/`）。
 - **Unified HUD Prior Model Context & Neutral Role Badges**：取消「Orchestrator 上下文」独立特例标题，将多模型与编排器阶段收敛为单一平铺「曾用模型上下文 / Prior Model Context」列表（仅展示非当前模型）；上下文卡片顶部微调至 `344px` 保持单行不折行，并以统一的原生磨砂中性灰胶囊标记「规划 / Plan」与「执行 / Exec」角色（`runtime/hud-instance.js` / `runtime/hud-styles.js` / `runtime/hud-i18n.js` / `assets/i18n/`）。
@@ -43,7 +53,7 @@
 ### Fixed
 - **HUD Streaming, Subagent Attribution & Projection Accuracy**：修正独立子代理分栏 `backendIsStreaming` 门控与退出复位、`findLastSubstantiveStep` 跳过尾部透明交接步（`101`/`98`）、`isSubagentTrajectory` 排除 `trajectory_metadata_blob` 自身 UUID 引用防误判、`step_type 85/127/132` 双大字段超 64KB 时保留 `render_info` Protobuf 投影、`hasValidStartedAtField4` 未来时间戳上界校验、`resolveEffectivePricingTable` 历史账本回退 `billingPrices` 与远端清空复位，以及多子代理跨并发波次两阶段防抖保活与严格隔离父会话的同子库模型回退（`hud-instance.js` / `metrics-engine.ts` / `sqlite-worker.ts`）。
 - **Account Readiness, Enterprise Boundary, Recovery & Pricing Integrity**：补齐 `quota_refresh_error_code` 四端投影并收敛非鉴权错误误报；抽取 `resolveUnsavedLiveSubscriptionTier` 防止未保存 `enterprise_vertex` 账号误判 `FREE`；补齐中断回滚恢复路径对同源 `agy` CLI 凭据的对称还原、`autoHealUnpricedHistory` 仅统计实际有效新落锁数量、`importAccountsFromJson` 非字符串字段类型清洗与换新 `refresh_token` 时重置过期 `access_token`、`MenuFloatingPanel` 淡入与异步缩放顶边锚定竞态、菜单栏单账号卡片 `QuotaPresentation.warningSummary` 渲染、`PricingSyncSheetController` 空格型 `Orchestrator <Model>` 折叠、对齐 Claude API / Gemini Developer API 最新官方定价来源与生效区间，并消除 `AppUpdateManager` Swift 6 Sendable 编译警告（`account-quota.ts` / `accounts.ts` / `account-switch.ts` / `usage.ts` / `pricing.ts` / `main.ts` / `Assistant.swift` / `AppUpdateManager.swift` / `model-catalog.json` / `pricing-feed.json`）。
-- **Antigravity `2.34.0` Live Quota Probe & Current Account Save (`#24`)**：兼容 Antigravity `2.34.0` 将本地 `language_server` CSRF 令牌从命令行参数迁移至环境变量 `ANTIGRAVITY_SERVER_CSRF_TOKEN` 的变更（通过 `ps eww` 读取同 UID 进程环境并结合扩展端口与端口探测兜底，规避误退化到云端 `missing_oauth_client` 报错）；修复「保存当前账号」合并桌面 `state.vscdb` / 钥匙串凭据时保留最新 `access_token` 与过期时间，并在实时配额刷新失败时不落盘过期/空配额缓存，同时补齐未配置 `.env` 场景下禁用/过期错误码提示文案（`account-probe.ts` / `accounts.ts` / `account-quota.ts` / `assets/i18n/`）。
+- **Antigravity `2.34.0` Live Quota Probe & Current Account Save（`#24`，致谢 `@YangFuting`）**：兼容 Antigravity `2.34.0` 将本地 `language_server` CSRF 令牌从命令行参数迁移至环境变量 `ANTIGRAVITY_SERVER_CSRF_TOKEN` 的变更（通过 `ps eww` 读取同 UID 进程环境并结合扩展端口与端口探测兜底，规避误退化到云端 `missing_oauth_client` 报错）；修复「保存当前账号」合并桌面 `state.vscdb` / 钥匙串凭据时保留最新 `access_token` 与过期时间，并在实时配额刷新失败时不落盘过期/空配额缓存，同时补齐未配置 `.env` 场景下禁用/过期错误码提示文案（`account-probe.ts` / `accounts.ts` / `account-quota.ts` / `assets/i18n/`）。
 
 ## [1.1.2] - 2026-11-19
 
@@ -74,7 +84,7 @@
 - **CI & Release Hardening**：收窄 `.github/workflows/ci.yml` 变更豁免清单以覆盖 `assets/i18n/`、`model-catalog.json`、`pricing-feed.json`、`ui-extraction-manifest.json` 门禁，并将 `test/pricing-catalog-sync.test.mjs` 纳入 `pricing-watch.yml`；强化 `tools/check-docs.mjs`、`tools/release-integrity.mjs` 与 `tools/package-mac.mjs` 的校验规则与打包产物洁净度。
 
 ### Fixed
-- **macOS 15.1 Motion Crash (`#15`)**：修复 `DesignMotion.cancel()` 在 `CADisplayLink.invalidate()` 后冗余调用 `remove(from:forMode:)` 导致 macOS 15.1 主线程 `EXC_BAD_ACCESS` (`SIGSEGV`) 闪退的问题，并为 `CADisplayLink` 引入弱引用 Target 代理与生命周期回归测试。
+- **macOS 15.1 Motion Crash（`#15`，致谢 `@Rentrer`）**：修复 `DesignMotion.cancel()` 在 `CADisplayLink.invalidate()` 后冗余调用 `remove(from:forMode:)` 导致 macOS 15.1 主线程 `EXC_BAD_ACCESS` (`SIGSEGV`) 闪退的问题，并为 `CADisplayLink` 引入弱引用 Target 代理与生命周期回归测试。
 - **Cross-End Bilingual & UI Lifecycle**：修复 `controller.ts` `backend.*` 键名前缀双写、`resume`/`reapply` 从英文切回中文未持久写回、英文 HUD 流式测速误显 `0 tok/s`、收起状态菜单栏面板滞留旧语言、活动模态 Sheet（含 `AccountPolicySheet`、`AddAccountSheet`、`UsageLogController`、`PricingSyncSheetController`、`MaintenancePopover`）实时语言同步与 OAuth 取消回收、`DesignButton` 无拷贝矢量图标着色、`SidebarLaunchButton` 英文宽度约束冲突及全应用零 Tooltip 约束。
 - **HUD Telemetry & Dictionary Accuracy**：修复后端重启后 HUD `metricsSequence` 归零卡死、多模型切换 `gen_metadata` 串借、子代理缓存驱逐与 `render_info > 64KB` 截断丢失、中止会话 `status=6/7` 计时器空转、上下文基线步序错位及紧凑断点对齐问题；清理 `dict/base.json` 6 个全局虚词与半句漏译，解耦设置页上下文识别，统一「侧边提问」与「对战模式」术语。
 - **Usage, Pricing, Quota & Security Boundaries**：修复 `resolveDatabaseModelFullName` 别名优先级与无锚点前缀匹配、`loadRateLocksOnce`/`UsageLedger` 瞬时错误保护、Worker 线程同步 `remote_pricing.json` 元数据、防降级/防跳转/流式限流远端价格同步、缺失 `cacheWrite` 锁自愈/重估守卫与跨 inode 事件归并；修正 `mergeGroupSets` 多端点优先级、`paidTier`/`AI Premium` 解析与重授权状态复位；补强 `BackendBridge` `NSLock` 并发安全与 `main.ts` 优雅退出等待及 Socket/状态目录前置校验。
@@ -209,7 +219,8 @@
 ### Fixed
 - **Native UI**：保持菜单栏状态图标在不同翻译开关状态下的不透明度一致（`b9921e8`，已包含于 1.0.0）。
 
-[Unreleased]: https://github.com/Enzoo404/gravitybox/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/Enzoo404/gravitybox/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/Enzoo404/gravitybox/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Enzoo404/gravitybox/compare/v1.1.3...v1.2.0
 [1.1.3]: https://github.com/Enzoo404/gravitybox/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/Enzoo404/gravitybox/compare/v1.1.1...v1.1.2

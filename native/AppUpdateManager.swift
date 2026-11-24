@@ -80,7 +80,7 @@ final class AppUpdateManager {
                 return Self.normalizeVersion(ver)
             }
         }
-        return "1.2.0"
+        return "1.2.1"
     }
 
     var currentBuildDisplay: String {
