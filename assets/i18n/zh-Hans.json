@@ -963,7 +963,11 @@
     "usage.trend_title.custom": "自定义时段用量",
     "usage.section.output_speed": "输出速率",
     "usage.speed.median_desc": "最近 {count} 次回复中位数",
-    "usage.speed.no_samples": "暂无流式耗时样本"
+    "usage.speed.no_samples": "暂无流式耗时样本",
+    "accounts.privacy.hide": "隐藏账号隐私信息",
+    "accounts.privacy.show": "显示账号隐私信息",
+    "settings.privacy.title": "隐藏账号隐私信息",
+    "settings.privacy.subtitle": "在总览页、账号页与托盘中隐藏用户名与邮箱，账号卡片与配额条保持可见"
   },
   "backend": {
     "status.starting": "正在连接本机服务…",

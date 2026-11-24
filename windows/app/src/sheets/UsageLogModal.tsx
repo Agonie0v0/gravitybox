@@ -6,7 +6,10 @@ import { useApp } from '../context/AppContext';
 import {
   formatCompactTokens,
   formatInteger,
+  formatLocalDateInput,
+  formatOutputTps,
   formatShortDateTime,
+  formatThinkingEffortLabel,
   formatUsd,
   localizedModelLabel,
 } from '../lib/format';
@@ -14,22 +17,34 @@ import { backendRequest, pickSaveJsonPath, saveJsonFile } from '../lib/tauri';
 import { cleanSshHostLabel, normalizeSshEnvironment } from '../lib/ssh';
 import type { UsageEventRow, UsageEventsReply, UsagePeriodKey } from '../lib/types';
 
-const PERIODS: UsagePeriodKey[] = ['today', '7d', '30d', 'all'];
+const PERIODS: UsagePeriodKey[] = ['today', '7d', '30d', 'all', 'custom'];
 const PAGE_SIZE = 200;
+
+function defaultLogStartDate(): string {
+  const d = new Date();
+  d.setDate(d.getDate() - 6);
+  return formatLocalDateInput(d);
+}
 
 export function UsageLogModal({
   open,
   initialPeriod,
   initialEnvironmentId = 'all',
+  initialStartDate,
+  initialEndDate,
   onClose,
 }: {
   open: boolean;
   initialPeriod: UsagePeriodKey;
   initialEnvironmentId?: string;
+  initialStartDate?: string;
+  initialEndDate?: string;
   onClose: () => void;
 }) {
   const { t, locale, isDark, sshEnvironments, showToast } = useApp();
   const [period, setPeriod] = useState<UsagePeriodKey>(initialPeriod);
+  const [startDate, setStartDate] = useState<string>(() => initialStartDate || defaultLogStartDate());
+  const [endDate, setEndDate] = useState<string>(() => initialEndDate || formatLocalDateInput(new Date()));
   const [environmentId, setEnvironmentId] = useState<string>(initialEnvironmentId);
   const [query, setQuery] = useState('');
   const [offset, setOffset] = useState(0);
@@ -41,6 +56,9 @@ export function UsageLogModal({
   const [pageInput, setPageInput] = useState('1');
   const snapshotIdRef = useRef<string | null>(null);
   const debounceRef = useRef<number | null>(null);
+
+  const todayDateStr = formatLocalDateInput(new Date());
+  const isCustomRangeValid = Boolean(startDate && endDate && startDate <= endDate);
 
   const normalizedSshHosts = sshEnvironments.map((env) =>
     normalizeSshEnvironment(env, t('ssh.remote_fallback')),
@@ -60,8 +78,13 @@ export function UsageLogModal({
       environmentId: string;
       query: string;
       offset: number;
+      startDate?: string;
+      endDate?: string;
       force?: boolean;
     }) => {
+      if (opts.period === 'custom' && (!opts.startDate || !opts.endDate || opts.startDate > opts.endDate)) {
+        return;
+      }
       setLoading(true);
       setError('');
       try {
@@ -72,6 +95,10 @@ export function UsageLogModal({
           offset: opts.offset,
           limit: PAGE_SIZE,
         };
+        if (opts.period === 'custom' && opts.startDate && opts.endDate) {
+          payload.startDate = opts.startDate;
+          payload.endDate = opts.endDate;
+        }
         if (opts.environmentId && opts.environmentId !== 'all') {
           payload.environmentId = opts.environmentId;
         }
@@ -101,24 +128,32 @@ export function UsageLogModal({
 
   useEffect(() => {
     if (open) {
+      const nextStart = initialStartDate || defaultLogStartDate();
+      const nextEnd = initialEndDate || formatLocalDateInput(new Date());
       setPeriod(initialPeriod);
       setEnvironmentId(initialEnvironmentId);
+      setStartDate(nextStart);
+      setEndDate(nextEnd);
       setQuery('');
       setOffset(0);
-      void fetchRows({
-        period: initialPeriod,
-        environmentId: initialEnvironmentId,
-        query: '',
-        offset: 0,
-        force: false,
-      });
+      if (initialPeriod !== 'custom' || (nextStart && nextEnd && nextStart <= nextEnd)) {
+        void fetchRows({
+          period: initialPeriod,
+          environmentId: initialEnvironmentId,
+          query: '',
+          offset: 0,
+          startDate: nextStart,
+          endDate: nextEnd,
+          force: false,
+        });
+      }
     } else {
       releaseSnapshot();
     }
     return () => {
       if (debounceRef.current) window.clearTimeout(debounceRef.current);
     };
-  }, [open, initialPeriod, initialEnvironmentId, fetchRows, releaseSnapshot]);
+  }, [open, initialPeriod, initialEnvironmentId, initialStartDate, initialEndDate, fetchRows, releaseSnapshot]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
@@ -128,21 +163,58 @@ export function UsageLogModal({
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
     debounceRef.current = window.setTimeout(() => {
       setOffset(0);
-      void fetchRows({ period, environmentId, query: val, offset: 0 });
+      void fetchRows({ period, environmentId, query: val, offset: 0, startDate, endDate });
     }, 180);
   };
 
   const handlePeriodChange = (next: UsagePeriodKey) => {
+    releaseSnapshot();
     setPeriod(next);
     setOffset(0);
-    void fetchRows({ period: next, environmentId, query, offset: 0 });
+    if (next !== 'custom' || isCustomRangeValid) {
+      void fetchRows({
+        period: next,
+        environmentId,
+        query,
+        offset: 0,
+        startDate,
+        endDate,
+        force: true,
+      });
+    }
+  };
+
+  const handleCustomDatesChange = (nextStart: string, nextEnd: string) => {
+    releaseSnapshot();
+    setStartDate(nextStart);
+    setEndDate(nextEnd);
+    setOffset(0);
+    if (nextStart && nextEnd && nextStart <= nextEnd) {
+      void fetchRows({
+        period: 'custom',
+        environmentId,
+        query,
+        offset: 0,
+        startDate: nextStart,
+        endDate: nextEnd,
+        force: true,
+      });
+    }
   };
 
   const handleEnvironmentChange = (nextEnv: string) => {
     releaseSnapshot();
     setEnvironmentId(nextEnv);
     setOffset(0);
-    void fetchRows({ period, environmentId: nextEnv, query, offset: 0, force: true });
+    void fetchRows({
+      period,
+      environmentId: nextEnv,
+      query,
+      offset: 0,
+      startDate,
+      endDate,
+      force: true,
+    });
   };
 
   const handleJumpPage = () => {
@@ -153,18 +225,20 @@ export function UsageLogModal({
     }
     const nextOffset = (n - 1) * PAGE_SIZE;
     setOffset(nextOffset);
-    void fetchRows({ period, environmentId, query, offset: nextOffset });
+    void fetchRows({ period, environmentId, query, offset: nextOffset, startDate, endDate });
   };
 
   const handleExport = async () => {
+    const periodTag = period === 'custom' ? `${startDate}_${endDate}` : period;
     const targetPath = await pickSaveJsonPath(
       t('usage_log.title'),
-      t('usage_log.export.filename', { period }),
+      t('usage_log.export.filename', { period: periodTag }),
     );
     if (!targetPath) return;
     try {
       await saveJsonFile(targetPath, {
         period,
+        ...(period === 'custom' ? { startDate, endDate } : {}),
         query,
         scope,
         total,
@@ -186,11 +260,19 @@ export function UsageLogModal({
             <button
               type="button"
               className="gb-btn gb-btn-sm"
-              disabled={loading}
+              disabled={loading || (period === 'custom' && !isCustomRangeValid)}
               onClick={() => {
                 releaseSnapshot();
                 setOffset(0);
-                void fetchRows({ period, environmentId, query, offset: 0, force: true });
+                void fetchRows({
+                  period,
+                  environmentId,
+                  query,
+                  offset: 0,
+                  startDate,
+                  endDate,
+                  force: true,
+                });
               }}
             >
               <RotateCw size={12} className={loading ? 'gb-spin' : undefined} />
@@ -256,11 +338,56 @@ export function UsageLogModal({
                 className={`gb-segmented-btn ${period === p ? 'active' : ''}`}
                 onClick={() => handlePeriodChange(p)}
               >
-                {t(`usage.period.${p}`)}
+                {t(
+                  `usage.period.${p}`,
+                  undefined,
+                  p === 'custom' ? (locale === 'en' ? 'Custom' : '自定义') : undefined,
+                )}
               </button>
             ))}
           </div>
         </div>
+
+        {/* Inline Custom Date Pickers */}
+        {period === 'custom' && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5 }}>
+              <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>
+                {t('usage.custom.start_date', undefined, locale === 'en' ? 'Start Date' : '开始日期')}
+              </span>
+              <input
+                type="date"
+                className="gb-input tabular"
+                style={{ height: 26 }}
+                value={startDate}
+                max={todayDateStr}
+                onChange={(e) => handleCustomDatesChange(e.target.value, endDate)}
+              />
+            </label>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5 }}>
+              <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>
+                {t('usage.custom.end_date', undefined, locale === 'en' ? 'End Date' : '结束日期')}
+              </span>
+              <input
+                type="date"
+                className="gb-input tabular"
+                style={{ height: 26 }}
+                value={endDate}
+                max={todayDateStr}
+                onChange={(e) => handleCustomDatesChange(startDate, e.target.value)}
+              />
+            </label>
+            {!isCustomRangeValid && (
+              <span style={{ fontSize: 11, color: 'var(--danger)', fontWeight: 500 }}>
+                {t(
+                  'usage.custom.invalid_range',
+                  undefined,
+                  locale === 'en' ? 'Start date must be on or before end date.' : '开始日期不能晚于结束日期。',
+                )}
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Event List */}
         <div
@@ -298,12 +425,23 @@ export function UsageLogModal({
           ) : (
             rows.map((row, idx) => {
               const model = localizedModelLabel(row.model, locale);
+              const effortLabel = formatThinkingEffortLabel(
+                row.thinkingEffort ?? row.thinking_effort,
+              );
               const inp = Number(row.inputTokens ?? row.input_tokens ?? 0);
               const out = Number(row.outputTokens ?? row.output_tokens ?? 0);
               const cached = Number(row.cachedTokens ?? row.cached_tokens ?? 0);
               const cacheWrite = Number(row.cacheWriteTokens ?? row.cache_write_tokens ?? 0);
               const totalTok = Number(row.totalTokens ?? row.total_tokens ?? inp + out + cached + cacheWrite);
               const usd = Number(row.estimatedUsd ?? row.estimated_usd ?? 0);
+              const rawTps = row.outputTps ?? row.output_tps;
+              const streamSec = row.streamingDurationSeconds ?? row.streaming_duration_seconds;
+              const effectiveTps =
+                typeof rawTps === 'number' && Number.isFinite(rawTps) && rawTps > 0
+                  ? rawTps
+                  : out > 0 && typeof streamSec === 'number' && Number.isFinite(streamSec) && streamSec > 0
+                  ? out / streamSec
+                  : null;
               const ts = row.timestamp
                 ? typeof row.timestamp === 'number'
                   ? formatShortDateTime(row.timestamp)
@@ -335,6 +473,14 @@ export function UsageLogModal({
                       >
                         {model}
                       </span>
+                      {effortLabel && (
+                        <span
+                          className="gb-pill gb-pill-blue"
+                          style={{ height: 18, padding: '0 6px', fontSize: 10, flexShrink: 0 }}
+                        >
+                          {effortLabel}
+                        </span>
+                      )}
                       {(() => {
                         const rowEnvId = row.environmentId || row.environment_id || '';
                         const isRemote =
@@ -377,6 +523,7 @@ export function UsageLogModal({
                         ? ` · ${t('usage_event.cache_write')} ${formatCompactTokens(cacheWrite, locale, true)}`
                         : ''}{' '}
                       · {t('usage_event.output')} {formatCompactTokens(out, locale, true)}
+                      {effectiveTps !== null ? ` · ${formatOutputTps(effectiveTps)}` : ''}
                     </span>
                     <span>{ts}</span>
                   </div>
@@ -408,7 +555,7 @@ export function UsageLogModal({
               onClick={() => {
                 const next = Math.max(0, offset - PAGE_SIZE);
                 setOffset(next);
-                void fetchRows({ period, environmentId, query, offset: next });
+                void fetchRows({ period, environmentId, query, offset: next, startDate, endDate });
               }}
             >
               {t('usage_log.prev_page')}
@@ -420,7 +567,7 @@ export function UsageLogModal({
               onClick={() => {
                 const next = offset + PAGE_SIZE;
                 setOffset(next);
-                void fetchRows({ period, environmentId, query, offset: next });
+                void fetchRows({ period, environmentId, query, offset: next, startDate, endDate });
               }}
             >
               {t('usage_log.next_page')}

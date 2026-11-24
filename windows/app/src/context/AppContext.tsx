@@ -15,6 +15,7 @@ import {
   translate,
   type ResolvedLocale,
 } from '../lib/i18n';
+import { displayAccountIdentity } from '../lib/format';
 import {
   backendRequest,
   getAppInfo,
@@ -78,6 +79,7 @@ const DEFAULT_CONFIG: UiConfig = {
   themeMode: 'system',
   antigravityProxyMode: 'off',
   antigravityProxyManualUrl: '',
+  privacyMaskAccounts: false,
 };
 
 const PAGE_INDEX_MAP: PageKey[] = ['overview', 'accounts', 'usage', 'settings', 'about'];
@@ -127,7 +129,12 @@ interface AppContextValue {
   fetchDashboard: (force?: boolean, environmentId?: string) => Promise<void>;
   fetchAccounts: () => Promise<void>;
   fetchAutoSwitch: () => Promise<void>;
-  fetchUsage: (period: UsagePeriodKey, force?: boolean, environmentId?: string) => Promise<UsageSummaryReply | null>;
+  fetchUsage: (
+    period: UsagePeriodKey,
+    force?: boolean,
+    environmentId?: string,
+    customRange?: { startDate: string; endDate: string },
+  ) => Promise<UsageSummaryReply | null>;
   fetchMaintenanceScan: (retentionDays?: number, force?: boolean) => Promise<MaintenanceScanReply | null>;
   fetchProxy: (force?: boolean) => Promise<ProxyInfo | null>;
   applyProxy: (mode: ProxyMode, manualUrl?: string) => Promise<ProxyInfo>;
@@ -340,6 +347,7 @@ export function AppProvider({
       period: UsagePeriodKey,
       force = false,
       environmentId?: string,
+      customRange?: { startDate: string; endDate: string },
     ): Promise<UsageSummaryReply | null> => {
       setUsageLoading((prev) => ({ ...prev, [period]: true }));
       try {
@@ -349,6 +357,9 @@ export function AppProvider({
           period,
           ...(force ? { force: true } : {}),
           ...(!isAllEnv ? { environmentId } : {}),
+          ...(period === 'custom' && customRange
+            ? { startDate: customRange.startDate, endDate: customRange.endDate }
+            : {}),
         });
         setReachable(true);
         setUsageErrors((prev) => ({ ...prev, [period]: undefined }));
@@ -751,12 +762,14 @@ export function AppProvider({
 
         const liveRunning = Boolean(preflight?.appRunning || preflight?.stableRunning || (await getAntigravityRunning()));
         const busy = preflight?.hasRunningTask === true || preflight?.safe === false;
+        const masked = Boolean(configRef.current.privacyMaskAccounts);
+        const identity = displayAccountIdentity(acc.name, acc.email, locale, masked);
         const display =
-          acc.name && acc.name.toLowerCase() !== acc.email.toLowerCase()
+          acc.name && identity.email && acc.name.toLowerCase() !== acc.email.toLowerCase()
             ? locale === 'en'
-              ? `${acc.name} (${acc.email})`
-              : `${acc.name}（${acc.email}）`
-            : acc.email || acc.name || t('assistant_account.target_fallback');
+              ? `${identity.name} (${identity.email})`
+              : `${identity.name}（${identity.email}）`
+            : identity.email || identity.name || t('assistant_account.target_fallback');
 
         const baseBody = busy
           ? t('assistant_account.switch_busy_body')
@@ -801,7 +814,11 @@ export function AppProvider({
             target: 'all',
             autoRefreshToken: true,
           });
-          showToast(switchRes?.message || t('assistant_account.switched_to', { email: acc.email }));
+          showToast(
+            masked
+              ? t('assistant_account.switched_to', { email: identity.email || identity.name })
+              : switchRes?.message || t('assistant_account.switched_to', { email: acc.email }),
+          );
         } finally {
           if (liveRunning) {
             await launchAntigravity().catch((e) => {

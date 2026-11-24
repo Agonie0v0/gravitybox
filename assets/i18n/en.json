@@ -963,7 +963,11 @@
     "usage.trend_title.custom": "Custom Range Usage",
     "usage.section.output_speed": "Output Speed",
     "usage.speed.median_desc": "Median of last {count} replies",
-    "usage.speed.no_samples": "No streaming speed samples yet"
+    "usage.speed.no_samples": "No streaming speed samples yet",
+    "accounts.privacy.hide": "Hide account names & emails",
+    "accounts.privacy.show": "Show account names & emails",
+    "settings.privacy.title": "Hide Account Names & Emails",
+    "settings.privacy.subtitle": "Mask usernames and email addresses across Overview, Accounts, and Tray while keeping cards and quota bars visible"
   },
   "backend": {
     "status.starting": "Connecting to local service…",

@@ -147,6 +147,7 @@ export async function loadUiConfig(): Promise<UiConfig> {
       themeMode: 'system',
       antigravityProxyMode: 'off',
       antigravityProxyManualUrl: '',
+      privacyMaskAccounts: false,
     };
   }
   return invoke<UiConfig>('load_ui_config');

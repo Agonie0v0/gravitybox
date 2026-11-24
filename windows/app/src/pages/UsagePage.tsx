@@ -1,17 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BarChart2, Download, FileText, RotateCw, Server, Tag } from 'lucide-react';
+import { BarChart2, Download, FileText, Gauge, RotateCw, Server, Tag } from 'lucide-react';
 import { DONUT_PALETTE, DonutChart, type DonutSlice } from '../components/DonutChart';
 import { BrandIcons } from '../components/ModelIcon';
 import { TrendChart, type TrendBarPoint } from '../components/TrendChart';
 import { useApp } from '../context/AppContext';
 import {
-  foldThinkingVariants,
   formatCompactTokens,
   formatInteger,
+  formatLocalDateInput,
+  formatOutputTps,
+  formatThinkingEffortLabel,
   formatUsd,
   localizedModelLabel,
   parseHourIndex,
-  sortModelsByUsage,
   usageScopeText,
 } from '../lib/format';
 import {
@@ -19,11 +20,59 @@ import {
   sshStateSortOrder,
 } from '../lib/ssh';
 import { pickSaveJsonPath, saveJsonFile } from '../lib/tauri';
-import type { UsagePeriodKey, UsageSummaryReply } from '../lib/types';
+import type { ModelUsageRaw, UsagePeriodKey, UsageSummaryReply } from '../lib/types';
 import { PricingSyncModal } from '../sheets/PricingSyncModal';
 import { UsageLogModal } from '../sheets/UsageLogModal';
 
-const PERIODS: UsagePeriodKey[] = ['today', '7d', '30d', 'all'];
+const PERIODS: UsagePeriodKey[] = ['today', '7d', '30d', 'all', 'custom'];
+
+interface FlatModelEffortRow {
+  key: string;
+  model: string;
+  modelId: string;
+  thinkingEffort: string | null;
+  effortLabel: string;
+  donutLabel: string;
+  totalTokens: number;
+  promptTokens: number;
+  candidatesTokens: number;
+  cachedTokens: number;
+  cacheWriteTokens: number;
+  requestCount: number;
+  estimatedUsd: number;
+  unpricedTokens: number;
+  priced: boolean;
+  partiallyPriced: boolean;
+  pricingStatus: string;
+  medianOutputTps: number | null;
+  speedSampleCount: number;
+}
+
+function normalizeEffortKey(raw: string | undefined | null): string {
+  const trimmed = (raw ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (
+    trimmed === 'extra_high' ||
+    trimmed === 'extra' ||
+    trimmed === 'x_high' ||
+    trimmed === 'extrahigh'
+  ) {
+    return 'xhigh';
+  }
+  if (
+    trimmed === 'x_low' ||
+    trimmed === 'xlow' ||
+    trimmed === 'extralow'
+  ) {
+    return 'extra_low';
+  }
+  return trimmed;
+}
+
+function defaultCustomStartDate(): string {
+  const d = new Date();
+  d.setDate(d.getDate() - 6);
+  return formatLocalDateInput(d);
+}
 
 export function UsagePage() {
   const {
@@ -42,12 +91,26 @@ export function UsagePage() {
   } = useApp();
 
   const [period, setPeriod] = useState<UsagePeriodKey>('today');
+  const [customStartDate, setCustomStartDate] = useState<string>(defaultCustomStartDate);
+  const [customEndDate, setCustomEndDate] = useState<string>(() => formatLocalDateInput(new Date()));
   const [environmentId, setEnvironmentId] = useState<string>('all');
   const [scopedReport, setScopedReport] = useState<UsageSummaryReply | null>(null);
   const [chartMetric, setChartMetric] = useState<'tokens' | 'requests' | 'cost'>('tokens');
   const [hoveredPt, setHoveredPt] = useState<TrendBarPoint | null>(null);
   const [logOpen, setLogOpen] = useState(false);
   const [pricingOpen, setPricingOpen] = useState(false);
+
+  const todayDateStr = formatLocalDateInput(new Date());
+  const isCustomRangeValid = Boolean(
+    customStartDate && customEndDate && customStartDate <= customEndDate,
+  );
+  const customRangeParam = useMemo(
+    () =>
+      period === 'custom' && isCustomRangeValid
+        ? { startDate: customStartDate, endDate: customEndDate }
+        : undefined,
+    [period, isCustomRangeValid, customStartDate, customEndDate],
+  );
 
   const normalizedSshHosts = useMemo(() => {
     const fallback = t('ssh.remote_fallback');
@@ -70,19 +133,20 @@ export function UsagePage() {
 
   useEffect(() => {
     if (!reachable) return;
+    if (period === 'custom' && !isCustomRangeValid) return;
     if (environmentId === 'all') {
       setScopedReport(null);
-      void fetchUsage(period, false);
+      void fetchUsage(period, false, undefined, customRangeParam);
     } else {
       let active = true;
-      void fetchUsage(period, false, environmentId).then((res) => {
+      void fetchUsage(period, false, environmentId, customRangeParam).then((res) => {
         if (active && res) setScopedReport(res);
       });
       return () => {
         active = false;
       };
     }
-  }, [period, environmentId, reachable, fetchUsage]);
+  }, [period, environmentId, reachable, fetchUsage, isCustomRangeValid, customRangeParam]);
 
   const report = environmentId === 'all' ? usageByPeriod[period] : (scopedReport ?? usageByPeriod[period]);
   const selectedSshHost = useMemo(
@@ -103,16 +167,144 @@ export function UsagePage() {
   const cacheDenom = promptTokens + cachedTokens + cacheWriteTokens;
   const cacheHitRate =
     summary.cacheHitRate ?? (cacheDenom > 0 ? (cachedTokens / cacheDenom) * 100 : 0);
+  const medianOutputTps = summary.medianOutputTps ?? summary.median_output_tps ?? null;
+  const speedSampleCount = Number(summary.speedSampleCount ?? summary.speed_sample_count ?? 0) || 0;
 
-  const modelRows = useMemo(() => {
-    const raw = report?.byModel ?? report?.models ?? [];
-    return sortModelsByUsage(foldThinkingVariants(raw));
-  }, [report]);
+  const modelRows = useMemo<FlatModelEffortRow[]>(() => {
+    const raw: ModelUsageRaw[] =
+      report?.byModelEffort ?? report?.by_model_effort ?? report?.byModel ?? report?.models ?? [];
+    const order: string[] = [];
+    const grouped = new Map<
+      string,
+      {
+        model: string;
+        modelId: string;
+        thinkingEffort: string | null;
+        total: number;
+        input: number;
+        output: number;
+        cached: number;
+        cacheWrite: number;
+        req: number;
+        usd: number;
+        unpriced: number;
+        anyPriced: boolean;
+        allPriced: boolean;
+        pricingStatus: string;
+        medianOutputTps: number | null;
+        speedSampleCount: number;
+      }
+    >();
+
+    for (const item of raw) {
+      const model = String(item.model ?? '').trim();
+      const effortNorm = normalizeEffortKey(item.thinkingEffort ?? item.thinking_effort);
+      const key = `${model.toLowerCase()}::${effortNorm}`;
+      const total = Number(item.totalTokens ?? item.total_tokens ?? 0) || 0;
+      const input = Number(item.promptTokens ?? item.input_tokens ?? 0) || 0;
+      const output = Number(item.candidatesTokens ?? item.output_tokens ?? 0) || 0;
+      const cached = Number(item.cachedTokens ?? item.cached_tokens ?? 0) || 0;
+      const cacheWrite = Number(item.cacheWriteTokens ?? item.cache_write_tokens ?? 0) || 0;
+      const req = Number(item.requestCount ?? item.request_count ?? 0) || 0;
+      const usd = Number(item.estimatedUsd ?? item.estimated_usd ?? 0) || 0;
+      const unpriced = Number(item.unpricedTokens ?? item.unpriced_tokens ?? 0) || 0;
+      const itemPartial = item.partiallyPriced === true;
+      const itemPriced =
+        item.priced ?? (usd > 0 || (unpriced === 0 && total > 0 && item.priced === undefined));
+      const effectivePriced = itemPriced || itemPartial;
+      const status = String(item.pricingStatus ?? '');
+      const rawId = String(item.modelId ?? item.model_id ?? model);
+      const rawTps = item.medianOutputTps ?? item.median_output_tps;
+      const itemTps = typeof rawTps === 'number' && Number.isFinite(rawTps) && rawTps > 0 ? rawTps : null;
+      const itemSamples = Number(item.speedSampleCount ?? item.speed_sample_count ?? 0) || 0;
+
+      const existing = grouped.get(key);
+      if (existing) {
+        existing.total += total;
+        existing.input += input;
+        existing.output += output;
+        existing.cached += cached;
+        existing.cacheWrite += cacheWrite;
+        existing.req += req;
+        existing.usd += usd;
+        existing.unpriced += unpriced;
+        existing.anyPriced = existing.anyPriced || effectivePriced;
+        existing.allPriced = existing.allPriced && itemPriced && !itemPartial;
+        if ((!existing.pricingStatus || existing.pricingStatus === 'unpriced') && status && status !== 'unpriced') {
+          existing.pricingStatus = status;
+        }
+        if (existing.medianOutputTps === null && itemTps !== null) {
+          existing.medianOutputTps = itemTps;
+          existing.speedSampleCount = itemSamples;
+        }
+      } else {
+        order.push(key);
+        grouped.set(key, {
+          model,
+          modelId: rawId || model,
+          thinkingEffort: effortNorm || null,
+          total,
+          input,
+          output,
+          cached,
+          cacheWrite,
+          req,
+          usd,
+          unpriced,
+          anyPriced: effectivePriced,
+          allPriced: itemPriced && !itemPartial,
+          pricingStatus: status,
+          medianOutputTps: itemTps,
+          speedSampleCount: itemSamples,
+        });
+      }
+    }
+
+    return order
+      .map((key) => {
+        const b = grouped.get(key)!;
+        const baseName = localizedModelLabel(b.model, locale);
+        const effortLabel = formatThinkingEffortLabel(b.thinkingEffort);
+        const partiallyPriced = b.anyPriced && (!b.allPriced || b.unpriced > 0);
+        const priced = b.allPriced && b.unpriced === 0;
+        return {
+          key,
+          model: b.model,
+          modelId: b.modelId,
+          thinkingEffort: b.thinkingEffort,
+          effortLabel,
+          donutLabel: effortLabel ? `${baseName} (${effortLabel})` : baseName,
+          totalTokens: b.total,
+          promptTokens: b.input,
+          candidatesTokens: b.output,
+          cachedTokens: b.cached,
+          cacheWriteTokens: b.cacheWrite,
+          requestCount: b.req,
+          estimatedUsd: b.usd,
+          unpricedTokens: b.unpriced,
+          priced,
+          partiallyPriced,
+          pricingStatus: b.pricingStatus,
+          medianOutputTps: b.medianOutputTps,
+          speedSampleCount: b.speedSampleCount,
+        };
+      })
+      .sort((a, b) => {
+        if (a.totalTokens !== b.totalTokens) return b.totalTokens - a.totalTokens;
+        if (Math.abs(a.estimatedUsd - b.estimatedUsd) > 1e-12) return b.estimatedUsd - a.estimatedUsd;
+        return b.requestCount - a.requestCount;
+      });
+  }, [report, locale]);
+
+  const isCustomSingleDay =
+    period === 'custom' &&
+    isCustomRangeValid &&
+    (report?.customRange?.isSingleDay ?? report?.custom_range?.isSingleDay ?? customStartDate === customEndDate);
 
   const trendPoints = useMemo<TrendBarPoint[]>(() => {
     const costPerToken = totalTokens > 0 && estimatedUsd > 0 ? estimatedUsd / totalTokens : 0;
 
-    if (period === 'today') {
+    if (period === 'today' || isCustomSingleDay) {
       const hourly = report?.todayHourly ?? [];
       const map = new Map<number, { tokens: number; requests: number; cost: number; hasCost: boolean }>();
       for (const item of hourly) {
@@ -130,6 +322,7 @@ export function UsagePage() {
         }
       }
       const nowHour = new Date().getHours();
+      const isTodayBucket = period === 'today' || customEndDate === todayDateStr;
       return Array.from({ length: 24 }, (_, hour) => {
         const hh = String(hour).padStart(2, '0');
         const row = map.get(hour);
@@ -143,16 +336,20 @@ export function UsagePage() {
             : tokensVal;
         return {
           label: locale === 'en' ? `${hh}h` : `${hh}时`,
-          tooltipLabel: t('menu_panel.trend.today_key', { time: `${hh}:00` }),
+          tooltipLabel:
+            period === 'today'
+              ? t('menu_panel.trend.today_key', { time: `${hh}:00` })
+              : `${customStartDate} ${hh}:00`,
           value: val,
-          isFuture: val === 0 && hour > nowHour,
+          isFuture: isTodayBucket && val === 0 && hour > nowHour,
         };
       });
     }
 
     const daily = report?.dailyTrends ?? [];
-    const limit = period === '7d' ? 7 : period === '30d' ? 30 : Math.max(30, daily.length);
-    return daily.slice(-limit).map((d) => {
+    const visibleDaily =
+      period === '7d' ? daily.slice(-7) : period === '30d' ? daily.slice(-30) : daily;
+    return visibleDaily.map((d) => {
       const shortDate = d.date.length >= 10 ? d.date.slice(5) : d.date;
       const tokensVal = Number(d.totalTokens ?? d.total_tokens ?? 0) || 0;
       const rawCost = d.estimatedUsd ?? d.estimated_usd;
@@ -169,7 +366,7 @@ export function UsagePage() {
         value: val,
       };
     });
-  }, [period, report, chartMetric, locale, t, totalTokens, estimatedUsd]);
+  }, [period, isCustomSingleDay, report, chartMetric, locale, t, totalTokens, estimatedUsd, customStartDate, customEndDate, todayDateStr]);
 
   // Donut slices (top 4 + Other)
   const { donutSlices, effectiveTotalUsd } = useMemo(() => {
@@ -184,7 +381,7 @@ export function UsagePage() {
     priced.forEach((m, idx) => {
       if (idx < 4 || priced.length <= 5) {
         slices.push({
-          label: localizedModelLabel(m.model, locale),
+          label: m.donutLabel,
           usd: m.estimatedUsd,
           color: DONUT_PALETTE[idx % DONUT_PALETTE.length],
         });
@@ -201,7 +398,7 @@ export function UsagePage() {
       });
     }
     return { donutSlices: slices, effectiveTotalUsd: effTotal };
-  }, [modelRows, estimatedUsd, locale, t]);
+  }, [modelRows, estimatedUsd, t]);
 
   const unpricedCount = summary.unpricedModels ?? modelRows.filter((m) => !m.priced && !m.partiallyPriced && m.totalTokens > 0).length;
   const failedDbs = summary.failedDatabasesCount ?? 0;
@@ -219,7 +416,8 @@ export function UsagePage() {
 
   const handleExport = async () => {
     if (!report) return;
-    const defaultName = t('usage.models.export_filename', { period });
+    const periodTag = period === 'custom' ? `${customStartDate}_${customEndDate}` : period;
+    const defaultName = t('usage.models.export_filename', { period: periodTag });
     const path = await pickSaveJsonPath(t('usage.title'), defaultName);
     if (!path) return;
     try {
@@ -240,7 +438,7 @@ export function UsagePage() {
       {/* Page Header */}
       <div className="gb-page-header" style={{ flexWrap: 'wrap' }}>
         <h1 className="gb-page-title">{t('usage.title')}</h1>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <div className="gb-segmented">
             {PERIODS.map((p) => (
               <button
@@ -249,19 +447,23 @@ export function UsagePage() {
                 className={`gb-segmented-btn ${period === p ? 'active' : ''}`}
                 onClick={() => setPeriod(p)}
               >
-                {t(`usage.period.${p}`)}
+                {t(
+                  `usage.period.${p}`,
+                  undefined,
+                  p === 'custom' ? (locale === 'en' ? 'Custom' : '自定义') : undefined,
+                )}
               </button>
             ))}
           </div>
           <button
             type="button"
             className="gb-btn gb-btn-sm"
-            disabled={!reachable || loading}
+            disabled={!reachable || loading || (period === 'custom' && !isCustomRangeValid)}
             onClick={() => {
               if (environmentId === 'all') {
-                void fetchUsage(period, true);
+                void fetchUsage(period, true, undefined, customRangeParam);
               } else {
-                void fetchUsage(period, true, environmentId).then((res) => {
+                void fetchUsage(period, true, environmentId, customRangeParam).then((res) => {
                   if (res) setScopedReport(res);
                 });
               }
@@ -281,6 +483,57 @@ export function UsagePage() {
           </button>
         </div>
       </div>
+
+      {/* Custom Date Range Pickers */}
+      {period === 'custom' && (
+        <div
+          className="gb-card"
+          style={{
+            padding: '10px 14px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+            flexWrap: 'wrap',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+              <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>
+                {t('usage.custom.start_date', undefined, locale === 'en' ? 'Start Date' : '开始日期')}
+              </span>
+              <input
+                type="date"
+                className="gb-input tabular"
+                value={customStartDate}
+                max={todayDateStr}
+                onChange={(e) => setCustomStartDate(e.target.value)}
+              />
+            </label>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+              <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>
+                {t('usage.custom.end_date', undefined, locale === 'en' ? 'End Date' : '结束日期')}
+              </span>
+              <input
+                type="date"
+                className="gb-input tabular"
+                value={customEndDate}
+                max={todayDateStr}
+                onChange={(e) => setCustomEndDate(e.target.value)}
+              />
+            </label>
+          </div>
+          {!isCustomRangeValid && (
+            <span style={{ fontSize: 11.5, color: 'var(--danger)', fontWeight: 500 }}>
+              {t(
+                'usage.custom.invalid_range',
+                undefined,
+                locale === 'en' ? 'Start date must be on or before end date.' : '开始日期不能晚于结束日期。',
+              )}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* SSH Environment Scope Filter Bar (v1.2.0) */}
       {normalizedSshHosts.length > 0 && (
@@ -394,7 +647,13 @@ export function UsagePage() {
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600 }}>{t(`usage.trend_title.${period}`)}</div>
+            <div style={{ fontSize: 13.5, fontWeight: 600 }}>
+              {t(
+                `usage.trend_title.${period}`,
+                undefined,
+                period === 'custom' ? (locale === 'en' ? 'Custom Range Usage' : '自定义时段用量') : undefined,
+              )}
+            </div>
             <div className="gb-segmented">
               <button
                 type="button"
@@ -604,6 +863,37 @@ export function UsagePage() {
                 </div>
               </div>
             </div>
+
+            <div className="gb-divider" />
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12.5, fontWeight: 600 }}>
+                  <Gauge size={13} style={{ color: 'var(--blue)' }} />
+                  <span>
+                    {t('usage.section.output_speed', undefined, locale === 'en' ? 'Output Speed' : '输出速度')}
+                  </span>
+                </div>
+                <div className="tabular" style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
+                  {speedSampleCount > 0 && typeof medianOutputTps === 'number' && medianOutputTps > 0
+                    ? t(
+                        'usage.speed.median_desc',
+                        { count: speedSampleCount },
+                        locale === 'en'
+                          ? `Median of last ${speedSampleCount} replies`
+                          : `最近 ${speedSampleCount} 次回复中位数`,
+                      )
+                    : t(
+                        'usage.speed.no_samples',
+                        undefined,
+                        locale === 'en' ? 'No streaming duration samples yet' : '暂无流式耗时样本',
+                      )}
+                </div>
+              </div>
+              <div className="tabular" style={{ fontSize: 19, fontWeight: 700 }}>
+                {formatOutputTps(medianOutputTps)}
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -646,7 +936,7 @@ export function UsagePage() {
                   : '$0.00';
 
               return (
-                <div key={item.model}>
+                <div key={item.key}>
                   {idx > 0 && <div className="gb-divider" style={{ marginBottom: 12 }} />}
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
@@ -665,20 +955,30 @@ export function UsagePage() {
                         <BrandIcons fallbackName={name} size={16} isDark={isDark} />
                       </div>
                       <div style={{ minWidth: 0 }}>
-                        <div
-                          style={{
-                            fontSize: 13.5,
-                            fontWeight: 600,
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {name}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                          <span
+                            style={{
+                              fontSize: 13.5,
+                              fontWeight: 600,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {name}
+                          </span>
+                          {item.effortLabel && (
+                            <span
+                              className="gb-pill gb-pill-blue"
+                              style={{ height: 18, padding: '0 6px', fontSize: 10, flexShrink: 0 }}
+                            >
+                              {item.effortLabel}
+                            </span>
+                          )}
                         </div>
                         <div
                           className="tabular"
-                          style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginTop: 2, display: 'flex', gap: 10 }}
+                          style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginTop: 2, display: 'flex', gap: 10, flexWrap: 'wrap' }}
                         >
                           <span style={{ color: 'var(--text)', fontWeight: 600 }}>
                             {t('usage.model_row.tokens', {
@@ -688,6 +988,9 @@ export function UsagePage() {
                           <span>
                             {t('usage.model_row.requests', { count: formatInteger(item.requestCount, locale) })}
                           </span>
+                          {item.medianOutputTps !== null && (
+                            <span>{formatOutputTps(item.medianOutputTps)}</span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -734,6 +1037,8 @@ export function UsagePage() {
         open={logOpen}
         initialPeriod={period}
         initialEnvironmentId={environmentId}
+        initialStartDate={customStartDate}
+        initialEndDate={customEndDate}
         onClose={() => setLogOpen(false)}
       />
       <PricingSyncModal open={pricingOpen} onClose={() => setPricingOpen(false)} />

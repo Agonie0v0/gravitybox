@@ -7,6 +7,8 @@ import {
   Circle,
   DollarSign,
   ExternalLink,
+  Eye,
+  EyeOff,
   Globe,
   Languages,
   Moon,
@@ -30,7 +32,7 @@ import { ToastBanner } from '../components/Toast';
 import { TrendChart, type TrendBarPoint } from '../components/TrendChart';
 import { useApp } from '../context/AppContext';
 import {
-  accountDisplayName,
+  displayAccountIdentity,
   foldThinkingVariants,
   formatCompactTokens,
   formatInteger,
@@ -273,6 +275,10 @@ export function TrayWindow() {
   );
 
   const translationOn = status.translationEnabled !== false && status.mode !== 'paused';
+  const masked = Boolean(config.privacyMaskAccounts);
+  const privacyLabel = masked
+    ? t('accounts.privacy.show', undefined, locale === 'en' ? 'Show Account Info' : '显示账号信息')
+    : t('accounts.privacy.hide', undefined, locale === 'en' ? 'Hide Account Info' : '隐藏账号信息');
 
   const footerMainTarget: { page: string; label: string } =
     tab === 0
@@ -707,26 +713,63 @@ export function TrayWindow() {
           <div className="gb-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
             {activeAccount || dashboard?.accounts?.activeEmail ? (
               <>
-                <div className="gb-tray-card" style={{ padding: '11px 12px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                    <span style={{ fontSize: 15, fontWeight: 700 }}>
-                      {accountDisplayName(
-                        activeAccount?.name ?? dashboard?.accounts?.activeName,
-                        activeAccount?.email ?? dashboard?.accounts?.activeEmail,
-                        locale,
-                      )}
-                    </span>
-                    <TierBadge
-                      tier={normalizeTier(
-                        activeAccount?.subscription_tier ?? dashboard?.accounts?.activeTier,
-                        locale,
-                      )}
-                    />
-                  </div>
-                  <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginTop: 2 }}>
-                    {activeAccount?.email ?? dashboard?.accounts?.activeEmail}
-                  </div>
-                </div>
+                {(() => {
+                  const activeIdentity = displayAccountIdentity(
+                    activeAccount?.name ?? dashboard?.accounts?.activeName,
+                    activeAccount?.email ?? dashboard?.accounts?.activeEmail,
+                    locale,
+                    masked,
+                  );
+                  return (
+                    <div className="gb-tray-card" style={{ padding: '11px 12px' }}>
+                      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }}>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                            <span
+                              style={{
+                                fontSize: 15,
+                                fontWeight: 700,
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {activeIdentity.name}
+                            </span>
+                            <TierBadge
+                              tier={normalizeTier(
+                                activeAccount?.subscription_tier ?? dashboard?.accounts?.activeTier,
+                                locale,
+                              )}
+                            />
+                          </div>
+                          <div
+                            style={{
+                              fontSize: 11.5,
+                              color: 'var(--text-secondary)',
+                              marginTop: 2,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {activeIdentity.email}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="gb-btn gb-btn-ghost gb-icon-btn"
+                          style={{ width: 24, height: 24, flexShrink: 0 }}
+                          aria-label={privacyLabel}
+                          title={privacyLabel}
+                          onClick={() => void updateConfig({ privacyMaskAccounts: !masked })}
+                        >
+                          {masked ? <Eye size={13} /> : <EyeOff size={13} />}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 <div className="gb-tray-card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 11 }}>
                   {quotaContract.displayGroups.length === 0 ? (
@@ -785,11 +828,23 @@ export function TrayWindow() {
         {/* TAB 2: ACCOUNTS */}
         {tab === 2 && (
           <div className="gb-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 2px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 2px', gap: 8 }}>
               <span style={{ fontSize: 12.5, fontWeight: 600 }}>{t('menu_panel.accounts.section_title')}</span>
-              <span className="tabular" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                {t('menu_panel.accounts.count', { count: accounts.length })}
-              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span className="tabular" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                  {t('menu_panel.accounts.count', { count: accounts.length })}
+                </span>
+                <button
+                  type="button"
+                  className="gb-btn gb-btn-ghost gb-icon-btn"
+                  style={{ width: 24, height: 24 }}
+                  aria-label={privacyLabel}
+                  title={privacyLabel}
+                  onClick={() => void updateConfig({ privacyMaskAccounts: !masked })}
+                >
+                  {masked ? <Eye size={13} /> : <EyeOff size={13} />}
+                </button>
+              </div>
             </div>
 
             {accounts.length === 0 ? (
@@ -803,6 +858,7 @@ export function TrayWindow() {
                 const contract = parseQuotaContract(acc as Record<string, unknown>, locale, { compact: true });
                 const tier = normalizeTier(acc.subscription_tier, locale);
                 const updatedTs = Number(acc.quota_last_updated ?? acc.quotaLastUpdated ?? 0);
+                const identity = displayAccountIdentity(acc.name, acc.email, locale, masked);
 
                 return (
                   <div
@@ -835,12 +891,12 @@ export function TrayWindow() {
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           <span style={{ fontSize: 13.5, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {accountDisplayName(acc.name, acc.email, locale)}
+                            {identity.name}
                           </span>
                           <TierBadge tier={tier} />
                         </div>
                         <div style={{ fontSize: 11, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {acc.email}
+                          {identity.email}
                         </div>
                       </div>
                       {expanded ? (

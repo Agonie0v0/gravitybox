@@ -1,5 +1,5 @@
 export type PageKey = 'overview' | 'accounts' | 'usage' | 'settings' | 'about';
-export type UsagePeriodKey = 'today' | '7d' | '30d' | 'all';
+export type UsagePeriodKey = 'today' | '7d' | '30d' | 'all' | 'custom';
 export type ThemeMode = 'system' | 'light' | 'dark';
 export type LanguageSetting = 'system' | 'zh-Hans' | 'en';
 export type ProxyMode = 'off' | 'system' | 'manual';
@@ -90,6 +90,7 @@ export interface UiConfig {
   themeMode: ThemeMode;
   antigravityProxyMode: ProxyMode;
   antigravityProxyManualUrl: string;
+  privacyMaskAccounts: boolean;
 }
 
 export interface AntigravityInfo {
@@ -173,10 +174,19 @@ export interface DailyTrendRaw {
   estimatedUsd?: number;
 }
 
+export interface CustomDateRange {
+  startDate: string;
+  endDate: string;
+  isSingleDay?: boolean;
+  dayCount?: number;
+}
+
 export interface ModelUsageRaw {
   model: string;
   modelId?: string;
   model_id?: string;
+  thinkingEffort?: string | null;
+  thinking_effort?: string | null;
   promptTokens?: number;
   input_tokens?: number;
   candidatesTokens?: number;
@@ -191,6 +201,10 @@ export interface ModelUsageRaw {
   request_count?: number;
   estimatedUsd?: number;
   estimated_usd?: number;
+  medianOutputTps?: number | null;
+  median_output_tps?: number | null;
+  speedSampleCount?: number;
+  speed_sample_count?: number;
   priced?: boolean;
   partiallyPriced?: boolean;
   unpricedTokens?: number;
@@ -209,6 +223,10 @@ export interface UsagePeriodSummaryData {
   requestCount?: number;
   estimatedUsd?: number;
   cacheHitRate?: number;
+  medianOutputTps?: number | null;
+  median_output_tps?: number | null;
+  speedSampleCount?: number;
+  speed_sample_count?: number;
   databasesScanned?: number;
   databasesDiscovered?: number;
   scanScopeDescription?: string;
@@ -254,10 +272,14 @@ export interface UsageSummaryReply {
     environmentBreakdown?: Record<string, unknown>;
   };
   byModel?: ModelUsageRaw[];
+  byModelEffort?: ModelUsageRaw[];
+  by_model_effort?: ModelUsageRaw[];
   models?: ModelUsageRaw[];
   dailyTrends?: DailyTrendRaw[];
   todayHourly?: HourlyPointRaw[];
-  periods?: Record<UsagePeriodKey, UsageSummaryReply>;
+  customRange?: CustomDateRange | null;
+  custom_range?: CustomDateRange | null;
+  periods?: Partial<Record<UsagePeriodKey, UsageSummaryReply>>;
 }
 
 export interface AccountRecord {
@@ -356,7 +378,7 @@ export interface DashboardSummaryReply {
     unknownTimeRecords?: number;
     todayHourly?: HourlyPointRaw[];
     todayByModel?: ModelUsageRaw[];
-    periods?: Record<UsagePeriodKey, UsageSummaryReply>;
+    periods?: Partial<Record<UsagePeriodKey, UsageSummaryReply>>;
     environments?: EnvironmentNode[];
     availableEnvironments?: EnvironmentNode[];
     environmentsRevision?: string | number;
@@ -383,6 +405,8 @@ export interface UsageEventRow {
   timestamp?: number | string;
   model?: string;
   modelId?: string;
+  thinking_effort?: string | null;
+  thinkingEffort?: string | null;
   input_tokens?: number;
   inputTokens?: number;
   output_tokens?: number;
@@ -395,6 +419,12 @@ export interface UsageEventRow {
   totalTokens?: number;
   estimated_usd?: number;
   estimatedUsd?: number;
+  streaming_duration_seconds?: number | null;
+  streamingDurationSeconds?: number | null;
+  ttft_seconds?: number | null;
+  ttftSeconds?: number | null;
+  output_tps?: number | null;
+  outputTps?: number | null;
   priced?: boolean;
   source?: string;
   environment_id?: string;

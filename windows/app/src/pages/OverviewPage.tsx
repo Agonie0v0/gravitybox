@@ -19,7 +19,7 @@ import { TierBadge } from '../components/TierBadge';
 import { TrendChart, type TrendBarPoint } from '../components/TrendChart';
 import { useApp } from '../context/AppContext';
 import {
-  accountDisplayName,
+  displayAccountIdentity,
   foldThinkingVariants,
   formatBytes,
   formatCompactTokens,
@@ -27,6 +27,7 @@ import {
   formatShortDateTime,
   formatUsd,
   localizedModelLabel,
+  maskEmail,
   normalizeTier,
   parseHourIndex,
   sortModelsByUsage,
@@ -45,6 +46,7 @@ export function OverviewPage() {
     t,
     locale,
     isDark,
+    config,
     reachable,
     status,
     dashboard,
@@ -81,13 +83,15 @@ export function OverviewPage() {
   const dashAccounts = dashboard?.accounts ?? null;
   const dashUsage = dashboard?.usage ?? null;
   const todayReport = usageByPeriod.today;
+  const masked = Boolean(config.privacyMaskAccounts);
 
   const activeName = dashAccounts
-    ? accountDisplayName(dashAccounts.activeName, dashAccounts.activeEmail, locale)
+    ? displayAccountIdentity(dashAccounts.activeName, dashAccounts.activeEmail, locale, masked).name
     : reachable
     ? t('overview.account.no_saved')
     : t('overview.loading_account');
-  const activeEmail = dashAccounts?.activeEmail ?? status.activeAccountEmail ?? '';
+  const rawActiveEmail = (dashAccounts?.activeEmail ?? status.activeAccountEmail ?? '').trim();
+  const activeEmail = rawActiveEmail ? (masked ? maskEmail(rawActiveEmail) : rawActiveEmail) : '';
   const activeTier = normalizeTier(dashAccounts?.activeTier ?? status.activeSubscriptionTier, locale);
 
   const contract = useMemo(

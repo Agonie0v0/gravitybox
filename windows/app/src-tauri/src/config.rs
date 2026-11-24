@@ -43,6 +43,8 @@ pub struct UiConfig {
     pub antigravity_proxy_mode: String,
     #[serde(default)]
     pub antigravity_proxy_manual_url: String,
+    #[serde(default)]
+    pub privacy_mask_accounts: bool,
 }
 
 fn default_schema() -> u32 {
@@ -88,6 +90,7 @@ impl Default for UiConfig {
             theme_mode: "system".to_string(),
             antigravity_proxy_mode: "off".to_string(),
             antigravity_proxy_manual_url: String::new(),
+            privacy_mask_accounts: false,
         }
     }
 }
@@ -218,4 +221,81 @@ pub fn save_config(state_dir: &Path, cfg: &UiConfig) -> Result<(), String> {
         return Err(format!("配置保存失败: {}", err));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_state_dir(suffix: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "gb-config-test-{}-{}-{}",
+            std::process::id(),
+            stamp,
+            suffix
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn default_ui_config_sets_privacy_mask_accounts_false() {
+        let cfg = UiConfig::default();
+        assert!(!cfg.privacy_mask_accounts);
+    }
+
+    #[test]
+    fn privacy_mask_accounts_serializes_as_camel_case() {
+        let mut cfg = UiConfig::default();
+        let default_json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(default_json.get("privacyMaskAccounts"), Some(&Value::Bool(false)));
+        assert!(default_json.get("privacy_mask_accounts").is_none());
+
+        cfg.privacy_mask_accounts = true;
+        let enabled_json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(enabled_json.get("privacyMaskAccounts"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn load_config_backward_compatible_when_privacy_mask_accounts_omitted() {
+        let dir = temp_state_dir("compat");
+        let legacy_json = serde_json::json!({
+            "schema": 2,
+            "lastPage": 1,
+            "hudEnabled": false,
+            "externalCustomKey": "preserved"
+        });
+        fs::write(
+            dir.join("config.json"),
+            serde_json::to_string_pretty(&legacy_json).unwrap(),
+        )
+        .unwrap();
+
+        let mut loaded = load_config(&dir);
+        assert!(!loaded.privacy_mask_accounts);
+        assert_eq!(loaded.last_page, 1);
+        assert!(!loaded.hud_enabled);
+
+        loaded.privacy_mask_accounts = true;
+        save_config(&dir, &loaded).unwrap();
+
+        let reloaded = load_config(&dir);
+        assert!(reloaded.privacy_mask_accounts);
+
+        let raw: Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        assert_eq!(raw.get("privacyMaskAccounts"), Some(&Value::Bool(true)));
+        assert_eq!(
+            raw.get("externalCustomKey"),
+            Some(&Value::String("preserved".to_string()))
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

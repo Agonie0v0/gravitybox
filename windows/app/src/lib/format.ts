@@ -189,6 +189,122 @@ export function accountDisplayName(name: string | undefined | null, email: strin
   return translate(locale, 'accounts.unnamed');
 }
 
+const GENERIC_ACCOUNT_NAMES = new Set([
+  'google 账号',
+  'google account',
+  '未登录账号',
+  'not signed in',
+  '未命名账号',
+  'unnamed account',
+]);
+
+export function maskEmail(email: string | undefined | null): string {
+  const trimmed = (email ?? '').trim();
+  if (!trimmed) return '';
+  const at = trimmed.indexOf('@');
+  if (at < 0) {
+    const chars = Array.from(trimmed);
+    if (chars.length <= 1) return '*';
+    if (chars.length === 2) return `${chars[0]}*`;
+    return `${chars.slice(0, 2).join('')}***`;
+  }
+  const local = trimmed.slice(0, at);
+  const domain = trimmed.slice(at + 1);
+  const localChars = Array.from(local);
+  const maskedLocal =
+    localChars.length <= 1
+      ? '*'
+      : localChars.length === 2
+      ? `${localChars[0]}*`
+      : `${localChars.slice(0, 2).join('')}***`;
+  if (!domain) return `${maskedLocal}@***`;
+  const parts = domain.split('.');
+  const firstChars = Array.from(parts[0] ?? '');
+  const maskedDomain =
+    parts.length >= 2 && firstChars.length > 0
+      ? `${firstChars[0]}***.${parts.slice(1).join('.')}`
+      : `${Array.from(domain)[0] ?? '*'}***`;
+  return `${maskedLocal}@${maskedDomain}`;
+}
+
+export function maskAccountName(name: string | undefined | null): string {
+  const trimmed = (name ?? '').trim();
+  if (!trimmed) return '';
+  if (GENERIC_ACCOUNT_NAMES.has(trimmed.toLowerCase())) {
+    return trimmed;
+  }
+  const chars = Array.from(trimmed);
+  if (chars.length <= 1) return '*';
+  if (chars.length === 2) return `${chars[0]}*`;
+  return `${chars[0]}***`;
+}
+
+export function displayAccountIdentity(
+  name: string | undefined | null,
+  email: string | undefined | null,
+  locale: ResolvedLocale,
+  masked: boolean,
+): { name: string; email: string } {
+  const resolvedName = accountDisplayName(name, email, locale);
+  const cleanEmail = (email ?? '').trim();
+  if (!masked) {
+    return { name: resolvedName, email: cleanEmail };
+  }
+  return {
+    name: maskAccountName(resolvedName),
+    email: cleanEmail ? maskEmail(cleanEmail) : '',
+  };
+}
+
+const EFFORT_LABELS: Record<string, string> = {
+  minimal: 'Minimal',
+  extra_low: 'Extra Low',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'XHigh',
+  max: 'Max',
+  thinking: 'Thinking',
+};
+
+export function formatThinkingEffortLabel(
+  effort: string | undefined | null,
+): string {
+  const trimmed = (effort ?? '').trim();
+  if (!trimmed) return '';
+  let normalized = trimmed.toLowerCase().replace(/[\s-]+/g, '_');
+  if (
+    normalized === 'extra_high' ||
+    normalized === 'extra' ||
+    normalized === 'x_high' ||
+    normalized === 'extrahigh'
+  ) {
+    normalized = 'xhigh';
+  } else if (
+    normalized === 'x_low' ||
+    normalized === 'xlow' ||
+    normalized === 'extralow'
+  ) {
+    normalized = 'extra_low';
+  }
+  return EFFORT_LABELS[normalized] ?? trimmed;
+}
+
+export function formatOutputTps(tps: number | undefined | null): string {
+  if (typeof tps !== 'number' || !Number.isFinite(tps) || tps <= 0) {
+    return '--';
+  }
+  const formatted = tps >= 100 ? String(Math.round(tps)) : tps < 1 ? tps.toFixed(2) : tps.toFixed(1);
+  return `${formatted} tok/s`;
+}
+
+export function formatLocalDateInput(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
 export function normalizeTier(raw: string | undefined | null, locale: ResolvedLocale): string {
   const trimmed = (raw ?? '').trim();
   if (!trimmed) return '';
