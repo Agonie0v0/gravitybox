@@ -4,6 +4,7 @@ import { createConnection } from 'node:net';
 import { join, posix, resolve, win32 } from 'node:path';
 import { bt } from '../i18n.js';
 import { atomicRenameWithRetry, isOwnedByCurrentUser } from './fs.js';
+import { resolveWin32HelperPath, verifyPipeServer } from './win32-helper.js';
 
 const NAMED_PIPE_RE = /^\\\\[.?]\\pipe\\/i;
 const WINDOWS_RANDOM_PIPE_RE = /^\\\\\.\\pipe\\gravitybox-[0-9a-f]{16}-[0-9a-f]{16}$/i;
@@ -27,6 +28,7 @@ export interface WindowsPipeServerIdentity {
   pipeName: string;
   serverPid: number;
   sameUserSid: boolean;
+  exePath?: string;
 }
 
 export type WindowsPipeServerIdentityVerifier = (
@@ -320,15 +322,19 @@ export async function prepareWindowsIpcForListen(
 /**
  * Resolve the active client IPC target for `stateDir`.
  * - macOS / POSIX: returns `{ endpoint: '<stateDir>/control.sock', authToken: null, session: null }`.
- * - Windows: reads `<stateDir>/ipc-session.json`, optionally runs `verifyServerIdentity`
- *   (e.g. GetNamedPipeServerProcessId + EqualSid), and returns `{ endpoint, authToken, session }`
- *   or `null` if no active session descriptor exists.
+ * - Windows: reads `<stateDir>/ipc-session.json` and verifies the pipe server identity:
+ *   - Uses `options.verifyServerIdentity` when explicitly provided.
+ *   - Otherwise, on Windows when `gravitybox-win-helper.exe` is available, automatically runs
+ *     `verifyPipeServer` (`CreateFileW(SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION)` +
+ *     `GetNamedPipeServerProcessId` + `EqualSid`) to reject squatted pipes whose server PID
+ *     or user SID does not match `ipc-session.json` (returning `null` if the pipe no longer exists).
  */
 export async function resolveClientIpcTarget(
   stateDir: string,
   options: {
     platform?: NodeJS.Platform;
     verifyServerIdentity?: WindowsPipeServerIdentityVerifier;
+    helperPath?: string;
   } = {},
 ): Promise<ClientIpcTarget | null> {
   const platform = options.platform ?? process.platform;
@@ -345,6 +351,20 @@ export async function resolveClientIpcTarget(
     const identity = await options.verifyServerIdentity(session);
     if (!identity || !identity.sameUserSid || identity.serverPid !== session.pid) {
       throw new Error(bt('main.socket_mismatch'));
+    }
+  } else if (process.platform === 'win32') {
+    const helperPath = resolveWin32HelperPath(options.helperPath);
+    if (helperPath) {
+      const verified = await verifyPipeServer(session.pipeName, {
+        expectedPid: session.pid,
+        helperPath,
+      });
+      if (verified.reason === 'pipe_not_found') {
+        return null;
+      }
+      if (!verified.verified || !verified.sameUserSid || verified.serverPid !== session.pid) {
+        throw new Error(bt('main.socket_mismatch'));
+      }
     }
   }
   return {

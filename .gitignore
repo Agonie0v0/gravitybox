@@ -40,3 +40,6 @@
 # Local assistant instructions
 /AGENTS.md
 /.agents/
+
+# Windows helper build output
+/windows/win-helper/target/
