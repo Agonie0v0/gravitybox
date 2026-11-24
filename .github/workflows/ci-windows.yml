@@ -51,7 +51,7 @@ jobs:
       - name: Install Node dependencies
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
-          npm --prefix windows/app ci --no-audit --no-fund
+          npm --prefix windows/app ci --ignore-scripts --no-audit --no-fund
 
       - name: Build TypeScript backend
         run: npm run build

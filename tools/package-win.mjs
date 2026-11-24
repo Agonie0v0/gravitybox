@@ -68,6 +68,10 @@ export function resolveWindowsPackagePaths({
   };
 }
 
+function resolveWindowsSystemRoot(env = process.env) {
+  return env.SystemRoot?.trim() || env.WINDIR?.trim() || 'C:\\Windows';
+}
+
 export async function resolveMakensisPath(env = process.env, existsFn = existsSync) {
   const explicit = env.MAKENSIS_PATH?.trim();
   if (explicit && existsFn(explicit)) return explicit;
@@ -81,7 +85,8 @@ export async function resolveMakensisPath(env = process.env, existsFn = existsSy
   }
 
   try {
-    const { stdout } = await run('where.exe', ['makensis'], { windowsHide: true });
+    const whereExe = join(resolveWindowsSystemRoot(env), 'System32', 'where.exe');
+    const { stdout } = await run(whereExe, ['makensis'], { windowsHide: true });
     const first = stdout.split(/\r?\n/).map(line => line.trim()).find(line => line && existsFn(line));
     if (first) return first;
   } catch {
@@ -95,7 +100,10 @@ function npmExecSpec(args) {
   if (npmExecPath && existsSync(npmExecPath)) {
     return { binary: process.execPath, args: [npmExecPath, ...args] };
   }
-  return { binary: 'cmd.exe', args: ['/d', '/s', '/c', 'npm', ...args] };
+  return {
+    binary: join(resolveWindowsSystemRoot(), 'System32', 'cmd.exe'),
+    args: ['/d', '/s', '/c', 'npm', ...args],
+  };
 }
 
 async function createZipFromDirectory(sourceDir, destZip) {
@@ -106,9 +114,16 @@ async function createZipFromDirectory(sourceDir, destZip) {
     '$dst = $env:GB_ZIP_DST',
     '[System.IO.Compression.ZipFile]::CreateFromDirectory($src, $dst, [System.IO.Compression.CompressionLevel]::Optimal, $true, [System.Text.Encoding]::UTF8)',
   ].join('; ');
+  const fallbackPowerShell = join(
+    resolveWindowsSystemRoot(),
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe',
+  );
   const shellExe = existsSync('C:\\Program Files\\PowerShell\\7\\pwsh.exe')
     ? 'C:\\Program Files\\PowerShell\\7\\pwsh.exe'
-    : 'powershell.exe';
+    : fallbackPowerShell;
   await run(shellExe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', psScript], {
     cwd: root,
     maxBuffer: 16e6,
