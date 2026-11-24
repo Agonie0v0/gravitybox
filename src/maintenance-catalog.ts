@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { bt } from './i18n.js';
 import {
   appProcesses,
@@ -249,36 +249,38 @@ function collectWindowsAppRoots(appPath?: string): string[] {
   return Array.from(roots);
 }
 
-export async function readProcessCommands(appPath?: string): Promise<string[] | null> {
+export async function readProcessCommands(): Promise<string[] | null> {
   const now = Date.now();
-  if (!appPath && cachedProcessCommands && now - cachedProcessCommands.at < PROCESS_SNAPSHOT_TTL_MS) {
+  if (cachedProcessCommands && now - cachedProcessCommands.at < PROCESS_SNAPSHOT_TTL_MS) {
     return cachedProcessCommands.commands;
   }
-  if (!appPath && inFlightProcessCommands) {
+  if (inFlightProcessCommands) {
     return inFlightProcessCommands;
   }
   const task = (async (): Promise<string[] | null> => {
     try {
       if (isWindows()) {
-        const procs = await appProcesses(collectWindowsAppRoots(appPath));
+        // Enumerate all running processes (matching `/bin/ps -axo command=` on macOS) so both
+        // custom Antigravity install paths and external browser_profile Chromium processes are visible.
+        const procs = await appProcesses([]);
         const commands = procs.map((p) => (p.cmdLine || p.exePath || '').trim()).filter(Boolean);
-        if (!appPath) cachedProcessCommands = { at: Date.now(), commands };
+        cachedProcessCommands = { at: Date.now(), commands };
         return commands;
       }
       const { stdout } = await execFileAsync('/bin/ps', ['-axo', 'command='], { timeout: 3000 });
       const commands = stdout.split('\n').map(line => line.trim()).filter(Boolean);
-      if (!appPath) cachedProcessCommands = { at: Date.now(), commands };
+      cachedProcessCommands = { at: Date.now(), commands };
       return commands;
     } catch {
-      if (!appPath) cachedProcessCommands = null;
+      cachedProcessCommands = null;
       return null;
     }
   })();
-  if (!appPath) inFlightProcessCommands = task;
+  inFlightProcessCommands = task;
   try {
     return await task;
   } finally {
-    if (!appPath && inFlightProcessCommands === task) {
+    if (inFlightProcessCommands === task) {
       inFlightProcessCommands = null;
     }
   }
@@ -333,12 +335,10 @@ export function normalizeProcessProbeState(value: boolean | ProcessProbeState): 
 
 export async function probeAntigravityRunning(
   appPath = defaultAntigravityAppPath(),
-  probeCommands?: () => Promise<string[] | null>,
+  probeCommands: () => Promise<string[] | null> = readProcessCommands,
 ): Promise<ProcessProbeState> {
   try {
-    const commands = probeCommands
-      ? await probeCommands()
-      : await readProcessCommands(isWindows() ? appPath : undefined);
+    const commands = await probeCommands();
     if (!commands) return 'unknown';
     return hasAntigravityCommand(commands, appPath) ? 'running' : 'stopped';
   } catch {
@@ -348,7 +348,7 @@ export async function probeAntigravityRunning(
 
 export async function probeBrowserProfileRunning(
   browserProfileDir: string,
-  probeCommands: () => Promise<string[] | null> = () => readProcessCommands(),
+  probeCommands: () => Promise<string[] | null> = readProcessCommands,
 ): Promise<ProcessProbeState> {
   if (!browserProfileDir) return 'stopped';
   try {
@@ -415,6 +415,6 @@ export interface ConversationIndexSnapshot {
 }
 
 export function isStrictSubpath(parentDir: string, candidatePath: string): boolean {
-  return isPathUnder(candidatePath, parentDir);
+  return isPathUnder(resolve(candidatePath), resolve(parentDir));
 }
 

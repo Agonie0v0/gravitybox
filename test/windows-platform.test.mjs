@@ -70,14 +70,20 @@ import {
   isStrictSubpath,
 } from '../dist/maintenance.js';
 import { acquireProcessLease } from '../dist/process-lock.js';
+import { atomicText } from '../dist/files.js';
 import { detectSystemLocales, normalizeLocale, resolveLocale } from '../dist/i18n.js';
 import {
   parseEnvProxySnapshot,
   parseWindowsInternetSettingsOutput,
   readSystemProxySnapshot,
+  resolveWindowsRegExePath,
   shouldBypassProxy,
 } from '../dist/proxy.js';
-import { matchMainLogRemotePort, parseSshTunnelProcesses } from '../dist/ssh-context.js';
+import {
+  matchMainLogRemotePort,
+  parseSshTunnelProcesses,
+  resolveWindowsPowerShellPath,
+} from '../dist/ssh-context.js';
 import {
   includeSourceDigestPath,
   includeWindowsSourceDigestPath,
@@ -177,6 +183,12 @@ test('platform/paths: Windows 与 macOS 路径解析、布局及比较零回归'
   if (process.platform === 'win32') {
     assert.equal(isStrictSubpath('C:\\Users\\demo\\App', 'D:\\Users\\demo\\App\\file.txt'), false);
   }
+  // isStrictSubpath 必须先 resolve() 相对路径，保持与原版语义一致
+  assert.equal(isStrictSubpath('foo', 'foo/bar'), true);
+  assert.equal(isStrictSubpath('foo', 'foo/bar/baz.txt'), true);
+  assert.equal(isStrictSubpath('foo', 'foo'), false);
+  assert.equal(isStrictSubpath('foo', 'foo/../bar'), false);
+  assert.equal(isStrictSubpath('foo', 'foobar/baz'), false);
 });
 
 test('application-target & account-probe: Windows 引号路径、大小写混合命令行与 .exe 后缀匹配', () => {
@@ -372,6 +384,32 @@ test('platform/fs & process-lock: 跨平台所有权校验、退避重试重命�
     },
   });
   assert.equal(attempts, 3);
+
+  // atomicText 与 atomicRenameWithRetry 均须严格遵循已中止的 AbortSignal
+  const abortDir = await mkdtemp(join(tmpdir(), 'gb-win-abort-'));
+  t.after(() => rm(abortDir, { recursive: true, force: true }));
+  const abortedTarget = join(abortDir, 'should-not-exist.txt');
+  const preAborted = new AbortController();
+  preAborted.abort(new Error('cancelled-before-write'));
+  await assert.rejects(
+    () => atomicText(abortedTarget, 'must-not-write', preAborted.signal),
+    /cancelled-before-write/,
+  );
+  await assert.rejects(() => access(abortedTarget));
+
+  let renameCallsAfterAbort = 0;
+  await assert.rejects(
+    () =>
+      atomicRenameWithRetry('src.tmp', 'dst.json', {
+        platform: 'win32',
+        signal: preAborted.signal,
+        renameFn: () => {
+          renameCallsAfterAbort += 1;
+        },
+      }),
+    /cancelled-before-write/,
+  );
+  assert.equal(renameCallsAfterAbort, 0);
 
   // 进程锁：死 PID 与陈旧半残损锁自动回收
   const dir = await mkdtemp(join(tmpdir(), 'gb-win-lock-'));
@@ -721,13 +759,41 @@ HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settin
   assert.ok(fallbackSnap.exceptions.includes('<local>'));
 });
 
-test('ssh-context: Windows OpenSSH 进程解析与 CRLF main.log 端口匹配', async (t) => {
+test('ssh-context & proxy: Windows 系统绝对路径防劫持、OpenSSH 孙进程后代链匹配与 CRLF main.log', async (t) => {
+  // SystemRoot -> WINDIR -> C:\Windows 绝对路径解析，彻底防 PATH/CWD 劫持
+  assert.equal(resolveWindowsRegExePath({ SystemRoot: 'D:\\WinOS' }), 'D:\\WinOS\\System32\\reg.exe');
+  assert.equal(resolveWindowsRegExePath({ WINDIR: 'E:\\Windows' }), 'E:\\Windows\\System32\\reg.exe');
+  assert.equal(resolveWindowsRegExePath({}), 'C:\\Windows\\System32\\reg.exe');
+  assert.equal(
+    resolveWindowsPowerShellPath({ SystemRoot: 'D:\\WinOS' }),
+    'D:\\WinOS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+  );
+  assert.equal(
+    resolveWindowsPowerShellPath({ WINDIR: 'E:\\Windows' }),
+    'E:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+  );
+  assert.equal(
+    resolveWindowsPowerShellPath({}),
+    'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+  );
+
+  // 直接子进程 + 渲染/扩展宿主拉起的孙进程后代链（含空命令行中间节点与环路保护）
   const winPs = [
+    '0 0 ',
+    '3000 100 "C:\\Users\\demo\\AppData\\Local\\Programs\\Antigravity\\Antigravity.exe"',
+    '3050 3000 ',
+    '3051 3050 "C:\\Users\\demo\\AppData\\Local\\Programs\\Antigravity\\Antigravity.exe" --type=extensionHost',
     '4201 3000 "C:\\Windows\\System32\\OpenSSH\\ssh.exe" -N -D 127.0.0.1:10888 dev@example.invalid',
+    '4203 3051 "C:\\Windows\\System32\\OpenSSH\\ssh.exe" -N -D 127.0.0.1:10889 grandchild@example.invalid',
     '4202 9999 "C:\\Windows\\System32\\OpenSSH\\ssh.exe" -N -D 10999 other@example.invalid',
+    '8001 8002 cycle-a',
+    '8002 8001 cycle-b',
   ].join('\r\n');
-  const tunnels = parseSshTunnelProcesses(winPs, 3000);
-  assert.deepEqual(tunnels, [{ pid: 4201, socksPort: 10888 }]);
+  assert.deepEqual(parseSshTunnelProcesses(winPs, 3000), [{ pid: 4201, socksPort: 10888 }]);
+  assert.deepEqual(parseSshTunnelProcesses(winPs, 3000, { includeDescendants: true }), [
+    { pid: 4201, socksPort: 10888 },
+    { pid: 4203, socksPort: 10889 },
+  ]);
 
   const dir = await mkdtemp(join(tmpdir(), 'gb-win-sshlog-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
