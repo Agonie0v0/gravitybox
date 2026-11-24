@@ -9,7 +9,7 @@
 ## [1.2.1] - 2026-11-24
 
 ### Added
-- **Windows x64 社区共建跨平台支持（`#17`、`#27`、`#30`、`#32`，致谢 `@dysonkai` 提议与 `@Agonie0v0` 贡献实现）**：引入同仓隔离的跨平台后端抽象（`src/platform/`）、原生 Rust Win32 助手（`windows/win-helper`，提供 Credential Manager 凭据存取、Named Pipe 同用户 SID / 完整性校验、非破坏性回收站迁移、严格优雅退出边界与进程/端口检查）、Tauri 2 Windows 桌面客户端与系统托盘浮窗（`windows/app`），以及独立非阻塞 `windows-latest` CI 与自包含 ZIP / NSIS 安装包构建流（`tools/package-win.mjs` / `tools/gravitybox-win.nsi`）。macOS 原生主线持续由作者主导并完成实机验证，Windows 预构建自包含安装/便携包待社区真机验收后随 GitHub Releases 分发（普通用户无需自行构建）。
+- **Windows x64 社区共建跨平台支持（`#27`、`#30`、`#32`，致谢 `@Agonie0v0` 贡献实现）**：引入同仓隔离的跨平台后端抽象（`src/platform/`）、原生 Rust Win32 助手（`windows/win-helper`，提供 Credential Manager 凭据存取、Named Pipe 同用户 SID / 完整性校验、非破坏性回收站迁移、严格优雅退出边界与进程/端口检查）、Tauri 2 Windows 桌面客户端与系统托盘浮窗（`windows/app`），以及独立非阻塞 `windows-latest` CI 与自包含 ZIP / NSIS 安装包构建流（`tools/package-win.mjs` / `tools/gravitybox-win.nsi`）。macOS 原生主线持续由作者主导并完成实机验证，Windows 预构建自包含安装/便携包已由 `@Agonie0v0` 完成真机验收，随 `v1.2.1` 同步分发（普通用户无需自行构建）。
 
 ### Fixed
 - **进程隔离与安全边界（`#28`，致谢 `@lvyandev`）**：在账号切换、回滚与存储维护期间隔离 `chrome_crashpad_handler` 与已脱离主进程树的后台守护进程（`language_server` / `sidecar`），修复非英语区域 `ps` 数值解析、孤立子进程清理以及 Windows UIPI 越权关闭提示。
