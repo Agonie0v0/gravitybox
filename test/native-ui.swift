@@ -229,14 +229,29 @@ import Cocoa
                     "browserBusy": false,
                     "scannedAt": Int(Date().timeIntervalSince1970)
                 ]
-            case "account_switch_preflight": return [
-                "ok": preflightState != "error",
-                "safe": preflightState == "safe" || preflightState == "running_idle",
-                "appRunning": preflightState == "busy" || preflightState == "running_idle",
-                "stableRunning": preflightState == "running_idle",
-                "hasRunningTask": preflightState == "busy",
-                "error": "隔离预检失败"
-            ]
+            case "account_switch_preflight":
+                if preflightState == "detached_daemon" {
+                    return [
+                        "ok": true,
+                        "safe": true,
+                        "appRunning": false,
+                        "stableRunning": false,
+                        "uiRunning": false,
+                        "insidersRunning": false,
+                        "detachedDaemonCount": 1,
+                        "detachedDaemonKinds": ["sidecar"],
+                        "detachedDaemonPids": [84608],
+                        "hasRunningTask": false
+                    ]
+                }
+                return [
+                    "ok": preflightState != "error",
+                    "safe": preflightState == "safe" || preflightState == "running_idle",
+                    "appRunning": preflightState == "busy" || preflightState == "running_idle",
+                    "stableRunning": preflightState == "running_idle",
+                    "hasRunningTask": preflightState == "busy",
+                    "error": "隔离预检失败"
+                ]
             case "account_switch": switches += 1; activeId = payload["id"] as? String ?? activeId; return ["ok":true,"message":"隔离事务完成"]
             case "account_recovery_info": return ["ok":true,"available":false]
             case "language_set":
@@ -1142,6 +1157,18 @@ import Cocoa
             switches >= 2 && !assistant.accountSwitchInFlight && assistant.openedApplications > opensBeforeIdleSwitch
         }
         check(switches == 2 && assistant.openedApplications == opensBeforeIdleSwitch + 1, "Switching while Antigravity was running must automatically relaunch Antigravity")
+        let opensBeforeDetachedSwitch = assistant.openedApplications
+        preflightState = "detached_daemon"
+        Assistant.isAntigravityRunningOverrideForTesting = { false }
+        assistant.switchAccountByIdFromMenu("c")
+        waitUntil(description: "detached_daemon switch to complete without relaunching UI") {
+            switches >= 3 && !assistant.accountSwitchInFlight
+        }
+        Assistant.isAntigravityRunningOverrideForTesting = nil
+        check(
+            switches == 3 && assistant.openedApplications == opensBeforeDetachedSwitch,
+            "Switching when only detached daemons remained must not relaunch Antigravity UI"
+        )
         switches = 1; assistant.activeAccountId = "a"; activeId = "a"
         preflightState = "safe"
         preflightState = "busy"; assistant.switchAccountByIdFromMenu("c"); pump()
@@ -2051,6 +2078,67 @@ import Cocoa
                     includeLanguageServer: false
                 ) == ["renderer"],
                 "Blocking process diagnostics must report sanitized roles excluding language_server tree"
+            )
+            let psTreeWithOrphanSidecar = """
+            84608 1 /Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper --import=file:///Users/test/.gemini/antigravity/lib/node_modules/sidecar_sdk/register_loader.js main.mjs
+            64200 1 /Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/chrome_crashpad_handler --monitor-self
+            90002 1 /bin/zsh -c ls /Applications/Antigravity.app/Contents/Resources/bin/language_server
+            """
+            let orphanInspection = Assistant.inspectAntigravityProcesses(
+                psPidPpidArgsOutput: psTreeWithOrphanSidecar,
+                appPaths: appPaths
+            )
+            check(
+                !orphanInspection.hasUiProcesses
+                    && orphanInspection.detachedDaemonKinds == ["sidecar"]
+                    && orphanInspection.detachedDaemons.map(\.pid) == [84608],
+                "Orphan sidecar_sdk helper with PPID=1 must be classified as detached daemon rather than blocking UI"
+            )
+            let currentUid = Int32(getuid())
+            check(
+                Assistant.isEligibleDetachedDaemonForTermination(
+                    uid: currentUid,
+                    currentUid: currentUid,
+                    pid: 84608,
+                    args: "/Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper --import=file:///Users/test/.gemini/antigravity/lib/node_modules/sidecar_sdk/register_loader.js main.mjs",
+                    appPaths: appPaths
+                ) == true
+                    && Assistant.isEligibleDetachedDaemonForTermination(
+                        uid: currentUid + 1,
+                        currentUid: currentUid,
+                        pid: 84608,
+                        args: "/Applications/Antigravity.app/Contents/Resources/bin/language_server --standalone",
+                        appPaths: appPaths
+                    ) == false
+                    && Assistant.isEligibleDetachedDaemonForTermination(
+                        uid: currentUid,
+                        currentUid: currentUid,
+                        pid: 1,
+                        args: "/Applications/Antigravity.app/Contents/Resources/bin/language_server --standalone",
+                        appPaths: appPaths
+                    ) == false
+                    && Assistant.isEligibleDetachedDaemonForTermination(
+                        uid: currentUid,
+                        currentUid: currentUid,
+                        pid: 84609,
+                        args: "/Applications/Antigravity - Insiders.app/Contents/Resources/bin/language_server --standalone",
+                        appPaths: appPaths
+                    ) == false
+                    && Assistant.isEligibleDetachedDaemonForTermination(
+                        uid: currentUid,
+                        currentUid: currentUid,
+                        pid: 84610,
+                        args: "/Applications/Antigravity.app/Contents/MacOS/Antigravity",
+                        appPaths: appPaths
+                    ) == false
+                    && Assistant.isEligibleDetachedDaemonForTermination(
+                        uid: currentUid,
+                        currentUid: currentUid,
+                        pid: 90002,
+                        args: "/bin/zsh -c ls /Applications/Antigravity.app/Contents/Resources/bin/language_server",
+                        appPaths: appPaths
+                    ) == false,
+                "Detached daemon termination guard must enforce current UID, PID > 1, non-Insiders, and non-UI allowlist"
             )
             check(
                 Assistant.parseDevToolsActivePort("55777\n/devtools/browser/mock-id\n") == 55777 &&

@@ -1,6 +1,6 @@
 import { type ApplicationChannel, type ApplicationTarget, applicationTarget } from './application-target.js';
-import { spawn, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { sampleAntigravityProcesses, type AntigravityProcessClassification } from './antigravity-processes.js';
+import { spawn } from 'node:child_process';
 import { readFile, mkdir, lstat, unlink, readdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
@@ -24,7 +24,6 @@ import {
   pathsEqual,
 } from './platform/index.js';
 
-const run = promisify(execFile);
 const TOKEN = 'antigravityUnifiedStateSync.oauthToken';
 const USER = 'antigravityUnifiedStateSync.userStatus';
 const INIT = 'jetskiStateSync.agentManagerInitState';
@@ -454,6 +453,7 @@ export class AccountSwitchService {
     stateDir: string; profile: string; keychain?: KeychainAdapter; channel?: ApplicationChannel; target?: ApplicationTarget;
     homeDir?: string; geminiDir?: string;
     isRunning?: () => Promise<boolean>; // Isolated tests only; never accepted over IPC.
+    inspectProcesses?: () => Promise<AntigravityProcessClassification>; // Isolated tests only; never accepted over IPC.
     databaseFactory?: (path: string) => DatabaseTransaction; // Fault injection, never accepted over IPC.
   }) {
     this.keychain = options.keychain ?? new SystemKeychainAdapter();
@@ -699,7 +699,7 @@ export class AccountSwitchService {
       if (await this.options.isRunning()) throw new Error(bt('switch.err.stop_app_first'));
       return;
     }
-    if (isWindows()) {
+    if (!this.options.inspectProcesses && isWindows()) {
       const candidateRoots = new Set<string>([this.target.appPath]);
       for (const dir of defaultAntigravityInstallDirs()) {
         candidateRoots.add(join(dir, 'Antigravity'));
@@ -711,15 +711,19 @@ export class AccountSwitchService {
       if (procs.length > 0) throw new Error(bt('switch.err.stop_app_first'));
       return;
     }
-    const candidatePrefixes = Array.from(
-      // Insiders shares official credentials: block switching while it runs, without managing it.
-      new Set([this.target.appPath, '/Applications/Antigravity.app', '/Applications/Antigravity - Insiders.app']),
-    ).map(p => p + '/Contents/');
-    const running = (await run('/bin/ps', ['-ax', '-ww', '-o', 'args='], { timeout: 3000 })).stdout.split('\n').some(line => {
-      const trimmed = line.trim();
-      return candidatePrefixes.some(prefix => trimmed.startsWith(prefix));
-    });
-    if (running) throw new Error(bt('switch.err.stop_app_first'));
+    const classified = this.options.inspectProcesses
+      ? await this.options.inspectProcesses()
+      : await sampleAntigravityProcesses({ appPath: this.target.appPath, checkInsiders: true });
+    if (classified.insidersRunning || classified.uiRunning) {
+      throw new Error(bt('switch.err.stop_app_first'));
+    }
+    if (classified.detachedDaemons.length > 0) {
+      const kinds = classified.detachedDaemonKinds
+        .map(kind => bt(`switch.daemon_kind.${kind}`))
+        .join(', ');
+      const pids = classified.detachedDaemons.map(d => d.pid).join(', ');
+      throw new Error(bt('switch.err.detached_daemon_running', { kinds, pids }));
+    }
   }
   private async archivePreviousJournal(previous: Journal) {
     const backupsDir = join(this.options.stateDir, 'account-switch-backups');

@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join, resolve } from 'node:path';
+import { isCrashpadHandlerArgs } from './antigravity-processes.js';
 import { bt } from './i18n.js';
 import {
   appProcesses,
@@ -310,11 +311,12 @@ export function hasAntigravityCommand(commands: string[], appPath = defaultAntig
   const macOsPrefixes = appRoots.map(p => p + '/Contents/MacOS/');
   const frameworkPrefixes = appRoots.map(p => p + '/Contents/Frameworks/');
   const lsPrefixes = appRoots.map(p => p + '/Contents/Resources/bin/language_server');
-  return commands.some(trimmed =>
-    macOsPrefixes.some(prefix => trimmed.startsWith(prefix)) ||
-    frameworkPrefixes.some(prefix => trimmed.startsWith(prefix)) ||
-    lsPrefixes.some(prefix => trimmed.startsWith(prefix) || trimmed.includes(prefix))
-  );
+  return commands.some(trimmed => {
+    if (isCrashpadHandlerArgs(trimmed)) return false;
+    return macOsPrefixes.some(prefix => trimmed.startsWith(prefix)) ||
+      frameworkPrefixes.some(prefix => trimmed.startsWith(prefix)) ||
+      lsPrefixes.some(prefix => trimmed.startsWith(prefix));
+  });
 }
 
 export function hasBrowserProfileCommand(commands: string[], browserProfileDir: string): boolean {

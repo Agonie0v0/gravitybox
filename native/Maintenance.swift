@@ -1004,6 +1004,61 @@ final class CachePage: NSObject, NSPopoverDelegate {
         }
     }
 
+    private func presentConfirmationAlert(_ alert: NSAlert, handler: @escaping (NSApplication.ModalResponse) -> Void) {
+        confirmDialogOpen = true
+        let wrapped: (NSApplication.ModalResponse) -> Void = { [weak self] resp in
+            self?.confirmDialogOpen = false
+            handler(resp)
+        }
+        var parentWindow = app.window
+        while let sheet = parentWindow?.activeSheetWindow { parentWindow = sheet }
+        if let parentWindow, parentWindow.isVisible {
+            alert.beginSheetModal(for: parentWindow, completionHandler: wrapped)
+        } else {
+            Design.activateApplicationForcingFront()
+            wrapped(alert.runModal())
+        }
+    }
+
+    private func cleanupDetachedDaemonsThenRun(
+        statusText: String,
+        uiStillRunningKey: String,
+        action: @escaping () -> Void
+    ) {
+        setBusy(true)
+        app.suppressLifecycleAutoQuit(seconds: 90.0)
+        feedbackLabel.isHidden = false
+        feedbackLabel.textColor = Design.secondary
+        feedbackLabel.stringValue = statusText
+        app.terminateDetachedDaemonsGracefully { [weak self] result in
+            guard let self else { return }
+            self.app.suppressLifecycleAutoQuit(seconds: 90.0)
+            switch result {
+            case .exited:
+                action()
+            case .uiStillRunning:
+                self.setBusy(false)
+                let msg = L10n.t(uiStillRunningKey)
+                self.feedbackLabel.isHidden = false
+                self.feedbackLabel.textColor = accessibleWarningColor()
+                self.feedbackLabel.stringValue = msg
+                self.app.showMessage(msg, error: true)
+                self.fetch(force: true)
+            case .detachedDaemonsRemaining(let kinds, let pids):
+                self.setBusy(false)
+                let msg = L10n.t("maintenance.error.detached_daemons_remaining", [
+                    "kinds": Assistant.formatDetachedDaemonKinds(kinds),
+                    "pids": Assistant.formatDetachedDaemonPids(pids)
+                ])
+                self.feedbackLabel.isHidden = false
+                self.feedbackLabel.textColor = accessibleWarningColor()
+                self.feedbackLabel.stringValue = msg
+                self.app.showMessage(msg, error: true)
+                self.fetch(force: true)
+            }
+        }
+    }
+
     @objc func clearSelectedCaches() {
         guard !busy, !confirmDialogOpen, hasCompletedScan, lastScanError == nil else { return }
         dismissDetailPopover()
@@ -1036,11 +1091,8 @@ final class CachePage: NSObject, NSPopoverDelegate {
                     confirm.addButton(withTitle: L10n.t("maintenance.simple.confirm_restart_and_clean"))
                     confirm.addButton(withTitle: L10n.t("common.cancel"))
 
-                    self.confirmDialogOpen = true
-                    let handleChoice: (NSApplication.ModalResponse) -> Void = { [weak self] response in
-                        guard let self else { return }
-                        self.confirmDialogOpen = false
-                        guard !self.busy, response == .alertFirstButtonReturn else { return }
+                    self.presentConfirmationAlert(confirm) { [weak self] response in
+                        guard let self, !self.busy, response == .alertFirstButtonReturn else { return }
                         self.syncLiveRunningState()
                         if self.appRunning {
                             self.quitAntigravityAndSmartClear(scopes: scopesToClear)
@@ -1048,18 +1100,31 @@ final class CachePage: NSObject, NSPopoverDelegate {
                             self.performSmartClear(scopes: scopesToClear, restartAfter: false)
                         }
                     }
-
-                    var parentWindow = self.app.window
-                    while let sheet = parentWindow?.activeSheetWindow { parentWindow = sheet }
-                    if let parentWindow, parentWindow.isVisible {
-                        confirm.beginSheetModal(for: parentWindow) { handleChoice($0) }
-                    } else {
-                        Design.activateApplicationForcingFront()
-                        handleChoice(confirm.runModal())
-                    }
                 }
             }
         } else {
+            let inspection = Assistant.inspectLiveAntigravityProcesses()
+            if !inspection.hasUiProcesses && !inspection.detachedDaemons.isEmpty {
+                let confirm = NSAlert()
+                confirm.alertStyle = .informational
+                confirm.messageText = L10n.t("maintenance.detached.confirm_clear_title", ["size": formatBytes(targetBytes)])
+                confirm.informativeText = L10n.t("maintenance.detached.confirm_clear_body", [
+                    "kinds": Assistant.formatDetachedDaemonKinds(inspection.detachedDaemonKinds),
+                    "count": inspection.detachedDaemons.count
+                ])
+                confirm.addButton(withTitle: L10n.t("maintenance.detached.confirm_action"))
+                confirm.addButton(withTitle: L10n.t("common.cancel"))
+                presentConfirmationAlert(confirm) { [weak self] response in
+                    guard let self, !self.busy, response == .alertFirstButtonReturn else { return }
+                    self.cleanupDetachedDaemonsThenRun(
+                        statusText: L10n.t("maintenance.simple.status_cleaning"),
+                        uiStillRunningKey: "maintenance.error.quit_first_clear"
+                    ) { [weak self] in
+                        self?.performSmartClear(scopes: scopesToClear, restartAfter: false)
+                    }
+                }
+                return
+            }
             performSmartClear(scopes: scopesToClear, restartAfter: false)
         }
         #endif
@@ -1072,10 +1137,13 @@ final class CachePage: NSObject, NSPopoverDelegate {
         feedbackLabel.textColor = Design.secondary
         feedbackLabel.stringValue = L10n.t("maintenance.simple.status_restarting_clean")
 
-        app.quitAntigravityAndWait { [weak self] exited in
+        app.quitAntigravityAndWaitDetailed { [weak self] result in
             guard let self else { return }
             self.app.suppressLifecycleAutoQuit(seconds: 90.0)
-            guard exited else {
+            switch result {
+            case .exited:
+                self.performSmartClear(scopes: scopes, restartAfter: true)
+            case .uiStillRunning:
                 self.setBusy(false)
                 let msg = L10n.t("maintenance.error.quit_first_clear")
                 self.feedbackLabel.isHidden = false
@@ -1083,9 +1151,18 @@ final class CachePage: NSObject, NSPopoverDelegate {
                 self.feedbackLabel.stringValue = msg
                 self.app.showMessage(msg, error: true)
                 self.fetch(force: true)
-                return
+            case .detachedDaemonsRemaining(let kinds, let pids):
+                self.setBusy(false)
+                let msg = L10n.t("maintenance.error.detached_daemons_remaining", [
+                    "kinds": Assistant.formatDetachedDaemonKinds(kinds),
+                    "pids": Assistant.formatDetachedDaemonPids(pids)
+                ])
+                self.feedbackLabel.isHidden = false
+                self.feedbackLabel.textColor = accessibleWarningColor()
+                self.feedbackLabel.stringValue = msg
+                self.app.showMessage(msg, error: true)
+                self.fetch(force: true)
             }
-            self.performSmartClear(scopes: scopes, restartAfter: true)
         }
     }
 
@@ -1177,11 +1254,8 @@ final class CachePage: NSObject, NSPopoverDelegate {
                     alert.informativeText = L10n.t("maintenance.simple.undo_running_body") + sshNote
                     alert.addButton(withTitle: L10n.t("maintenance.simple.confirm_restart_and_undo"))
                     alert.addButton(withTitle: L10n.t("common.cancel"))
-                    self.confirmDialogOpen = true
-                    let handleRestoreChoice: (NSApplication.ModalResponse) -> Void = { [weak self] resp in
-                        guard let self else { return }
-                        self.confirmDialogOpen = false
-                        guard !self.busy, resp == .alertFirstButtonReturn else { return }
+                    self.presentConfirmationAlert(alert) { [weak self] resp in
+                        guard let self, !self.busy, resp == .alertFirstButtonReturn else { return }
                         self.syncLiveRunningState()
                         if self.appRunning {
                             self.quitAntigravityAndRestore(snapshotId: snapshotId)
@@ -1189,14 +1263,28 @@ final class CachePage: NSObject, NSPopoverDelegate {
                             self.executeRestoreRequest(snapshotId: snapshotId, restartAfter: false)
                         }
                     }
-                    var parentWindow = self.app.window
-                    while let sheet = parentWindow?.activeSheetWindow { parentWindow = sheet }
-                    if let parentWindow, parentWindow.isVisible {
-                        alert.beginSheetModal(for: parentWindow) { handleRestoreChoice($0) }
-                    } else {
-                        Design.activateApplicationForcingFront()
-                        handleRestoreChoice(alert.runModal())
-                    }
+                }
+            }
+            return
+        }
+        let inspection = Assistant.inspectLiveAntigravityProcesses()
+        if !inspection.hasUiProcesses && !inspection.detachedDaemons.isEmpty {
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = L10n.t("maintenance.detached.confirm_restore_title")
+            alert.informativeText = L10n.t("maintenance.detached.confirm_restore_body", [
+                "kinds": Assistant.formatDetachedDaemonKinds(inspection.detachedDaemonKinds),
+                "count": inspection.detachedDaemons.count
+            ])
+            alert.addButton(withTitle: L10n.t("maintenance.detached.confirm_action"))
+            alert.addButton(withTitle: L10n.t("common.cancel"))
+            presentConfirmationAlert(alert) { [weak self] resp in
+                guard let self, !self.busy, resp == .alertFirstButtonReturn else { return }
+                self.cleanupDetachedDaemonsThenRun(
+                    statusText: L10n.t("maintenance.simple.status_undoing"),
+                    uiStillRunningKey: "maintenance.restore.quit_body"
+                ) { [weak self] in
+                    self?.executeRestoreRequest(snapshotId: snapshotId, restartAfter: false)
                 }
             }
             return
@@ -1212,10 +1300,13 @@ final class CachePage: NSObject, NSPopoverDelegate {
         feedbackLabel.textColor = Design.secondary
         feedbackLabel.stringValue = L10n.t("maintenance.simple.status_restarting_undo")
 
-        app.quitAntigravityAndWait { [weak self] exited in
+        app.quitAntigravityAndWaitDetailed { [weak self] result in
             guard let self else { return }
             self.app.suppressLifecycleAutoQuit(seconds: 90.0)
-            guard exited else {
+            switch result {
+            case .exited:
+                self.executeRestoreRequest(snapshotId: snapshotId, restartAfter: true)
+            case .uiStillRunning:
                 self.setBusy(false)
                 let msg = L10n.t("maintenance.restore.quit_body")
                 self.feedbackLabel.isHidden = false
@@ -1223,9 +1314,18 @@ final class CachePage: NSObject, NSPopoverDelegate {
                 self.feedbackLabel.stringValue = msg
                 self.app.showMessage(msg, error: true)
                 self.fetch(force: true)
-                return
+            case .detachedDaemonsRemaining(let kinds, let pids):
+                self.setBusy(false)
+                let msg = L10n.t("maintenance.error.detached_daemons_remaining", [
+                    "kinds": Assistant.formatDetachedDaemonKinds(kinds),
+                    "pids": Assistant.formatDetachedDaemonPids(pids)
+                ])
+                self.feedbackLabel.isHidden = false
+                self.feedbackLabel.textColor = accessibleWarningColor()
+                self.feedbackLabel.stringValue = msg
+                self.app.showMessage(msg, error: true)
+                self.fetch(force: true)
             }
-            self.executeRestoreRequest(snapshotId: snapshotId, restartAfter: true)
         }
     }
 

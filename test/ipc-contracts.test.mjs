@@ -548,6 +548,10 @@ test('P0-02/P1-15/P1-17/P1-19/P1-20: 维护目录动态双语、resume切回中�
     const preflightRes = await rpc(dir, { command: 'account_switch_preflight' });
     assert.equal(preflightRes.ok, true);
     assert.equal(typeof preflightRes.insidersRunning, 'boolean');
+    assert.equal(typeof preflightRes.uiRunning, 'boolean');
+    assert.equal(typeof preflightRes.detachedDaemonCount, 'number');
+    assert.equal(Array.isArray(preflightRes.detachedDaemonKinds), true);
+    assert.equal(Array.isArray(preflightRes.detachedDaemonPids), true);
 
     // v1.1.3: 验证 account_import_json 与 account_export_backup IPC 契约及 C02 零 Token 透传
     const importFixturePath = join(dir, 'ipc-import-fixture.json');
