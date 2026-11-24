@@ -11,15 +11,16 @@ import {
 import { Modal } from '../components/Modal';
 import { ToggleSwitch } from '../components/ToggleSwitch';
 import { useApp } from '../context/AppContext';
-import { formatBytes, formatInteger, formatShortDateTime } from '../lib/format';
+import { formatBytes, formatDetachedDaemonKinds, formatInteger, formatShortDateTime } from '../lib/format';
 import {
   backendRequest,
   getAntigravityRunning,
   launchAntigravity,
   openFolder,
+  openRecycleBin,
   revealInExplorer,
 } from '../lib/tauri';
-import type { MaintenanceEntry, MaintenanceScanReply } from '../lib/types';
+import type { MaintenanceEntry, MaintenanceScanReply, SwitchPreflightReply } from '../lib/types';
 
 type DetailTab = 'runtime' | 'history' | 'protected' | 'snapshot' | null;
 
@@ -30,7 +31,8 @@ const STATEFUL_NAMES = new Set([
 ]);
 
 function isStateful(e: MaintenanceEntry): boolean {
-  return e.category === 'stateful' || STATEFUL_NAMES.has(e.name);
+  const key = e.name || e.id || '';
+  return e.category === 'stateful' || STATEFUL_NAMES.has(key);
 }
 
 export function MaintenanceModal({
@@ -63,10 +65,10 @@ export function MaintenanceModal({
   const [detailTab, setDetailTab] = useState<DetailTab>(null);
 
   const runScan = useCallback(
-    async (days: number) => {
+    async (days: number, preserveFeedback = false) => {
       if (!reachable) return;
       setBusy(true);
-      setFeedback(null);
+      if (!preserveFeedback) setFeedback(null);
       try {
         const res = await fetchMaintenanceScan(days, true);
         if (res) {
@@ -144,6 +146,40 @@ export function MaintenanceModal({
     snapshots.find((s) => s.restorable === true && s.id) ??
     null;
 
+  const inspectProcessState = async (): Promise<{
+    uiRunning: boolean;
+    detachedCount: number;
+    detachedKinds: string[];
+    detachedPids: number[];
+  }> => {
+    try {
+      const preflight = await backendRequest<SwitchPreflightReply>({
+        command: 'account_switch_preflight',
+      });
+      let uiRunning = Boolean(
+        preflight?.uiRunning ?? preflight?.stableRunning ?? preflight?.appRunning,
+      );
+      const detachedCount = Number(preflight?.detachedDaemonCount ?? 0);
+      if (!uiRunning && detachedCount === 0 && (await getAntigravityRunning())) {
+        uiRunning = true;
+      }
+      return {
+        uiRunning,
+        detachedCount,
+        detachedKinds: preflight?.detachedDaemonKinds ?? [],
+        detachedPids: preflight?.detachedDaemonPids ?? [],
+      };
+    } catch {
+      const fallbackRunning = (await getAntigravityRunning()) || scan?.running === true;
+      return {
+        uiRunning: fallbackRunning,
+        detachedCount: 0,
+        detachedKinds: [],
+        detachedPids: [],
+      };
+    }
+  };
+
   const executeClean = async (scopes: string[], restartAfter: boolean) => {
     setBusy(true);
     setFeedback({
@@ -164,7 +200,7 @@ export function MaintenanceModal({
           : t('maintenance.simple.success_nothing'));
       setFeedback({ text: msg });
       showToast(msg);
-      await runScan(retentionDays);
+      await runScan(retentionDays, true);
       void fetchDashboard(true);
       void fetchUsage('today', true);
     } catch (err) {
@@ -181,8 +217,12 @@ export function MaintenanceModal({
 
   const handleCleanNow = async () => {
     if (busy || selectedScopes.length === 0 || selectedBytes <= 0) return;
-    const isRunning = (await getAntigravityRunning()) || scan?.running === true;
-    if (isRunning) {
+    const procState = await inspectProcessState();
+    const { uiRunning, detachedCount, detachedKinds, detachedPids } = procState;
+    const detachedOnly = !uiRunning && detachedCount > 0;
+    const kindsLabel = formatDetachedDaemonKinds(detachedKinds, t, locale);
+
+    if (uiRunning || detachedOnly) {
       setBusy(true);
       try {
         await backendRequest({ command: 'maintenance_preflight' });
@@ -202,41 +242,53 @@ export function MaintenanceModal({
         (runtimeEnabled && runtimeBytes > 0 ? runtimeFiles : 0) +
         (historyEnabled && historyBytes > 0 ? historyFiles : 0);
 
-      const body =
-        itemCount > 0 && fileCount > 0
-          ? t('maintenance.simple.confirm_running_detail', {
-              items: itemCount,
-              files: formatInteger(fileCount, locale),
-              size: formatBytes(selectedBytes),
-            })
-          : t('maintenance.simple.confirm_running_body');
+      const body = detachedOnly
+        ? t('maintenance.detached.confirm_clear_body', { count: detachedCount, kinds: kindsLabel })
+        : itemCount > 0 && fileCount > 0
+        ? t('maintenance.simple.confirm_running_detail', {
+            items: itemCount,
+            files: formatInteger(fileCount, locale),
+            size: formatBytes(selectedBytes),
+          })
+        : t('maintenance.simple.confirm_running_body');
 
       const confirmed = await askConfirm({
-        title: t('maintenance.simple.confirm_running_title', { size: formatBytes(selectedBytes) }),
+        title: detachedOnly
+          ? t('maintenance.detached.confirm_clear_title', { size: formatBytes(selectedBytes) })
+          : t('maintenance.simple.confirm_running_title', { size: formatBytes(selectedBytes) }),
         body,
-        confirmLabel: t('maintenance.simple.confirm_restart_and_clean'),
+        confirmLabel: detachedOnly
+          ? t('maintenance.detached.confirm_action')
+          : t('maintenance.simple.confirm_restart_and_clean'),
+        danger: detachedOnly,
       });
       if (!confirmed) return;
 
       setBusy(true);
-      setFeedback({ text: t('maintenance.simple.status_restarting_clean') });
+      setFeedback({
+        text: detachedOnly ? t('maintenance.simple.status_cleaning') : t('maintenance.simple.status_restarting_clean'),
+      });
       const closeOutcome = await closeAntigravitySafely(15_000, 'maintenance').catch(() => ({
         closed: false,
         reason: 'error',
       }));
       if (!closeOutcome.closed) {
         setBusy(false);
-        const msg =
-          closeOutcome.reason === 'visible_window_open'
-            ? locale === 'en'
-              ? 'Visible Antigravity windows are still open. Save and close them before cleaning.'
-              : '检测到 Antigravity 仍有未关闭的可见窗口，请先保存并关闭后再执行清理。'
-            : t('maintenance.error.quit_first_clear');
+        const msg = detachedOnly
+          ? t('maintenance.error.detached_daemons_remaining', {
+              kinds: kindsLabel,
+              pids: detachedPids.join(', ') || '-',
+            })
+          : closeOutcome.reason === 'visible_window_open'
+          ? locale === 'en'
+            ? 'Visible Antigravity windows are still open. Save and close them before cleaning.'
+            : '检测到 Antigravity 仍有未关闭的可见窗口，请先保存并关闭后再执行清理。'
+          : t('maintenance.error.quit_first_clear');
         setFeedback({ text: msg, error: true });
         showToast(msg, true);
         return;
       }
-      await executeClean(selectedScopes, true);
+      await executeClean(selectedScopes, uiRunning);
       return;
     }
 
@@ -245,10 +297,13 @@ export function MaintenanceModal({
 
   const handleRestoreLatest = async () => {
     if (busy || !latestRestorable?.id) return;
-    const isRunning = (await getAntigravityRunning()) || scan?.running === true;
+    const procState = await inspectProcessState();
+    const { uiRunning, detachedCount, detachedKinds, detachedPids } = procState;
+    const detachedOnly = !uiRunning && detachedCount > 0;
+    const kindsLabel = formatDetachedDaemonKinds(detachedKinds, t, locale);
     let restartAfter = false;
 
-    if (isRunning) {
+    if (uiRunning || detachedOnly) {
       setBusy(true);
       try {
         await backendRequest({ command: 'maintenance_preflight' });
@@ -262,31 +317,44 @@ export function MaintenanceModal({
       setBusy(false);
 
       const confirmed = await askConfirm({
-        title: t('maintenance.simple.undo_running_title'),
-        body: t('maintenance.simple.undo_running_body'),
-        confirmLabel: t('maintenance.simple.confirm_restart_and_undo'),
+        title: detachedOnly
+          ? t('maintenance.detached.confirm_restore_title')
+          : t('maintenance.simple.undo_running_title'),
+        body: detachedOnly
+          ? t('maintenance.detached.confirm_restore_body', { count: detachedCount, kinds: kindsLabel })
+          : t('maintenance.simple.undo_running_body'),
+        confirmLabel: detachedOnly
+          ? t('maintenance.detached.confirm_action')
+          : t('maintenance.simple.confirm_restart_and_undo'),
+        danger: detachedOnly,
       });
       if (!confirmed) return;
 
       setBusy(true);
-      setFeedback({ text: t('maintenance.simple.status_restarting_undo') });
+      setFeedback({
+        text: detachedOnly ? t('maintenance.simple.status_undoing') : t('maintenance.simple.status_restarting_undo'),
+      });
       const closeOutcome = await closeAntigravitySafely(15_000, 'maintenance').catch(() => ({
         closed: false,
         reason: 'error',
       }));
       if (!closeOutcome.closed) {
         setBusy(false);
-        const msg =
-          closeOutcome.reason === 'visible_window_open'
-            ? locale === 'en'
-              ? 'Visible Antigravity windows are still open. Save and close them before restoring.'
-              : '检测到 Antigravity 仍有未关闭的可见窗口，请先保存并关闭后再执行还原。'
-            : t('maintenance.restore.quit_body');
+        const msg = detachedOnly
+          ? t('maintenance.error.detached_daemons_remaining', {
+              kinds: kindsLabel,
+              pids: detachedPids.join(', ') || '-',
+            })
+          : closeOutcome.reason === 'visible_window_open'
+          ? locale === 'en'
+            ? 'Visible Antigravity windows are still open. Save and close them before restoring.'
+            : '检测到 Antigravity 仍有未关闭的可见窗口，请先保存并关闭后再执行还原。'
+          : t('maintenance.restore.quit_body');
         setFeedback({ text: msg, error: true });
         showToast(msg, true);
         return;
       }
-      restartAfter = true;
+      restartAfter = uiRunning;
     }
 
     setBusy(true);
@@ -299,7 +367,7 @@ export function MaintenanceModal({
       const msg = res.message || t('maintenance.simple.success_undone');
       setFeedback({ text: msg });
       showToast(msg);
-      await runScan(retentionDays);
+      await runScan(retentionDays, true);
       void fetchDashboard(true);
       void fetchUsage('today', true);
     } catch (err) {
@@ -318,6 +386,10 @@ export function MaintenanceModal({
     const snapPath = latestRestorable?.snapshotPath || snapshots[0]?.snapshotPath;
     if (snapPath) {
       await revealInExplorer(snapPath).catch((e) => showToast(String(e), true));
+      return;
+    }
+    if (scan?.trashDir === 'Recycle Bin') {
+      await openRecycleBin().catch((e) => showToast(String(e), true));
       return;
     }
     if (scan?.trashDir) {
@@ -558,25 +630,36 @@ export function MaintenanceModal({
               </div>
             ) : (
               <div style={{ maxHeight: 130, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {detailItems.slice(0, 12).map((item) => (
-                  <div
-                    key={item.name}
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      fontSize: 11.5,
-                      padding: '2px 0',
-                    }}
-                  >
-                    <span style={{ color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {item.name}
-                    </span>
-                    <span className="tabular" style={{ color: 'var(--text-secondary)', flexShrink: 0, marginLeft: 10 }}>
-                      {formatBytes(item.bytes)}
-                    </span>
-                  </div>
-                ))}
+                {detailItems.slice(0, 12).map((item, idx) => {
+                  const itemLabel = item.title ?? item.name ?? item.id ?? '';
+                  return (
+                    <div
+                      key={item.id ?? item.name ?? idx}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        fontSize: 11.5,
+                        padding: '2px 0',
+                        gap: 10,
+                      }}
+                    >
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {itemLabel}
+                        </div>
+                        {item.subtitle && (
+                          <div style={{ fontSize: 10.5, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {item.subtitle}
+                          </div>
+                        )}
+                      </div>
+                      <span className="tabular" style={{ color: 'var(--text-secondary)', flexShrink: 0 }}>
+                        {formatBytes(item.bytes)}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -647,7 +730,6 @@ export function MaintenanceModal({
                   onChange={(e) => {
                     const days = Number(e.target.value);
                     setRetentionDays(days);
-                    void runScan(days);
                   }}
                 >
                   <option value={7}>{t('maintenance.simple.retention_7d')}</option>

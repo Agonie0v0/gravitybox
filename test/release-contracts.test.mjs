@@ -37,12 +37,12 @@ describeContractGroup("发行完整性 · release-1.1.1-contracts", { concurrenc
     return dir;
   }
 
-  test('sourceDigest 忽略 .DS_Store 与 assets/screenshots，并纳入新增发版文档与 workflow', async t => {
+  test('sourceDigest 忽略 .DS_Store、assets/screenshots 与不进包仓库文档，仍纳入随包法律文件与 workflow', async t => {
     const d = await makeFixture(t);
     for (const dirName of ['src', 'runtime', 'native', 'tools', 'test', 'dict', 'ui-strings', 'assets/screenshots', 'licenses', '.github/workflows']) {
       await mkdir(join(d, dirName), { recursive: true });
     }
-    for (const fileName of ['package-lock.json', 'tsconfig.json', 'README.md', 'README.zh-CN.md', 'THIRD_PARTY_NOTICES.md', 'README_EN.md', 'CHANGELOG.md', 'PROJECT.md']) {
+    for (const fileName of ['package-lock.json', 'tsconfig.json', 'LICENSE', 'README.md', 'README.zh-CN.md', 'THIRD_PARTY_NOTICES.md', 'README_EN.md', 'CHANGELOG.md', 'PROJECT.md', 'SECURITY.md']) {
       await writeFile(join(d, fileName), 'fixture');
     }
     await writeFile(join(d, 'package.json'), '{"version":"1.1.1"}');
@@ -52,14 +52,21 @@ describeContractGroup("发行完整性 · release-1.1.1-contracts", { concurrenc
     await writeFile(join(d, 'src/.DS_Store'), 'junk');
     await writeFile(join(d, 'assets/.DS_Store'), 'junk');
     await writeFile(join(d, 'assets/screenshots/about.png'), 'png-bytes');
+    for (const doc of ['CHANGELOG.md', 'README.md', 'README.zh-CN.md', 'README_EN.md', 'PROJECT.md', 'SECURITY.md']) {
+      await writeFile(join(d, doc), `updated ${doc}`);
+    }
     assert.equal(await sourceDigest(d), baseDigest);
 
-    await writeFile(join(d, 'CHANGELOG.md'), 'updated changelog');
-    const afterChangelog = await sourceDigest(d);
-    assert.notEqual(afterChangelog, baseDigest);
+    await writeFile(join(d, 'LICENSE'), 'updated license');
+    const afterLicense = await sourceDigest(d);
+    assert.notEqual(afterLicense, baseDigest);
+
+    await writeFile(join(d, 'THIRD_PARTY_NOTICES.md'), 'updated notices');
+    const afterNotices = await sourceDigest(d);
+    assert.notEqual(afterNotices, afterLicense);
 
     await writeFile(join(d, '.github/workflows/ci.yml'), 'name: ci-v2\n');
-    assert.notEqual(await sourceDigest(d), afterChangelog);
+    assert.notEqual(await sourceDigest(d), afterNotices);
 
     assert.equal(includeSourceDigestPath('assets/screenshots/settings.png'), false);
     assert.equal(includeSourceDigestPath('src/.DS_Store'), false);

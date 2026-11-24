@@ -22,7 +22,60 @@ struct ProcessTreeEntry: Equatable {
     let args: String
 }
 
+enum DetachedDaemonKind: String, Equatable {
+    case languageServer = "language_server"
+    case sidecar = "sidecar"
+}
+
+struct DetachedDaemonProcess: Equatable {
+    let pid: Int32
+    let ppid: Int32
+    let kind: DetachedDaemonKind
+    let args: String
+}
+
+struct AntigravityProcessInspection: Equatable {
+    let uiRoles: [String]
+    let detachedDaemons: [DetachedDaemonProcess]
+
+    var hasUiProcesses: Bool { !uiRoles.isEmpty }
+    var detachedDaemonKinds: [String] {
+        var kinds: [String] = []
+        if detachedDaemons.contains(where: { $0.kind == .languageServer }) {
+            kinds.append(DetachedDaemonKind.languageServer.rawValue)
+        }
+        if detachedDaemons.contains(where: { $0.kind == .sidecar }) {
+            kinds.append(DetachedDaemonKind.sidecar.rawValue)
+        }
+        return kinds
+    }
+}
+
+enum QuitAntigravityResult: Equatable {
+    case exited
+    case uiStillRunning(roles: [String])
+    case detachedDaemonsRemaining(kinds: [String], pids: [Int32])
+}
+
+struct UiProcessCandidate: Equatable {
+    let pid: Int32
+    let role: String
+    let args: String
+}
+
+struct DetailedAntigravityProcessInspection: Equatable {
+    let inspection: AntigravityProcessInspection
+    let uiProcesses: [UiProcessCandidate]
+}
+
+enum DetachedPollStepEvaluation: Equatable {
+    case exited
+    case uiStillRunning(roles: [String])
+    case stillExiting(remainingDaemons: [DetachedDaemonProcess])
+}
+
 #if NATIVE_UI_TEST
+private var isAntigravityRunningTestingOverride: (() -> Bool)? = nil
 struct SafeRelaunchTestingHooks {
     var confirm: ((NSAlert, @escaping (Bool) -> Void) -> Void)? = nil
     var isRunning: (() -> Bool)? = nil
@@ -283,25 +336,312 @@ extension Assistant {
         return chromiumTypes.contains { args.contains($0) }
     }
 
+    private static func isCrashpadHandlerArgs(_ args: String) -> Bool {
+        args.contains("chrome_crashpad_handler")
+    }
+
+    private static func isLanguageServerArgs(_ args: String, appPaths: [String]) -> Bool {
+        let trimmed = args.trimmingCharacters(in: .whitespacesAndNewlines)
+        return appPaths.contains { appPath in
+            let lsPath = appPath + "/Contents/Resources/bin/language_server"
+            return trimmed.hasPrefix(lsPath)
+        }
+    }
+
+    private static func isSidecarHostArgs(_ args: String, appPaths: [String]) -> Bool {
+        let trimmed = args.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard appPaths.contains(where: { trimmed.hasPrefix($0 + "/Contents/Frameworks/") }) else {
+            return false
+        }
+        if isChromiumHelperArgs(trimmed) || isCrashpadHandlerArgs(trimmed) {
+            return false
+        }
+        return trimmed.contains("sidecar_sdk/register_loader") || trimmed.contains("sidecar_sdk")
+    }
+
+    private static func classifyUiRole(_ args: String, appPaths: [String]) -> String {
+        if appPaths.contains(where: { args.hasPrefix($0 + "/Contents/MacOS/") }) {
+            return "main"
+        }
+        if args.contains("--type=renderer") {
+            return "renderer"
+        }
+        if args.contains("--type=gpu-process") {
+            return "gpu-process"
+        }
+        if args.contains("--type=utility") {
+            return "utility"
+        }
+        if isLanguageServerArgs(args, appPaths: appPaths) {
+            return "language_server"
+        }
+        return "helper"
+    }
+
+    static func inspectAntigravityProcesses(
+        psPidPpidArgsOutput: String,
+        appPaths: [String] = DesktopApplicationTarget.allTargets.map(\.path)
+    ) -> AntigravityProcessInspection {
+        inspectAntigravityProcessesDetailed(psPidPpidArgsOutput: psPidPpidArgsOutput, appPaths: appPaths).inspection
+    }
+
+    static func inspectAntigravityProcessesDetailed(
+        psPidPpidArgsOutput: String,
+        appPaths: [String] = DesktopApplicationTarget.allTargets.map(\.path)
+    ) -> DetailedAntigravityProcessInspection {
+        let entries = parsePsPidPpidArgs(psPidPpidArgsOutput)
+        var childrenByParent: [Int32: [ProcessTreeEntry]] = [:]
+        var daemonKindByPid: [Int32: DetachedDaemonKind] = [:]
+        var queue: [Int32] = []
+
+        for entry in entries {
+            childrenByParent[entry.ppid, default: []].append(entry)
+            let trimmed = entry.args.trimmingCharacters(in: .whitespacesAndNewlines)
+            if isLanguageServerArgs(trimmed, appPaths: appPaths) {
+                if daemonKindByPid[entry.pid] == nil {
+                    daemonKindByPid[entry.pid] = .languageServer
+                    queue.append(entry.pid)
+                }
+            } else if isSidecarHostArgs(trimmed, appPaths: appPaths) {
+                if daemonKindByPid[entry.pid] == nil {
+                    daemonKindByPid[entry.pid] = .sidecar
+                    queue.append(entry.pid)
+                }
+            }
+        }
+
+        var cursor = 0
+        while cursor < queue.count {
+            let parentPid = queue[cursor]
+            cursor += 1
+            let parentKind = daemonKindByPid[parentPid] ?? .languageServer
+            for child in childrenByParent[parentPid] ?? [] {
+                if daemonKindByPid[child.pid] != nil { continue }
+                let childArgs = child.args.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard appPaths.contains(where: { childArgs.hasPrefix($0 + "/Contents/") }) else { continue }
+                if appPaths.contains(where: { childArgs.hasPrefix($0 + "/Contents/MacOS/") }) { continue }
+                if isChromiumHelperArgs(childArgs) || isCrashpadHandlerArgs(childArgs) { continue }
+                let childKind: DetachedDaemonKind
+                if isSidecarHostArgs(childArgs, appPaths: appPaths)
+                    || appPaths.contains(where: { childArgs.hasPrefix($0 + "/Contents/Frameworks/Antigravity Helper") }) {
+                    childKind = .sidecar
+                } else {
+                    childKind = parentKind
+                }
+                daemonKindByPid[child.pid] = childKind
+                queue.append(child.pid)
+            }
+        }
+
+        var uiRoles: [String] = []
+        var seenUiRoles = Set<String>()
+        var uiProcesses: [UiProcessCandidate] = []
+        var detachedDaemons: [DetachedDaemonProcess] = []
+
+        for entry in entries {
+            let trimmed = entry.args.trimmingCharacters(in: .whitespacesAndNewlines)
+            let matchesContents = appPaths.contains { trimmed.hasPrefix($0 + "/Contents/") }
+            guard matchesContents || isLanguageServerArgs(trimmed, appPaths: appPaths) else {
+                continue
+            }
+            if isCrashpadHandlerArgs(trimmed) {
+                continue
+            }
+            if let daemonKind = daemonKindByPid[entry.pid] {
+                detachedDaemons.append(DetachedDaemonProcess(
+                    pid: entry.pid,
+                    ppid: entry.ppid,
+                    kind: daemonKind,
+                    args: trimmed
+                ))
+                continue
+            }
+            let role = classifyUiRole(trimmed, appPaths: appPaths)
+            uiProcesses.append(UiProcessCandidate(pid: entry.pid, role: role, args: trimmed))
+            if seenUiRoles.insert(role).inserted {
+                uiRoles.append(role)
+            }
+        }
+
+        return DetailedAntigravityProcessInspection(
+            inspection: AntigravityProcessInspection(uiRoles: uiRoles, detachedDaemons: detachedDaemons),
+            uiProcesses: uiProcesses
+        )
+    }
+
+    static func inspectLiveAntigravityProcesses(
+        appPaths: [String] = DesktopApplicationTarget.allTargets.map(\.path)
+    ) -> AntigravityProcessInspection {
+        inspectLiveAntigravityProcessesDetailed(appPaths: appPaths).inspection
+    }
+
+    static func inspectLiveAntigravityProcessesDetailed(
+        appPaths: [String] = DesktopApplicationTarget.allTargets.map(\.path)
+    ) -> DetailedAntigravityProcessInspection {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/ps")
+        task.arguments = ["-ax", "-ww", "-o", "pid=,ppid=,args="]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        do {
+            defer { try? pipe.fileHandleForReading.close() }
+            try task.run()
+            let data = (try? pipe.fileHandleForReading.readToEnd()) ?? Data()
+            task.waitUntilExit()
+            let output = String(data: data, encoding: .utf8) ?? ""
+            return inspectAntigravityProcessesDetailed(psPidPpidArgsOutput: output, appPaths: appPaths)
+        } catch {
+            return DetailedAntigravityProcessInspection(
+                inspection: AntigravityProcessInspection(uiRoles: [], detachedDaemons: []),
+                uiProcesses: []
+            )
+        }
+    }
+
+    static func isDetachedChildCandidateArgs(
+        _ args: String,
+        appPaths: [String] = DesktopApplicationTarget.allTargets.map(\.path)
+    ) -> Bool {
+        let trimmed = args.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if appPaths.contains(where: { trimmed.hasPrefix($0 + "/Contents/MacOS/") }) {
+            return false
+        }
+        if isChromiumHelperArgs(trimmed) || isCrashpadHandlerArgs(trimmed) {
+            return false
+        }
+        return appPaths.contains(where: { trimmed.hasPrefix($0 + "/Contents/") })
+    }
+
+    static func evaluateDetachedPollStep(
+        registeredRunning: Bool,
+        detailed: DetailedAntigravityProcessInspection,
+        trackedKindsByPid: inout [Int32: DetachedDaemonKind],
+        appPaths: [String] = DesktopApplicationTarget.allTargets.map(\.path)
+    ) -> DetachedPollStepEvaluation {
+        for daemon in detailed.inspection.detachedDaemons {
+            trackedKindsByPid[daemon.pid] = daemon.kind
+        }
+
+        var remainingDaemons = detailed.inspection.detachedDaemons
+        var remainingUiRoles: [String] = []
+        var seenUiRoles = Set<String>()
+
+        for candidate in detailed.uiProcesses {
+            if let trackedKind = trackedKindsByPid[candidate.pid],
+               isDetachedChildCandidateArgs(candidate.args, appPaths: appPaths) {
+                remainingDaemons.append(DetachedDaemonProcess(
+                    pid: candidate.pid,
+                    ppid: 1,
+                    kind: trackedKind,
+                    args: candidate.args
+                ))
+                continue
+            }
+            if seenUiRoles.insert(candidate.role).inserted {
+                remainingUiRoles.append(candidate.role)
+            }
+        }
+
+        if registeredRunning || !remainingUiRoles.isEmpty {
+            let roles = remainingUiRoles.isEmpty ? ["registered-app"] : remainingUiRoles
+            return .uiStillRunning(roles: roles)
+        }
+        if remainingDaemons.isEmpty {
+            return .exited
+        }
+        return .stillExiting(remainingDaemons: remainingDaemons)
+    }
+
+    static func isEligibleDetachedDaemonForTermination(
+        uid: Int32,
+        currentUid: Int32 = Int32(getuid()),
+        pid: Int32,
+        args: String,
+        appPaths: [String] = DesktopApplicationTarget.allTargets.map(\.path)
+    ) -> Bool {
+        guard pid > 1, uid == currentUid else { return false }
+        let trimmed = args.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if trimmed.hasPrefix("/Applications/Antigravity - Insiders.app/Contents/") {
+            return false
+        }
+        if appPaths.contains(where: { trimmed.hasPrefix($0 + "/Contents/MacOS/") }) {
+            return false
+        }
+        if isChromiumHelperArgs(trimmed) || isCrashpadHandlerArgs(trimmed) {
+            return false
+        }
+        return isLanguageServerArgs(trimmed, appPaths: appPaths) || isSidecarHostArgs(trimmed, appPaths: appPaths)
+    }
+
+    static func formatDetachedDaemonKinds(_ kinds: [String]) -> String {
+        let sep = L10n.shared.isEnglish ? ", " : "、"
+        let mapped = kinds.map { kind in
+            switch kind {
+            case DetachedDaemonKind.languageServer.rawValue:
+                return L10n.t("process.daemon_kind.language_server", fallback: "language_server")
+            case DetachedDaemonKind.sidecar.rawValue:
+                return L10n.t("process.daemon_kind.sidecar", fallback: "sidecar 宿主")
+            default:
+                return kind
+            }
+        }
+        return mapped.isEmpty ? "language_server / sidecar" : mapped.joined(separator: sep)
+    }
+
+    static func formatDetachedDaemonPids(_ pids: [Int32]) -> String {
+        pids.map(String.init).joined(separator: ", ")
+    }
+
+    private static func readSingleProcessUidAndArgs(pid: Int32) -> (uid: Int32, args: String)? {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/ps")
+        task.arguments = ["-p", String(pid), "-ww", "-o", "uid=,args="]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        do {
+            defer { try? pipe.fileHandleForReading.close() }
+            try task.run()
+            let data = (try? pipe.fileHandleForReading.readToEnd()) ?? Data()
+            task.waitUntilExit()
+            guard task.terminationStatus == 0 else { return nil }
+            let output = String(data: data, encoding: .utf8) ?? ""
+            for rawLine in output.split(separator: "\n") {
+                let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+                let scanner = Substring(trimmed)
+                guard let uidEnd = scanner.firstIndex(where: { $0 == " " || $0 == "\t" }) else { continue }
+                guard let uid = Int32(scanner[..<uidEnd]) else { continue }
+                let args = scanner[uidEnd...].drop(while: { $0 == " " || $0 == "\t" })
+                guard !args.isEmpty else { continue }
+                return (uid, String(args))
+            }
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
     private static func isBlockingAntigravityArgs(
         _ args: String,
         appPaths: [String],
         includeLanguageServer: Bool
     ) -> Bool {
         let trimmed = args.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isCrashpadHandlerArgs(trimmed) {
+            return false
+        }
         return appPaths.contains { appPath in
-            let lsPath = appPath + "/Contents/Resources/bin/language_server"
-            let isLs = trimmed.hasPrefix(lsPath) || trimmed.contains(lsPath)
-            if isLs {
+            if isLanguageServerArgs(trimmed, appPaths: [appPath]) || isSidecarHostArgs(trimmed, appPaths: [appPath]) {
                 return includeLanguageServer
             }
             if includeLanguageServer {
                 return trimmed.hasPrefix(appPath + "/Contents/")
             }
             guard trimmed.hasPrefix(appPath + "/Contents/") else { return false }
-            if trimmed.contains("chrome_crashpad_handler") {
-                return false
-            }
             if trimmed.hasPrefix(appPath + "/Contents/Frameworks/") {
                 return isChromiumHelperArgs(trimmed)
             }
@@ -474,12 +814,121 @@ extension Assistant {
         return .showMainPanel
     }
 
-    func quitAntigravityAndWait(completion: @escaping (Bool) -> Void) {
+    func terminateDetachedDaemonsGracefully(
+        appPaths: [String] = DesktopApplicationTarget.allTargets.map(\.path),
+        timeoutSeconds: TimeInterval = 8.0,
+        pollIntervalMilliseconds: Int = 150,
+        completion: @escaping (QuitAntigravityResult) -> Void
+    ) {
+        suppressLifecycleAutoQuit(seconds: 30.0)
+        let queue = DispatchQueue(label: "local.gravitybox.daemon-cleanup", qos: .userInitiated)
+        let currentUid = Int32(getuid())
+
+        func finish(_ result: QuitAntigravityResult) {
+            DispatchQueue.main.async { [weak self] in
+                self?.suppressLifecycleAutoQuit(seconds: 20.0)
+                completion(result)
+            }
+        }
+
+        queue.async {
+            let registeredRunning = DesktopApplicationTarget.isRegisteredRunning()
+            let initial = Self.inspectLiveAntigravityProcesses(appPaths: appPaths)
+            if registeredRunning || initial.hasUiProcesses {
+                let roles = initial.uiRoles.isEmpty ? ["registered-app"] : initial.uiRoles
+                finish(.uiStillRunning(roles: roles))
+                return
+            }
+            if initial.detachedDaemons.isEmpty {
+                queue.asyncAfter(deadline: .now() + .milliseconds(250)) {
+                    finish(.exited)
+                }
+                return
+            }
+
+            let eligiblePids = Set(initial.detachedDaemons.map(\.pid))
+            var trackedKindsByPid: [Int32: DetachedDaemonKind] = Dictionary(
+                uniqueKeysWithValues: initial.detachedDaemons.map { ($0.pid, $0.kind) }
+            )
+            let parentPidsInBatch = Set(initial.detachedDaemons.map(\.ppid))
+            // Send SIGTERM to leaf children before parent daemons so exiting parents do not reparent children mid-poll.
+            let orderedDaemons = initial.detachedDaemons.sorted { lhs, rhs in
+                let lhsIsParent = parentPidsInBatch.contains(lhs.pid)
+                let rhsIsParent = parentPidsInBatch.contains(rhs.pid)
+                if lhsIsParent != rhsIsParent {
+                    return !lhsIsParent
+                }
+                return lhs.pid > rhs.pid
+            }
+
+            var signaledCount = 0
+            for daemon in orderedDaemons {
+                guard let liveProc = Self.readSingleProcessUidAndArgs(pid: daemon.pid) else { continue }
+                let allowedDescendant = eligiblePids.contains(daemon.pid)
+                    && liveProc.uid == currentUid
+                    && daemon.pid > 1
+                    && !liveProc.args.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/Applications/Antigravity - Insiders.app/Contents/")
+                    && Self.isDetachedChildCandidateArgs(liveProc.args, appPaths: appPaths)
+                guard Self.isEligibleDetachedDaemonForTermination(
+                    uid: liveProc.uid,
+                    currentUid: currentUid,
+                    pid: daemon.pid,
+                    args: liveProc.args,
+                    appPaths: appPaths
+                ) || allowedDescendant else {
+                    continue
+                }
+                if Darwin.kill(daemon.pid, SIGTERM) == 0 {
+                    signaledCount += 1
+                }
+            }
+            lifecycleLogger.info("已向 \(signaledCount, privacy: .public) 个脱管守护进程发送 SIGTERM 温和收尾请求。")
+
+            let start = Date()
+            func pollStep() {
+                let nowRegistered = DesktopApplicationTarget.isRegisteredRunning()
+                let detailed = Self.inspectLiveAntigravityProcessesDetailed(appPaths: appPaths)
+                switch Self.evaluateDetachedPollStep(
+                    registeredRunning: nowRegistered,
+                    detailed: detailed,
+                    trackedKindsByPid: &trackedKindsByPid,
+                    appPaths: appPaths
+                ) {
+                case .uiStillRunning(let roles):
+                    finish(.uiStillRunning(roles: roles))
+                    return
+                case .exited:
+                    queue.asyncAfter(deadline: .now() + .milliseconds(250)) {
+                        finish(.exited)
+                    }
+                    return
+                case .stillExiting(let remainingDaemons):
+                    if Date().timeIntervalSince(start) >= timeoutSeconds {
+                        let remainingInspection = AntigravityProcessInspection(uiRoles: [], detachedDaemons: remainingDaemons)
+                        let kinds = remainingInspection.detachedDaemonKinds
+                        let pids = remainingDaemons.map(\.pid)
+                        lifecycleLogger.warning("脱管守护进程温和退出超时，保留阻塞并由用户介入: kinds=\(kinds.joined(separator: ","), privacy: .public)")
+                        finish(.detachedDaemonsRemaining(kinds: kinds, pids: pids))
+                        return
+                    }
+                    queue.asyncAfter(deadline: .now() + .milliseconds(pollIntervalMilliseconds)) {
+                        pollStep()
+                    }
+                }
+            }
+
+            queue.asyncAfter(deadline: .now() + .milliseconds(min(80, pollIntervalMilliseconds))) {
+                pollStep()
+            }
+        }
+    }
+
+    func quitAntigravityAndWaitDetailed(completion: @escaping (QuitAntigravityResult) -> Void) {
         suppressLifecycleAutoQuit(seconds: 30.0)
         let appPaths = DesktopApplicationTarget.allTargets.map(\.path)
         let queue = DispatchQueue(label: "local.gravitybox.quit-wait", qos: .userInitiated)
         let start = Date()
-        var retriedTerminate = false
+        var observedDetachedKindsByPid: [Int32: DetachedDaemonKind] = [:]
 
         func terminateRunningTargets() {
             let matchingApps = NSRunningApplication.runningApplications(withBundleIdentifier: DesktopApplicationTarget().bundleIdentifier)
@@ -487,39 +936,68 @@ extension Assistant {
             for app in matchingApps { _ = app.terminate() }
         }
 
-        func hasAntigravityProcesses() -> Bool {
-            Self.hasLiveAntigravitySubprocesses(appPaths: appPaths)
-        }
-
-        func finish(_ exited: Bool) {
+        func finish(_ result: QuitAntigravityResult) {
             DispatchQueue.main.async { [weak self] in
                 self?.suppressLifecycleAutoQuit(seconds: 20.0)
-                completion(exited)
+                completion(result)
             }
         }
 
-        func pollStep() {
+        func pollStep(retriedTerminate: Bool, uiExitedAt: Date?) {
             let stillRegistered = DesktopApplicationTarget.isRegisteredRunning()
-            let stillRunning = stillRegistered || hasAntigravityProcesses()
-            if !stillRunning {
+            let detailed = Self.inspectLiveAntigravityProcessesDetailed(appPaths: appPaths)
+            let eval = Self.evaluateDetachedPollStep(
+                registeredRunning: stillRegistered,
+                detailed: detailed,
+                trackedKindsByPid: &observedDetachedKindsByPid,
+                appPaths: appPaths
+            )
+
+            switch eval {
+            case .uiStillRunning(let roles):
+                let elapsed = Date().timeIntervalSince(start)
+                if elapsed >= 15.0 {
+                    finish(.uiStillRunning(roles: roles))
+                    return
+                }
+                let nextRetried: Bool
+                if !retriedTerminate && elapsed >= 2.0 {
+                    nextRetried = true
+                    DispatchQueue.main.async { terminateRunningTargets() }
+                } else {
+                    nextRetried = retriedTerminate
+                }
+                queue.asyncAfter(deadline: .now() + .milliseconds(150)) {
+                    pollStep(retriedTerminate: nextRetried, uiExitedAt: nil)
+                }
+                return
+            case .exited:
                 // Allow LaunchServices / runningboardd to finish unregistering the terminated app job before relaunch.
-                queue.asyncAfter(deadline: .now() + .milliseconds(300)) { finish(true) }
+                queue.asyncAfter(deadline: .now() + .milliseconds(300)) { finish(.exited) }
                 return
+            case .stillExiting:
+                // Give detached language_server / sidecar daemons a 2.0s natural drain grace window after UI exit.
+                let exitedAnchor = uiExitedAt ?? Date()
+                if Date().timeIntervalSince(exitedAnchor) >= 2.0 {
+                    self.terminateDetachedDaemonsGracefully(appPaths: appPaths, timeoutSeconds: 8.0, completion: completion)
+                    return
+                }
+                queue.asyncAfter(deadline: .now() + .milliseconds(150)) {
+                    pollStep(retriedTerminate: retriedTerminate, uiExitedAt: exitedAnchor)
+                }
             }
-            let elapsed = Date().timeIntervalSince(start)
-            if elapsed >= 20.0 {
-                finish(false)
-                return
-            }
-            if !retriedTerminate && elapsed >= 2.0 {
-                retriedTerminate = true
-                DispatchQueue.main.async { terminateRunningTargets() }
-            }
-            queue.asyncAfter(deadline: .now() + .milliseconds(150)) { pollStep() }
         }
 
         DispatchQueue.main.async { terminateRunningTargets() }
-        queue.asyncAfter(deadline: .now() + .milliseconds(50)) { pollStep() }
+        queue.asyncAfter(deadline: .now() + .milliseconds(50)) {
+            pollStep(retriedTerminate: false, uiExitedAt: nil)
+        }
+    }
+
+    func quitAntigravityAndWait(completion: @escaping (Bool) -> Void) {
+        quitAntigravityAndWaitDetailed { result in
+            completion(result == .exited)
+        }
     }
 
     func effectiveConfiguredLanguage() -> String {
@@ -1156,8 +1634,20 @@ extension Assistant {
         DesktopApplicationTarget.matchesAny(app)
     }
 
+    #if NATIVE_UI_TEST
+    static var isAntigravityRunningOverrideForTesting: (() -> Bool)? {
+        get { isAntigravityRunningTestingOverride }
+        set { isAntigravityRunningTestingOverride = newValue }
+    }
+    #endif
+
     static func isAntigravityRunning() -> Bool {
-        DesktopApplicationTarget.isRegisteredRunning()
+        #if NATIVE_UI_TEST
+        if let override = isAntigravityRunningTestingOverride {
+            return override()
+        }
+        #endif
+        return DesktopApplicationTarget.isRegisteredRunning()
     }
 
     func cleanupLegacyLifecycleAgent() {
@@ -1251,9 +1741,7 @@ extension Assistant {
     }
     func suppressLifecycleAutoQuit(seconds: TimeInterval) {
         let candidate = Date().addingTimeInterval(seconds)
-        if candidate > suppressLifecycleAutoQuitUntil {
-            suppressLifecycleAutoQuitUntil = candidate
-        }
+        extendLifecycleAutoQuitSuppression(until: candidate)
     }
     @objc func checkForUpdatesFromMenu() {
         if window?.activeSheetWindow != nil {

@@ -11,8 +11,8 @@ use config::load_config;
 use std::sync::Arc;
 use tauri::{Manager, RunEvent, WindowEvent};
 use tray::{
-    hide_tray_window, is_within_tray_show_grace, mark_tray_hidden_now, setup_tray,
-    show_main_window_and_focus, show_tray_popover,
+    hide_tray_window, is_tray_autohide_suppressed, is_within_tray_show_grace, mark_tray_hidden_now,
+    setup_tray, show_main_window_and_focus, show_tray_popover,
 };
 
 #[cfg(windows)]
@@ -132,11 +132,18 @@ pub fn run() {
 
                 let handle = app.handle().clone();
                 tray_win.on_window_event(move |event| {
-                    if let WindowEvent::Focused(false) = event {
-                        if !is_within_tray_show_grace() {
+                    match event {
+                        WindowEvent::CloseRequested { api, .. } => {
+                            api.prevent_close();
                             hide_tray_window(&handle);
-                            mark_tray_hidden_now();
                         }
+                        WindowEvent::Focused(false) => {
+                            if !is_within_tray_show_grace() && !is_tray_autohide_suppressed() {
+                                hide_tray_window(&handle);
+                                mark_tray_hidden_now();
+                            }
+                        }
+                        _ => {}
                     }
                 });
 
@@ -165,6 +172,8 @@ pub fn run() {
             commands::open_external_url,
             commands::open_folder,
             commands::reveal_in_explorer,
+            commands::open_recycle_bin,
+            commands::set_tray_autohide_suppressed,
             commands::get_autostart,
             commands::set_autostart,
             commands::load_ui_config,

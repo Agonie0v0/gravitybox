@@ -393,20 +393,26 @@ export function AddAccountModal({
       });
       const taskId = start.taskId;
       if (taskId) {
+        let completed = false;
         const deadline = Date.now() + 30_000;
         while (Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 400));
           const list = await backendRequest<{ tasks?: Array<{ id: string; state: string; message?: string; error?: string }> }>({
             command: 'task_list',
           }).catch(() => null);
-          const task = list?.tasks?.find((x) => x.id === taskId);
+          if (!list) continue;
+          const task = list.tasks?.find((x) => x.id === taskId);
           if (!task || task.state !== 'running') {
-            if (task?.state === 'failed') {
+            if (task?.state === 'failed' || task?.state === 'cancelled' || task?.state === 'error') {
               throw new Error(task.error || task.message || t('assistant.action_incomplete'));
             }
             if (task?.message) showToast(task.message);
+            completed = true;
             break;
           }
+        }
+        if (!completed) {
+          throw new Error(t('backend.error.reply_timeout'));
         }
       }
       await refreshAll(true);

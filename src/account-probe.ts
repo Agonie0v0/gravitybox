@@ -671,14 +671,24 @@ export async function probeLiveLanguageServerOnce(
       const verifiedApps = new Set<string>();
       for (const proc of processes) {
         if (!Number.isSafeInteger(proc.pid) || proc.pid <= 0) continue;
-        const matchedTarget = proc.cmdLine
-          ? matchingTargetForLanguageServerCommand(proc.cmdLine, target)
-          : pathsEqual(proc.exePath, layout.languageServerPath, 'win32')
-            ? target
-            : null;
+        let matchedTarget: ApplicationTarget | null = null;
+        if (proc.exePath && pathsEqual(proc.exePath, layout.languageServerPath, 'win32')) {
+          const dataDirMatch = proc.cmdLine?.match(/(?:^|\s)--app_data_dir(?:=|\s+)(?:"([^"]+)"|([^\s"]+))/);
+          const dataDirectory = dataDirMatch?.[1] ?? dataDirMatch?.[2];
+          if (!dataDirectory || dataDirectory === target.dataDirectoryName) {
+            matchedTarget = target;
+          }
+        }
+        if (!matchedTarget && proc.cmdLine) {
+          const cmdMatched = matchingTargetForLanguageServerCommand(proc.cmdLine, target);
+          if (cmdMatched) {
+            const matchedLayout = resolveBundleLayout(cmdMatched.appPath);
+            if (!proc.exePath || pathsEqual(proc.exePath, matchedLayout.languageServerPath, 'win32')) {
+              matchedTarget = cmdMatched;
+            }
+          }
+        }
         if (!matchedTarget) continue;
-        const matchedLayout = resolveBundleLayout(matchedTarget.appPath);
-        if (proc.exePath && !pathsEqual(proc.exePath, matchedLayout.languageServerPath, 'win32')) continue;
         if (useVerifiedBundlePorts && !verifiedApps.has(matchedTarget.appPath)) {
           try {
             await inspectBundle(matchedTarget.appPath);

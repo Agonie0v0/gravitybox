@@ -1993,12 +1993,30 @@ final class AccountsPage: NSObject {
 
     @objc func rollbackSwitch() {
         guard let window = app.window, window.activeSheetWindow == nil else { return }
-        let alert = NSAlert(); alert.messageText = L10n.t("accounts.rollback.confirm_title")
-        alert.informativeText = L10n.t("accounts.rollback.confirm_body")
-        alert.addButton(withTitle: L10n.t("accounts.rollback.confirm_action")); alert.addButton(withTitle: L10n.t("common.cancel"))
-        alert.beginSheetModal(for: window) { [weak self] result in
-            guard let self, result == .alertFirstButtonReturn else { return }
-            self.rollbackButton.isEnabled = false
+        #if !NATIVE_UI_TEST
+        let inspection = Assistant.isAntigravityRunning()
+            ? AntigravityProcessInspection(uiRoles: ["registered-app"], detachedDaemons: [])
+            : Assistant.inspectLiveAntigravityProcesses()
+        let hasDetachedOnly = !inspection.hasUiProcesses && !inspection.detachedDaemons.isEmpty
+        #else
+        let inspection = AntigravityProcessInspection(uiRoles: [], detachedDaemons: [])
+        let hasDetachedOnly = false
+        #endif
+        let alert = NSAlert()
+        alert.messageText = L10n.t("accounts.rollback.confirm_title")
+        if hasDetachedOnly {
+            alert.informativeText = L10n.t("accounts.rollback.detached_confirm_body", [
+                "kinds": Assistant.formatDetachedDaemonKinds(inspection.detachedDaemonKinds),
+                "count": inspection.detachedDaemons.count
+            ])
+            alert.addButton(withTitle: L10n.t("accounts.rollback.detached_confirm_action"))
+        } else {
+            alert.informativeText = L10n.t("accounts.rollback.confirm_body")
+            alert.addButton(withTitle: L10n.t("accounts.rollback.confirm_action"))
+        }
+        alert.addButton(withTitle: L10n.t("common.cancel"))
+        let sendRollback = { [weak self] in
+            guard let self else { return }
             self.app.bridge.send(["command": "account_switch_rollback"]) { [weak self] response in
                 guard let self else { return }
                 self.rollbackButton.isEnabled = true
@@ -2012,6 +2030,33 @@ final class AccountsPage: NSObject {
                     self.fetch()
                     self.app.refresh()
                 }
+            }
+        }
+        alert.beginSheetModal(for: window) { [weak self] result in
+            guard let self, result == .alertFirstButtonReturn else { return }
+            self.rollbackButton.isEnabled = false
+            if hasDetachedOnly {
+                self.app.terminateDetachedDaemonsGracefully { [weak self] quitResult in
+                    guard let self else { return }
+                    switch quitResult {
+                    case .exited:
+                        sendRollback()
+                    case .uiStillRunning:
+                        self.rollbackButton.isEnabled = true
+                        self.app.showMessage(L10n.t("assistant_account.quit_first"), error: true)
+                    case .detachedDaemonsRemaining(let kinds, let pids):
+                        self.rollbackButton.isEnabled = true
+                        self.app.showMessage(
+                            L10n.t("assistant_account.detached_daemons_remaining", [
+                                "kinds": Assistant.formatDetachedDaemonKinds(kinds),
+                                "pids": Assistant.formatDetachedDaemonPids(pids)
+                            ]),
+                            error: true
+                        )
+                    }
+                }
+            } else {
+                sendRollback()
             }
         }
     }

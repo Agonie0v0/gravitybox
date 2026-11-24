@@ -1,4 +1,5 @@
 import { ALLOWED_DATA_DIRECTORY_NAMES, applicationChannel, savedApplicationChannel, applicationTarget, detectInstalledChannels, type ApplicationChannel, type ApplicationTarget } from './application-target.js';
+import { sampleAntigravityProcesses, type DetachedDaemonKind } from './antigravity-processes.js';
 import { GoogleAccountLogin } from './account-oauth.js';
 import { AccountSwitchService } from './account-switch.js';
 import { AccountsManager, accountCredentialReadiness, accountErrorCode, cleanAndLocalizeRefreshError, computeStandbyRefreshStatus, getGoogleClientId, getGoogleClientSecret, hasExpiredQuotaWindow, type Account, type QuotaData } from './accounts.js';
@@ -37,8 +38,6 @@ export { mergeLiveQuotaWithSaved, normalizeSubscriptionTier, projectQuotaContrac
 import { CacheMaintenance } from './maintenance.js';
 import { mkdir, lstat, chmod, readFile, readdir, writeFile } from 'node:fs/promises';
 import { realpathSync, readFileSync } from 'node:fs';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { createServer, createConnection } from 'node:net';
 import { StringDecoder } from 'node:string_decoder';
 import { homedir } from 'node:os';
@@ -67,6 +66,7 @@ export { canonicalPayload } from './ipc-idempotency.js';
 import { loadProxyConfigFromStateDir, redactProxyUrl, resolveEffectiveProxy, setRuntimeProxyConfig } from './proxy.js';
 import {
   appProcesses,
+  classifyWindowsProcesses,
   cleanupIpcEndpoint,
   cleanupIpcSession,
   defaultAntigravityInstallDirs,
@@ -74,7 +74,6 @@ import {
   defaultGravityBoxStateDir,
   finalizeIpcEndpointAfterListen,
   isOwnedByCurrentUser,
-  isPathUnder,
   isWindows,
   pathsEqual,
   prepareIpcEndpointForListen,
@@ -86,8 +85,6 @@ import {
   writeIpcSession,
   type WindowsIpcSession,
 } from './platform/index.js';
-
-const execFileAsync = promisify(execFile);
 
 function cliOption(argv: string[], name: string, fallback?: string) {
   const index = argv.indexOf(name);
@@ -1615,14 +1612,13 @@ async function run() {
       }
       if (command === 'account_switch_preflight') {
         (async () => {
-          let appRunning = false;
-          let stableRunning = false;
+          let uiRunning = false;
           let insidersRunning = false;
+          let detachedDaemons: Array<{ pid: number; kind: DetachedDaemonKind }> = [];
+          let detachedDaemonKinds: DetachedDaemonKind[] = [];
           let hasRunningTask = false;
           let taskReason = '';
           let maxLsCpu = 0;
-          const insidersPrefix = '/Applications/Antigravity - Insiders.app/Contents/';
-          const stablePrefix = `${target.appPath}/Contents/`;
           try {
             if (isWindows()) {
               const stableRoots = new Set<string>([target.appPath]);
@@ -1634,41 +1630,30 @@ async function run() {
                 insidersRoots.add(join(dir, 'Antigravity-Insiders'));
               }
               const procs = await appProcesses([...stableRoots, ...insidersRoots]);
-              for (const proc of procs) {
-                const isInsiders = Array.from(insidersRoots).some(root => isPathUnder(proc.exePath, root, 'win32'));
-                if (isInsiders) {
-                  appRunning = true;
-                  insidersRunning = true;
-                } else if (Array.from(stableRoots).some(root => isPathUnder(proc.exePath, root, 'win32'))) {
-                  appRunning = true;
-                  stableRunning = true;
-                }
-              }
+              const classified = classifyWindowsProcesses(procs, target.appPath);
+              uiRunning = classified.uiRunning;
+              insidersRunning = classified.insidersRunning;
+              detachedDaemons = classified.detachedDaemons.map(d => ({ pid: d.pid, kind: d.kind }));
+              detachedDaemonKinds = classified.detachedDaemonKinds;
             } else {
-              const { stdout: psOut } = await execFileAsync('/bin/ps', ['-ax', '-ww', '-o', 'pid=,pcpu=,args='], { timeout: 3000 });
-              for (const line of psOut.split('\n')) {
-                const m = line.trim().match(/^(\d+)\s+([\d.]+)\s+(.*)$/);
-                if (!m) continue;
-                const cpu = parseFloat(m[2] || '0');
-                const args = m[3] || '';
-                if (args.startsWith(insidersPrefix)) {
-                  // Align with AccountSwitchService.guardStopped(): block any Insiders process sharing official credentials.
-                  appRunning = true;
-                  insidersRunning = true;
-                } else if (args.startsWith(stablePrefix)) {
-                  appRunning = true;
-                  stableRunning = true;
-                } else {
-                  continue;
-                }
-                if (/language_server/i.test(args) && cpu > maxLsCpu) {
-                  maxLsCpu = cpu;
-                }
-              }
+              const classified = await sampleAntigravityProcesses({
+                appPath: target.appPath,
+                checkInsiders: true,
+                insidersPrefix: '/Applications/Antigravity - Insiders.app/Contents/',
+              });
+              uiRunning = classified.uiRunning;
+              insidersRunning = classified.insidersRunning;
+              detachedDaemons = classified.detachedDaemons.map(d => ({ pid: d.pid, kind: d.kind }));
+              detachedDaemonKinds = classified.detachedDaemonKinds;
+              maxLsCpu = classified.maxLsCpu;
             }
           } catch {}
+          const stableRunning = uiRunning;
+          const appRunning = uiRunning || insidersRunning;
+          const detachedDaemonCount = detachedDaemons.length;
+          const detachedDaemonPids = detachedDaemons.map(d => d.pid);
           let cdpChecked = false;
-          if (appRunning) {
+          if (uiRunning) {
             const cdpState = await controller.hasRunningAgentTask().catch(() => ({ busy: false, checked: false, reason: '' }));
             cdpChecked = cdpState.checked === true;
             if (cdpState.busy) {
@@ -1677,7 +1662,7 @@ async function run() {
             }
           }
           // Only fall back to active trajectory write + high LS CPU when CDP is not connected to any page.
-          if (appRunning && !cdpChecked && !hasRunningTask && maxLsCpu >= 20.0) {
+          if ((uiRunning || detachedDaemonKinds.includes('language_server')) && !cdpChecked && !hasRunningTask && maxLsCpu >= 20.0) {
             try {
               const nowMs = Date.now();
               const allowedDataDirs = new Set<string>(ALLOWED_DATA_DIRECTORY_NAMES);
@@ -1705,7 +1690,11 @@ async function run() {
             ok: true,
             appRunning,
             stableRunning,
+            uiRunning,
             insidersRunning,
+            detachedDaemonCount,
+            detachedDaemonKinds,
+            detachedDaemonPids,
             safe: !hasRunningTask,
             state: hasRunningTask ? 'busy' : 'safe',
             hasRunningTask,

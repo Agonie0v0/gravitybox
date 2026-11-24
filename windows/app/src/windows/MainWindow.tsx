@@ -45,9 +45,9 @@ export function MainWindow() {
 
   const statusDotColor = !reachable
     ? 'var(--danger)'
-    : status.mode === 'connected'
+    : status.mode === 'connected' || status.mode === 'adaptive'
     ? 'var(--success)'
-    : status.mode === 'debug-port-missing'
+    : status.mode === 'debug-port-missing' || status.mode === 'unsupported'
     ? 'var(--warning)'
     : 'var(--text-tertiary)';
 
@@ -107,10 +107,14 @@ export function MainWindow() {
               >
                 {!reachable
                   ? t('sidebar.waiting_service')
-                  : status.mode === 'connected'
+                  : status.mode === 'connected' || status.mode === 'adaptive'
                   ? t('status.connected')
                   : status.mode === 'debug-port-missing'
                   ? t('status.debug_port_missing')
+                  : status.mode === 'unsupported'
+                  ? t('status.unsupported')
+                  : status.mode === 'paused'
+                  ? t('status.paused')
                   : t('status.waiting_app')}
               </span>
             </div>

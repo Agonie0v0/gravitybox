@@ -163,12 +163,17 @@ export function OverviewPage() {
     if (!reachable) return { label: t('status.disconnected'), cls: 'gb-pill-danger' };
     switch (status.mode) {
       case 'connected':
+      case 'adaptive':
         return {
           label: translationOn ? t('status.connected') : t('status.connected_english'),
           cls: 'gb-pill-success',
         };
       case 'debug-port-missing':
         return { label: t('status.debug_port_missing'), cls: 'gb-pill-warning' };
+      case 'unsupported':
+        return { label: t('status.unsupported'), cls: 'gb-pill-warning' };
+      case 'legacy-blocked':
+        return { label: t('status.legacy_blocked'), cls: 'gb-pill-danger' };
       case 'paused':
         return { label: t('status.paused'), cls: 'gb-pill-neutral' };
       case 'waiting':

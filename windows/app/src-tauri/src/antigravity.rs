@@ -3,9 +3,11 @@ use crate::ipc_pipe::strip_verbatim_prefix;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashSet;
+use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
@@ -161,7 +163,11 @@ pub fn resolve_win_helper_exe(resource_dir: Option<&Path>) -> Option<PathBuf> {
         .map(|p| strip_verbatim_prefix(&p))
 }
 
-fn run_win_helper(helper_path: &Path, args: &[&str]) -> Result<Value, String> {
+fn run_win_helper_with_timeout(
+    helper_path: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Value, String> {
     let clean_helper = strip_verbatim_prefix(helper_path);
     let mut cmd = Command::new(&clean_helper);
     cmd.args(args)
@@ -171,10 +177,53 @@ fn run_win_helper(helper_path: &Path, args: &[&str]) -> Result<Value, String> {
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    let output = cmd
-        .output()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("无法执行 win-helper: {}", e))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut r) = stdout_pipe {
+            let _ = r.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut r) = stderr_pipe {
+            let _ = r.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = out_reader.join();
+                    let _ = err_reader.join();
+                    return Err("win-helper 执行超时".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_reader.join();
+                let _ = err_reader.join();
+                return Err(format!("等待 win-helper 失败: {}", e));
+            }
+        }
+    }
+
+    let stdout_bytes = out_reader.join().unwrap_or_default();
+    let _stderr_bytes = err_reader.join().unwrap_or_default();
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
     let first_line = stdout.lines().next().unwrap_or("").trim();
     if first_line.is_empty() {
         return Err("win-helper 未返回有效响应".to_string());
@@ -189,6 +238,10 @@ fn run_win_helper(helper_path: &Path, args: &[&str]) -> Result<Value, String> {
         return Err(err.to_string());
     }
     Ok(val)
+}
+
+fn run_win_helper(helper_path: &Path, args: &[&str]) -> Result<Value, String> {
+    run_win_helper_with_timeout(helper_path, args, Duration::from_secs(15))
 }
 
 pub fn parse_devtools_active_port(contents: &str) -> Option<u16> {
@@ -225,13 +278,55 @@ pub fn has_live_devtools_port() -> bool {
     }
 }
 
+fn is_crashpad_entry(item: &Value) -> bool {
+    if item.get("role").and_then(|v| v.as_str()) == Some("crashpad") {
+        return true;
+    }
+    let exe = item
+        .get("exePath")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let cmd = item
+        .get("cmdLine")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    exe.ends_with("chrome_crashpad_handler.exe") || cmd.contains("chrome_crashpad_handler")
+}
+
 pub fn is_antigravity_running(resource_dir: Option<&Path>) -> bool {
     let install_dir = resolve_antigravity_dir();
     let prefix = install_dir.to_string_lossy().to_string();
     if let Some(helper) = resolve_win_helper_exe(resource_dir) {
         if let Ok(val) = run_win_helper(&helper, &["app-processes", "--prefix", &prefix]) {
             if let Some(arr) = val.get("processes").and_then(|v| v.as_array()) {
-                return !arr.is_empty();
+                return arr.iter().any(|item| !is_crashpad_entry(item));
+            }
+        }
+    }
+    false
+}
+
+fn has_ui_antigravity_running(resource_dir: Option<&Path>) -> bool {
+    let install_dir = resolve_antigravity_dir();
+    let prefix = install_dir.to_string_lossy().to_string();
+    if let Some(helper) = resolve_win_helper_exe(resource_dir) {
+        if let Ok(val) = run_win_helper(&helper, &["app-processes", "--prefix", &prefix]) {
+            if let Some(arr) = val.get("processes").and_then(|v| v.as_array()) {
+                return arr.iter().any(|item| {
+                    if is_crashpad_entry(item) {
+                        return false;
+                    }
+                    if let Some(role) = item.get("role").and_then(|v| v.as_str()) {
+                        return role == "ui";
+                    }
+                    item.get("exePath")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase()
+                        .ends_with("antigravity.exe")
+                });
             }
         }
     }
@@ -654,8 +749,20 @@ fn build_graceful_close_args(
     args
 }
 
+static RELAUNCH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+struct RelaunchFlightGuard;
+
+impl Drop for RelaunchFlightGuard {
+    fn drop(&mut self) {
+        RELAUNCH_IN_FLIGHT.store(false, Ordering::SeqCst);
+    }
+}
+
 fn format_close_failure_message(reason: &str, timeout_ms: u64) -> String {
-    if reason == "visible_window_open" {
+    if reason == "uipi_access_denied" {
+        "检测到 Antigravity 当前以更高权限（如管理员）运行，受 Windows 安全边界限制无法从普通权限发送关闭消息。请先手动关闭 Antigravity，再重新打开或重试。".to_string()
+    } else if reason == "visible_window_open" {
         "检测到 Antigravity 仍有未关闭的可见窗口（例如未保存更改确认框），已停止关闭且未强制终止。请先在 Antigravity 中完成保存或确认关闭，再重试安全重启。".to_string()
     } else if reason == "background_resident" {
         "Antigravity 的可见窗口已全部关闭，但仍有无界面后台/托盘进程驻留。是否确认结束这些无界面后台进程并带调试端口重启？（也可点「取消」自行从系统托盘退出）".to_string()
@@ -690,7 +797,11 @@ pub fn quit_antigravity_detailed(
     let owned_args =
         build_graceful_close_args(&prefix, timeout_ms, SAFE_CLOSE_GRACE_MS, confirm_background_exit);
     let arg_refs: Vec<&str> = owned_args.iter().map(String::as_str).collect();
-    let val = run_win_helper(&helper, &arg_refs)?;
+    let val = run_win_helper_with_timeout(
+        &helper,
+        &arg_refs,
+        Duration::from_millis(timeout_ms.saturating_add(SAFE_CLOSE_GRACE_MS).saturating_add(8000)),
+    )?;
     let closed = val.get("closed").and_then(|v| v.as_bool()).unwrap_or(false);
     let reason = val
         .get("reason")
@@ -718,6 +829,14 @@ pub fn safe_relaunch_antigravity(
     state_dir: Option<&Path>,
     confirm_background_exit: bool,
 ) -> Result<SafeRelaunchResult, String> {
+    if RELAUNCH_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("安全重启正在进行中，请稍候".to_string());
+    }
+    let _flight_guard = RelaunchFlightGuard;
+
     if is_antigravity_running(resource_dir) {
         let outcome =
             quit_antigravity_detailed(resource_dir, SAFE_CLOSE_TIMEOUT_MS, confirm_background_exit)?;
@@ -763,7 +882,7 @@ pub fn safe_relaunch_antigravity(
             }
             std::thread::sleep(Duration::from_millis(250));
         }
-        if is_antigravity_running(resource_dir) {
+        if has_ui_antigravity_running(resource_dir) {
             return Ok(SafeRelaunchResult {
                 ok: true,
                 debug_port_ready: has_live_devtools_port(),

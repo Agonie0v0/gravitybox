@@ -6,8 +6,13 @@ use std::ptr;
 
 use serde::{Deserialize, Serialize};
 use windows_sys::core::{GUID, PCWSTR};
-use windows_sys::Win32::Foundation::{BOOL, GetLastError, HWND, S_FALSE, S_OK};
-use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetFullPathNameW};
+use windows_sys::Win32::Foundation::{
+    BOOL, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, GetLastError, HWND, S_FALSE, S_OK,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_REPARSE_POINT, GetDriveTypeW, GetFileAttributesW, GetFullPathNameW,
+    GetVolumePathNameW, INVALID_FILE_ATTRIBUTES,
+};
 use windows_sys::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
@@ -19,9 +24,11 @@ use windows_sys::Win32::UI::Shell::{
 
 use crate::error::HelperError;
 use crate::util::{
-    has_absolute_local_drive_prefix, has_parent_dir_segment, is_verbatim_unc_path,
-    read_stdin_bounded, to_wide_null,
+    from_wide_null, has_absolute_local_drive_prefix, has_parent_dir_segment, is_verbatim_unc_path,
+    normalize_win_path, read_stdin_bounded, to_wide_null, zeroize_bytes,
 };
+
+const FOFX_EARLYFAILURE: u32 = 0x0010_0000;
 
 /// `IID_IFileOperation` (`947aab5f-0a5c-4c13-b4d6-4bf7836fc9f8`) from `ShObjIdl_core.h`.
 const IID_IFILE_OPERATION: GUID = GUID::from_u128(0x947aab5f_0a5c_4c13_b4d6_4bf7836fc9f8);
@@ -309,8 +316,45 @@ fn resolve_full_path_for_shell(raw: &str) -> Result<String, HelperError> {
         }
     };
 
+    if !raw.starts_with(r"\\?\") && normalized.encode_utf16().count() > 248 {
+        return Err(HelperError::invalid_input(
+            "path exceeds legacy Shell path limit (248 UTF-16 code units)",
+        ));
+    }
+
     let drive_root = format!(r"{}:\", normalized.as_bytes()[0].to_ascii_uppercase() as char);
     verify_drive_is_fixed(&drive_root)?;
+
+    let norm_w = to_wide_null(&normalized);
+    let attrs = unsafe { GetFileAttributesW(norm_w.as_ptr()) };
+    if attrs == INVALID_FILE_ATTRIBUTES {
+        let err = unsafe { GetLastError() };
+        if err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND {
+            return Err(HelperError::not_found(format!("path does not exist: {raw}")));
+        }
+        return Err(HelperError::win32("GetFileAttributesW", err));
+    }
+    if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+        return Err(HelperError::invalid_input(
+            "refusing to move symlink, junction, or reparse point to Recycle Bin",
+        ));
+    }
+
+    let mut vol_buf = vec![0u16; norm_w.len().max(512)];
+    let vol_ok = unsafe {
+        GetVolumePathNameW(norm_w.as_ptr(), vol_buf.as_mut_ptr(), vol_buf.len() as u32)
+    };
+    if vol_ok == 0 {
+        let err = unsafe { GetLastError() };
+        return Err(HelperError::win32("GetVolumePathNameW", err));
+    }
+    let vol_root = from_wide_null(&vol_buf);
+    if normalize_win_path(&vol_root) == normalize_win_path(&normalized) {
+        return Err(HelperError::invalid_input(
+            "refusing to move volume mount point root to Recycle Bin",
+        ));
+    }
+
     Ok(normalized)
 }
 
@@ -343,8 +387,12 @@ fn move_paths_via_ifile_operation(resolved: &[(String, String)]) -> Result<Vec<S
 
     // FOFX_RECYCLEONDELETE enforces fail-closed Recycle Bin deletion on Windows 8+
     // (returns an error HRESULT instead of silently permanently deleting when Recycle Bin is unavailable).
-    let flags: u32 =
-        FOFX_RECYCLEONDELETE | FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+    let flags: u32 = FOFX_RECYCLEONDELETE
+        | FOFX_EARLYFAILURE
+        | FOF_ALLOWUNDO
+        | FOF_NOCONFIRMATION
+        | FOF_SILENT
+        | FOF_NOERRORUI;
     let hr_flags = unsafe { (vtbl.set_operation_flags)(op.as_ptr(), flags) };
     if hr_flags < 0 {
         return Err(HelperError::new(
@@ -449,8 +497,10 @@ pub fn trash_move_paths(paths: &[String]) -> Result<TrashMoveResponse, HelperErr
 }
 
 pub fn trash_move_from_stdin() -> Result<TrashMoveResponse, HelperError> {
-    let raw = read_stdin_bounded()?;
-    let input: TrashMoveInput = serde_json::from_slice(&raw)
+    let mut raw = read_stdin_bounded()?;
+    let parse_res: Result<TrashMoveInput, _> = serde_json::from_slice(&raw);
+    zeroize_bytes(&mut raw);
+    let input = parse_res
         .map_err(|_| HelperError::invalid_input("invalid JSON payload for trash-move"))?;
     trash_move_paths(&input.paths)
 }

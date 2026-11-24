@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join, resolve } from 'node:path';
+import { isCrashpadHandlerArgs } from './antigravity-processes.js';
 import { bt } from './i18n.js';
 import {
   appProcesses,
@@ -263,7 +264,19 @@ export async function readProcessCommands(): Promise<string[] | null> {
         // Enumerate all running processes (matching `/bin/ps -axo command=` on macOS) so both
         // custom Antigravity install paths and external browser_profile Chromium processes are visible.
         const procs = await appProcesses([]);
-        const commands = procs.map((p) => (p.cmdLine || p.exePath || '').trim()).filter(Boolean);
+        const commands = procs.map((p) => {
+          const exe = p.exePath.trim();
+          const cmd = p.cmdLine.trim();
+          if (exe && cmd) {
+            const normCmd = cmd.toLowerCase();
+            const normExe = exe.toLowerCase();
+            if (normCmd.startsWith(normExe) || normCmd.startsWith(`"${normExe}"`)) {
+              return cmd;
+            }
+            return `"${exe}" ${cmd}`;
+          }
+          return (cmd || exe).trim();
+        }).filter(Boolean);
         cachedProcessCommands = { at: Date.now(), commands };
         return commands;
       }
@@ -286,6 +299,20 @@ export async function readProcessCommands(): Promise<string[] | null> {
   }
 }
 
+function extractWindowsExecutableToken(command: string): string {
+  const trimmed = command.trimStart();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('"')) {
+    const closeIdx = trimmed.indexOf('"', 1);
+    return closeIdx > 1 ? trimmed.slice(1, closeIdx) : trimmed.slice(1);
+  }
+  const exeMatch = trimmed.match(/^(.+?\.exe)(?=\s|$)/i);
+  if (exeMatch && exeMatch[1]) {
+    return exeMatch[1];
+  }
+  return trimmed.split(/\s+/)[0] ?? '';
+}
+
 export function hasAntigravityCommand(commands: string[], appPath = defaultAntigravityAppPath()): boolean {
   const winMode = !appPath.toLowerCase().endsWith('.app') && (isWindows() || /^[a-zA-Z]:[\\/]/.test(appPath));
   if (winMode) {
@@ -297,12 +324,17 @@ export function hasAntigravityCommand(commands: string[], appPath = defaultAntig
       ),
     );
     return commands.some((trimmed) => {
-      const normalized = trimmed.replaceAll('"', '').replaceAll('\\', '/').toLowerCase();
+      if (isCrashpadHandlerArgs(trimmed)) return false;
+      const exeToken = normalizePathForCompare(extractWindowsExecutableToken(trimmed), 'win32');
+      if (!exeToken) return false;
+      if (exeToken.endsWith('/chrome_crashpad_handler.exe') || exeToken === 'chrome_crashpad_handler.exe') {
+        return false;
+      }
       return roots.some(
         (root) =>
-          normalized.includes(`${root}/antigravity.exe`) ||
-          normalized.includes(`${root}/resources/bin/language_server.exe`) ||
-          normalized.startsWith(`${root}/`),
+          exeToken === `${root}/antigravity.exe` ||
+          exeToken === `${root}/resources/bin/language_server.exe` ||
+          isPathUnder(exeToken, root, 'win32'),
       );
     });
   }
@@ -310,11 +342,12 @@ export function hasAntigravityCommand(commands: string[], appPath = defaultAntig
   const macOsPrefixes = appRoots.map(p => p + '/Contents/MacOS/');
   const frameworkPrefixes = appRoots.map(p => p + '/Contents/Frameworks/');
   const lsPrefixes = appRoots.map(p => p + '/Contents/Resources/bin/language_server');
-  return commands.some(trimmed =>
-    macOsPrefixes.some(prefix => trimmed.startsWith(prefix)) ||
-    frameworkPrefixes.some(prefix => trimmed.startsWith(prefix)) ||
-    lsPrefixes.some(prefix => trimmed.startsWith(prefix) || trimmed.includes(prefix))
-  );
+  return commands.some(trimmed => {
+    if (isCrashpadHandlerArgs(trimmed)) return false;
+    return macOsPrefixes.some(prefix => trimmed.startsWith(prefix)) ||
+      frameworkPrefixes.some(prefix => trimmed.startsWith(prefix)) ||
+      lsPrefixes.some(prefix => trimmed.startsWith(prefix));
+  });
 }
 
 export function hasBrowserProfileCommand(commands: string[], browserProfileDir: string): boolean {

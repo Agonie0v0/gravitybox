@@ -1,6 +1,6 @@
 import { type ApplicationChannel, type ApplicationTarget, applicationTarget } from './application-target.js';
-import { spawn, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { sampleAntigravityProcesses, type AntigravityProcessClassification } from './antigravity-processes.js';
+import { spawn } from 'node:child_process';
 import { readFile, mkdir, lstat, unlink, readdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
@@ -16,15 +16,16 @@ export { removeTopicRow, replaceTopicRow } from './account-state.js';
 import { bt } from './i18n.js';
 import {
   appProcesses,
+  classifyWindowsProcesses,
   defaultAntigravityInstallDirs,
   defaultGravityBoxStateDir,
   isOwnedByCurrentUser,
   isPathUnder,
   isWindows,
   pathsEqual,
+  unlinkWithRetry,
 } from './platform/index.js';
 
-const run = promisify(execFile);
 const TOKEN = 'antigravityUnifiedStateSync.oauthToken';
 const USER = 'antigravityUnifiedStateSync.userStatus';
 const INIT = 'jetskiStateSync.agentManagerInitState';
@@ -161,6 +162,8 @@ class WindowsNodeSqliteTransaction implements DatabaseTransactionBackend {
       this.db = new DatabaseSync(this.dbPath);
       this.db.exec('PRAGMA busy_timeout = 3000;');
     } catch (error) {
+      try { this.db?.close(); } catch {}
+      this.db = null;
       this.initError = this.wrapError(error);
       this.closed = true;
     }
@@ -454,6 +457,7 @@ export class AccountSwitchService {
     stateDir: string; profile: string; keychain?: KeychainAdapter; channel?: ApplicationChannel; target?: ApplicationTarget;
     homeDir?: string; geminiDir?: string;
     isRunning?: () => Promise<boolean>; // Isolated tests only; never accepted over IPC.
+    inspectProcesses?: () => Promise<AntigravityProcessClassification>; // Isolated tests only; never accepted over IPC.
     databaseFactory?: (path: string) => DatabaseTransaction; // Fault injection, never accepted over IPC.
   }) {
     this.keychain = options.keychain ?? new SystemKeychainAdapter();
@@ -685,7 +689,7 @@ export class AccountSwitchService {
       // No database rewrite: its observed committed state selected which file/keychain state to keep.
       await tx?.finish(false);
       await atomicJson(this.journalPath, committed ? this.completedRollback(original) : original);
-      await unlink(this.rollbackPath);
+      await unlinkWithRetry(this.rollbackPath);
       this.manager.invalidateRuntimeCaches?.();
       if (committed) {
         const cliSnapshots = record.cliSnapshots ?? original.cliSnapshots;
@@ -699,7 +703,7 @@ export class AccountSwitchService {
       if (await this.options.isRunning()) throw new Error(bt('switch.err.stop_app_first'));
       return;
     }
-    if (isWindows()) {
+    if (!this.options.inspectProcesses && isWindows()) {
       const candidateRoots = new Set<string>([this.target.appPath]);
       for (const dir of defaultAntigravityInstallDirs()) {
         candidateRoots.add(join(dir, 'Antigravity'));
@@ -708,18 +712,32 @@ export class AccountSwitchService {
         candidateRoots.add(join(dir, 'Antigravity-Insiders'));
       }
       const procs = await appProcesses(Array.from(candidateRoots));
-      if (procs.length > 0) throw new Error(bt('switch.err.stop_app_first'));
+      const classified = classifyWindowsProcesses(procs, this.target.appPath);
+      if (classified.insidersRunning || classified.uiRunning) {
+        throw new Error(bt('switch.err.stop_app_first'));
+      }
+      if (classified.detachedDaemons.length > 0) {
+        const kinds = classified.detachedDaemonKinds
+          .map(kind => bt(`switch.daemon_kind.${kind}`))
+          .join(', ');
+        const pids = classified.detachedDaemons.map(d => d.pid).join(', ');
+        throw new Error(bt('switch.err.detached_daemon_running', { kinds, pids }));
+      }
       return;
     }
-    const candidatePrefixes = Array.from(
-      // Insiders shares official credentials: block switching while it runs, without managing it.
-      new Set([this.target.appPath, '/Applications/Antigravity.app', '/Applications/Antigravity - Insiders.app']),
-    ).map(p => p + '/Contents/');
-    const running = (await run('/bin/ps', ['-ax', '-ww', '-o', 'args='], { timeout: 3000 })).stdout.split('\n').some(line => {
-      const trimmed = line.trim();
-      return candidatePrefixes.some(prefix => trimmed.startsWith(prefix));
-    });
-    if (running) throw new Error(bt('switch.err.stop_app_first'));
+    const classified = this.options.inspectProcesses
+      ? await this.options.inspectProcesses()
+      : await sampleAntigravityProcesses({ appPath: this.target.appPath, checkInsiders: true });
+    if (classified.insidersRunning || classified.uiRunning) {
+      throw new Error(bt('switch.err.stop_app_first'));
+    }
+    if (classified.detachedDaemons.length > 0) {
+      const kinds = classified.detachedDaemonKinds
+        .map(kind => bt(`switch.daemon_kind.${kind}`))
+        .join(', ');
+      const pids = classified.detachedDaemons.map(d => d.pid).join(', ');
+      throw new Error(bt('switch.err.detached_daemon_running', { kinds, pids }));
+    }
   }
   private async archivePreviousJournal(previous: Journal) {
     const backupsDir = join(this.options.stateDir, 'account-switch-backups');
@@ -774,20 +792,33 @@ export class AccountSwitchService {
     );
   }
   private async restoreFiles(files: SavedFile[], keychainBefore: string | null, keychainAfter: string, keychainAfterDigest?: string) {
-    const resolvedTargets: Array<{ path: string; target: string }> = [];
+    const resolvedTargets: Array<{ path: string; current: string; target: string }> = [];
     for (const file of files) {
       const value = await readFile(file.path, 'utf8');
       const target = resolveManagedFileTarget(file, value, 'before');
       if (target === null) throw new Error(bt('switch.err.files_changed_after'));
-      resolvedTargets.push({ path: file.path, target });
+      resolvedTargets.push({ path: file.path, current: value, target });
     }
     const current = await this.keychain.readPassword('gemini', 'antigravity');
     const matchesKeychainBefore = current === keychainBefore;
     const matchesKeychainAfter = (keychainAfter && keychainAfter !== '[REDACTED]' && current === keychainAfter) || (keychainAfterDigest && current !== null && sha256(current) === keychainAfterDigest);
     if (!matchesKeychainBefore && !matchesKeychainAfter) throw new Error(bt('switch.err.keychain_updated'));
-    for (const item of resolvedTargets) await atomicText(item.path, item.target);
-    if (keychainBefore === null) await this.keychain.deletePassword('gemini', 'antigravity');
-    else await this.keychain.writePassword('gemini', 'antigravity', keychainBefore);
+    let firstError: unknown = null;
+    for (const item of resolvedTargets) {
+      if (item.current === item.target) continue;
+      try {
+        await atomicText(item.path, item.target);
+      } catch (error) {
+        if (firstError === null) firstError = error;
+      }
+    }
+    try {
+      if (keychainBefore === null) await this.keychain.deletePassword('gemini', 'antigravity');
+      else await this.keychain.writePassword('gemini', 'antigravity', keychainBefore);
+    } catch (error) {
+      if (firstError === null) firstError = error;
+    }
+    if (firstError !== null) throw firstError;
   }
   async switchAccount(id: string, target = 'all') {
     if (!['all', 'app'].includes(target)) throw new Error(bt('switch.err.desktop_only'));
@@ -951,7 +982,7 @@ export class AccountSwitchService {
         this.manager.invalidateRuntimeCaches?.();
         record.phase = 'committed'; await atomicJson(this.rollbackPath, record);
         await atomicJson(this.journalPath, this.completedRollback(journal));
-        await unlink(this.rollbackPath);
+        await unlinkWithRetry(this.rollbackPath);
         const cliSync = await this.restoreCliSnapshots(journal.cliSnapshots, journal);
         return {
           message: bt('switch.msg.restored_previous'),

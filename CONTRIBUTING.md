@@ -2,7 +2,7 @@
 
 感谢你关注并参与 GravityBox 的开源建设！
 
-GravityBox 致力于为 macOS 用户提供优雅、原生且注重隐私安全的 Antigravity 辅助工具箱。无论你是提交 Bug 报告、提出功能建议、改进词典质量，还是编写代码，我们都非常欢迎你的贡献。
+GravityBox 以 macOS 原生体验（`native/`）为核心主线，同时通过 `src/platform/` 与 `windows/` 同仓隔离支持社区共建的 Windows x64 端。无论你是提交 Bug 报告、提出功能建议、改进词典质量，还是参与 macOS 或 Windows 端代码建设，我们都非常欢迎你的贡献，并会在对应版本说明中致谢外部贡献者。
 
 参与本项目即表示你同意遵守我们的 [贡献者行为准则 (CODE_OF_CONDUCT.md)](./CODE_OF_CONDUCT.md)。如发现安全或隐私漏洞，请勿公开提交 Issue，请按 [安全策略 (SECURITY.md)](./SECURITY.md) 私下提报。
 
@@ -22,9 +22,10 @@ GravityBox 致力于为 macOS 用户提供优雅、原生且注重隐私安全�
 
 ## 1. 开发环境要求
 
-- **操作系统**：macOS 14 (Sonoma) 或更高版本（推荐 Apple Silicon 芯片）
+- **操作系统**：macOS 14 (Sonoma) 或更高版本（主线，推荐 Apple Silicon 芯片）；参与 Windows 端开发需 Windows 10/11 x64
 - **Node.js**：`>=22.15.0 <23`（推荐使用 nvm 或 fnm 管理）
-- **Swift / Xcode CLI Tools**：系统自带 `swiftc`（Xcode Command Line Tools）
+- **Swift / Xcode CLI Tools**（macOS）：系统自带 `swiftc`（Xcode Command Line Tools）
+- **Rust / Tauri 2 / NSIS**（Windows 可选）：`cargo` / `rustc`、WebView2 与 MSVC 构建工具（仅打安装程序时需 NSIS）
 - **Google Chrome**：用于运行基于 CDP 的无头浏览器回归套件（`/Applications/Google Chrome.app`）
 
 运行以下命令可自动诊断本地环境是否满足要求：
@@ -60,14 +61,20 @@ npm run verify
 
 1. **隐私安全底线**：
    - 严禁加入任何未经用户明确授权的外部遥测、埋点或数据回传代码。
-   - 本机账号库凭据与原子写入临时文件必须严格锁定 `0600` 当前用户私有权限，macOS Keychain 读写严格限定于官方登录态同步，切号归档与账号移除快照必须对敏感 Token 作不可逆脱敏。
+   - 本机账号库凭据与原子写入临时文件必须严格锁定当前用户私有权限（macOS `0600`），macOS Keychain 与 Windows Credential Manager 读写严格限定于官方登录态同步，切号归档与账号移除快照必须对敏感 Token 作不可逆脱敏。
 2. **数据零硬删除（Non-destructive Safety）**：
-   - 缓存维护与账号切号事务严禁执行物理硬删除操作，必须走四阶段原子恢复引擎与隔离废纸篓快照（Displaced Storage）。
+   - 缓存维护与账号切号事务严禁执行物理硬删除操作，必须走四阶段原子恢复引擎与隔离废纸篓 / 回收站快照（macOS 废纸篓 / Windows COM `IFileOperation` 回收站迁移，禁止直接物理删档）。
 3. **版权与上游隔离**：
    - 严禁将任何官方或第三方的二进制文件（如 `vendor/` 下的原始界面包或 ASAR 文件）提交至 Git 仓库。
    - 提取文案统一沉淀在 `ui-strings/` 下，由官方发布指纹（SHA256）与分层词典（`dict/`）驱动门禁校验。
 4. **非侵入式热注入**：
    - 汉化与界面增强基于 CDP 页面调试接口与 DOM 观察器运行，不得修改或重签名官方应用。
+5. **进程安全与零外部 `ssh` 约束**：
+   - 严禁在后台强杀官方 Antigravity 进程（需通过安全重启引导并等待优雅退出）；维护清理在进程状态探测为 `unknown` 时必须拒绝执行。
+   - SSH 远程窗口适配全程走本机 CDP 与同源 RPC，禁止拉起外部 `ssh` 进程。
+6. **跨平台与同仓隔离原则**：
+   - 当前主线以 macOS 原生体验（`native/`）为核心；跨平台后端抽象统一收口于 `src/platform/`，不侵入 `native/`、`runtime/`、`dict/`、`ui-strings/` 与 `assets/`。
+   - 非 macOS 端发布指纹与 CI/打包流水线须与 macOS `sourceDigest` 及发版门禁解耦；大型跨平台改动请按「后端抽象 → 系统 Helper 安全边界 → 桌面端与独立 CI」拆分为可独立审查的小 PR，避免引入多套割裂桌面栈。
 
 ---
 
@@ -98,7 +105,14 @@ macOS ARM64 开发环境与 CI 使用固定版本的 Chrome Headless Shell，下
 ```bash
 npm run verify
 ```
-完整发布门禁流水线包含：清理孤儿构建产物、编译 TypeScript、合并运行时、核对价格资产、单元/集成及小型原生行为测试（`npm test` 聚焦这部分日常开发验证）、无头浏览器测试（`npm run test:browser`）、发行版 Swift 原生编译（`-O`）以及全部受支持版本的词典覆盖率门禁。可通过 `node tools/verify.mjs --target-app-version <x.y.z>` 做单版本定向验证，或默认自动对历史冻结版本启用免 vendor 校验。通过后可直接运行 `node tools/package-mac.mjs`（或 `npm run package:mac`），打包器会再次核对源码与产物指纹。
+完整发布门禁流水线包含：隐私门禁检查（`npm run check:privacy`，也可单独运行）、清理孤儿构建产物、编译 TypeScript、合并运行时、核对价格资产、单元/集成及小型原生行为测试（`npm test` 聚焦这部分日常开发验证）、无头浏览器测试（`npm run test:browser`）、发行版 Swift 原生编译（`-O`）以及全部受支持版本的词典覆盖率门禁；可使用 `npm run verify:strict` 执行严格门禁。可通过 `node tools/verify.mjs --target-app-version <x.y.z>` 做单版本定向验证，或默认自动对历史冻结版本启用免 vendor 校验。通过后可直接运行 `node tools/package-mac.mjs`（或 `npm run package:mac`），打包器会再次核对源码与产物指纹。
+
+### Windows 端独立测试与构建 (Windows x64)
+```bash
+npm run test:win        # 编译后端并运行快速测试、Win32 Helper 与 Tauri Rust 测试
+npm run package:win     # 构建 Windows 自包含 .zip（附加 --installer 生成用户级 NSIS .exe）
+```
+Windows 端由 `.github/workflows/ci-windows.yml` 与 `.github/workflows/package-windows.yml`（`windows-latest`）独立承载，不阻塞 macOS CI 与正式版发布门禁。
 
 ---
 
@@ -130,8 +144,8 @@ npm run verify
 
 开发包先使用单独的 macOS 测试用户验证。仅改 App 名称不能隔离正式账号、钥匙串和数据；不要直接覆盖日常使用的正式版。
 
-1. 版本 PR 统一更新 `package.json`、`package-lock.json` 的项目版本和 `CHANGELOG.md`。完整门禁及合并后 main CI 均通过后，再确定发布提交。
-2. 推送指向该提交的 `vX.Y.Z` 标签，触发 **Release** 工作流；也可手动输入已存在的标签。当前仅支持数字正式版本，次版本与修订号各不超过 99。
+1. 版本 PR 统一更新 `package.json`、`package-lock.json`、Windows 清单（`windows/app/package.json`、`windows/app/package-lock.json`、`windows/app/src-tauri/tauri.conf.json`、`windows/app/src-tauri/Cargo.toml` / `Cargo.lock`）的项目版本以及 `CHANGELOG.md`、`README.md`、`README.zh-CN.md`、`PROJECT.md` 等相关说明文档。凡由外部贡献者提交 PR 或提报 Issue 推动的变更与修复（即使最终代码由维护者编写修复），均须在 `CHANGELOG.md` 与 `README` 中标明编号并致谢对应贡献者。完整门禁及合并后 main CI 均通过后，再确定发布提交。
+2. 推送指向该提交的 `vX.Y.Z` 标签，触发 **Release** 工作流；也可手动输入已存在的标签。当前仅支持数字正式版本，次版本与修订号各不超过 99。Windows 预构建产物（`.zip` 与用户级 NSIS `-setup.exe`）由维护者通过 `Package Windows (Artifact Only)` 工作流产出并在社区真机验收后随 Release 附挂发布，终端用户无需本地编译。
 3. 工作流验证标签、提交、项目版本、包内版本、源码摘要和 DMG 校验文件，然后创建**草稿 Release**，不会自动公开。已有 Release（含草稿）会被拒绝，不覆盖任何附件。
 4. 从草稿下载 DMG、`.dmg.sha256` 和 `release-manifest.json`，校验 DMG，并实际验证全新安装、从上一正式版升级及账号/设置保留；按变更范围补充实际功能验收。记录实际验收文件的完整 SHA-256。
 5. 在 Actions 中从 `main` 运行 **Publish Accepted Release**，填写标签和上述 SHA-256，并勾选验收确认。流程重新下载已有附件，核对文件哈希、清单、远端附件摘要与标签提交后，仅把原草稿转为公开版本，**不重新构建**。

@@ -44,8 +44,10 @@ export {
   isOwnedByCurrentUser,
   safeOpenFlagsNoFollow,
   atomicRenameWithRetry,
+  unlinkWithRetry,
   moveToSystemTrash,
   type AtomicRenameRetryOptions,
+  type UnlinkRetryOptions,
 } from './fs.js';
 
 export {
@@ -58,6 +60,8 @@ export {
   lsInspect,
   portOwner,
   appProcesses,
+  processTree,
+  classifyWindowsProcesses,
   appGracefulClose,
   verifyPipeServer,
   trashMove,
@@ -65,7 +69,11 @@ export {
   type Win32HelperOptions,
   type Win32LsProcess,
   type Win32PortOwner,
+  type Win32AppProcessRole,
   type Win32AppProcess,
+  type Win32ProcessTreeEntry,
+  type WindowsDetachedDaemonKind,
+  type WindowsProcessClassification,
   type Win32GracefulCloseReason,
   type Win32GracefulCloseOptions,
   type Win32GracefulCloseResult,

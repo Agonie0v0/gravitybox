@@ -256,6 +256,25 @@ export function displayAccountIdentity(
   };
 }
 
+export function formatAccountOptionLabel(
+  opt: { label?: string; email?: string; name?: string | null; id: string },
+  masked: boolean,
+): string {
+  const rawLabel = (opt.label ?? '').trim();
+  const rawEmail = (opt.email ?? '').trim();
+  const rawName = (opt.name ?? '').trim();
+  if (!masked) {
+    return rawLabel || rawEmail || opt.id;
+  }
+  if (rawName && rawEmail && rawName.toLowerCase() !== rawEmail.toLowerCase()) {
+    return `${maskAccountName(rawName)} (${maskEmail(rawEmail)})`;
+  }
+  if (rawEmail) return maskEmail(rawEmail);
+  if (rawLabel.includes('@')) return maskEmail(rawLabel);
+  if (rawLabel) return maskAccountName(rawLabel);
+  return opt.id;
+}
+
 const EFFORT_LABELS: Record<string, string> = {
   minimal: 'Minimal',
   extra_low: 'Extra Low',
@@ -519,4 +538,16 @@ export function parseHourIndex(item: { hour?: number | string; label?: string })
   if (!match) return null;
   const parsed = Number.parseInt(match[1], 10);
   return Number.isInteger(parsed) && parsed >= 0 && parsed < 24 ? parsed : null;
+}
+
+export function formatDetachedDaemonKinds(
+  kinds: string[] | undefined,
+  t: (key: string) => string,
+  locale: ResolvedLocale,
+): string {
+  const unique = Array.from(new Set((kinds ?? []).map((k) => k.trim()).filter(Boolean)));
+  const labels = (unique.length > 0 ? unique : ['language_server']).map((kind) =>
+    t(`process.daemon_kind.${kind}`),
+  );
+  return labels.join(locale === 'en' ? ', ' : '、');
 }

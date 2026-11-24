@@ -13,7 +13,7 @@ body:
     attributes:
       label: 需求背景与痛点 (Problem / Context)
       description: 描述你在日常使用 Antigravity 或 GravityBox 时遇到的不便或缺失场景。
-      placeholder: 例如：希望在菜单栏面板中直接看到...
+      placeholder: 例如：希望在菜单栏 / 托盘面板中直接看到...
     validations:
       required: true
 

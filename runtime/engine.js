@@ -125,7 +125,7 @@
   /* PROTECTED keeps user content, code and editors in English. `[data-testid="conversation-row-sidebar"]`
      is the container the app really uses for the conversation list: its title <span> is NOT inside
      `a[href^="/c/"]`, so relying on the anchor alone left conversation titles translatable. */
-  const PROTECTED_CORE = 'script,style,code,pre,input,textarea,svg,canvas,.file-tree,[data-message-id],[contenteditable]:not([contenteditable="false"]),[data-gravitybox-protect],[data-message-author-role],[data-testid*="message"]:not([data-testid="cascade-system-message-toolbar"]),[data-testid*="conversation-title"],[data-testid="conversation-row-sidebar"],[data-testid*="conversation-row"],[data-testid*="artifact"]:not([data-testid^="shortcut-row-"]),[data-testid="planner-response-text"],[data-testid="user-input-step"],[data-testid="breadcrumb-segment"],[data-testid="project-header"],[data-testid="project-selector-trigger"],a[href^="/c/"],a[href*="/c/"],.monaco-editor,.xterm,.markdown,.markdown-frontmatter,.markdown-alert-title,.notebook-markdown-cell,.prose,[role="log"],.chat-message,.message-content,.conversation-title,.terminal,.output-view,.debug-console,.code-view,.artifact-container,.model-item,.gravitybox-project-name,[data-testid*="attachment"],[data-testid*="file-chip"],[data-testid*="context-chip"],[data-testid="side-question-followup-user"],[data-testid="voice-transcript-summary"],[data-testid="coordinator-card-latest-line"],[data-testid="coordinator-worker-card"] .truncate';
+  const PROTECTED_CORE = 'script,style,code,pre,input,textarea,svg,canvas,.file-tree,[data-message-id],[contenteditable]:not([contenteditable="false"]),[data-gravitybox-protect],[data-message-author-role],[data-testid*="message"]:not([data-testid="cascade-system-message-toolbar"]),[data-testid*="conversation-title"],[data-testid="conversation-row-sidebar"],[data-testid*="conversation-row"],[data-testid*="artifact"]:not([data-testid^="shortcut-row-"]),[data-testid="planner-response-text"],[data-testid="user-input-step"],[data-testid="breadcrumb-segment"],[data-testid="project-header"],[data-testid="project-selector-trigger"],a[href^="/c/"],a[href*="/c/"],.monaco-editor,.xterm,.markdown,.markdown-frontmatter,.markdown-alert-title,.notebook-markdown-cell,.prose,[role="log"],.chat-message,.message-content,.conversation-title,.terminal,.output-view,.debug-console,.code-view,.artifact-container,.model-item,.gravitybox-project-name,[data-testid*="attachment"],[data-testid*="file-chip"],[data-testid*="context-chip"],[data-testid="side-question-followup-user"],[data-testid="voice-transcript-summary"],[data-testid="coordinator-card-latest-line"],[data-testid="coordinator-worker-card"] .truncate,.code-block,.code-line,.line-content,[data-line-tokens],.notebook-code-cell,.notebook-code-input,.notebook-output-text,[data-testid="csv-scroll-viewport"],[data-testid="lsp-reference-item"]';
   const PROTECTED = PROTECTED_CORE + ',[data-testid*="model"]:not([data-testid^="shortcut-row-"])';
   const SETTINGS_MODEL_PROTECTED = '[data-testid*="model-selector"],[data-testid*="model-picker"],[data-testid*="model-option"],[data-testid*="model-item"],[data-testid*="model-name"],[data-testid*="custom-model"]';
   const SETTINGS_MODEL_WIDGET = '[role="combobox"],[aria-haspopup],[role="menu"],[role="listbox"],[role="option"]';
@@ -506,8 +506,8 @@
      can flip "translatable <-> protected" (protection-relevant classes, role, contenteditable,
      protection markers, data-testid) invalidates the element, and therefore its recorded subtree. */
   const protectionTokens = new WeakMap();
-  const PROTECTIVE_CLASSES = new Set(['chat-message', 'message-content', 'conversation-title', 'terminal', 'output-view', 'debug-console', 'code-view', 'artifact-container', 'model-item', 'markdown', 'markdown-frontmatter', 'markdown-alert-title', 'notebook-markdown-cell', 'prose', 'file-tree', 'monaco-editor', 'xterm', 'gravitybox-project-name']);
-  const PROTECTION_ATTRS = ['class', 'role', 'contenteditable', 'data-testid', 'data-gravitybox-protect', 'data-gravitybox-user-content', 'data-gravitybox-user-name', 'data-message-id', 'data-message-author-role', 'href'];
+  const PROTECTIVE_CLASSES = new Set(['chat-message', 'message-content', 'conversation-title', 'terminal', 'output-view', 'debug-console', 'code-view', 'artifact-container', 'model-item', 'markdown', 'markdown-frontmatter', 'markdown-alert-title', 'notebook-markdown-cell', 'prose', 'file-tree', 'monaco-editor', 'xterm', 'gravitybox-project-name', 'code-block', 'code-line', 'line-content', 'notebook-code-cell', 'notebook-code-input', 'notebook-output-text']);
+  const PROTECTION_ATTRS = ['class', 'role', 'contenteditable', 'data-testid', 'data-gravitybox-protect', 'data-gravitybox-user-content', 'data-gravitybox-user-name', 'data-message-id', 'data-message-author-role', 'data-line-tokens', 'href'];
   const PROTECTION_ATTR_SET = new Set(PROTECTION_ATTRS);
   const OBSERVER_ATTR_FILTER = [...TRANSLATABLE_ATTRS, ...PROTECTION_ATTRS];
   function isProtectedHref(el) {
@@ -522,7 +522,7 @@
     let protective = '';
     for (const token of raw.split(/\s+/)) if (token && PROTECTIVE_CLASSES.has(token)) protective += token + ' ';
     return protective + '|' + (el.getAttribute('role') || '') + '|' + (el.getAttribute('contenteditable') || '') +
-      '|' + (el.hasAttribute('data-gravitybox-protect') ? 'p' : '') + (el.hasAttribute('data-gravitybox-user-content') ? 'u' : '') + (el.hasAttribute('data-gravitybox-user-name') ? 'n' : '') +
+      '|' + (el.hasAttribute('data-gravitybox-protect') ? 'p' : '') + (el.hasAttribute('data-gravitybox-user-content') ? 'u' : '') + (el.hasAttribute('data-gravitybox-user-name') ? 'n' : '') + (el.hasAttribute('data-line-tokens') ? 't' : '') +
       '|' + (el.hasAttribute('data-message-id') ? 'm' : '') + (el.hasAttribute('data-message-author-role') ? 'a' : '') +
       '|' + isProtectedHref(el) +
       '|' + (el.getAttribute('data-testid') || '');
@@ -703,6 +703,92 @@
     if (words.length > maxWords) return false;
     if (words.length >= 2 && ENTITY_PROSE_STOP_WORDS.test(words[0])) return false;
     return true;
+  }
+
+  const PERMISSION_PRESET_LABELS = {
+    'request review': '每次询问',
+    default: '按需询问',
+    auto: '自动审批',
+    turbo: '跳过审批',
+    autonomous: '自主模式',
+  };
+  const PERMISSION_PRESET_ARIA_LABELS = {
+    'request review': '每次询问',
+    default: '按需询问',
+    auto: '自动审批',
+    turbo: '跳过审批 (Turbo)',
+    autonomous: '自主模式',
+  };
+  const PERMISSION_PRESET_SUBTITLES = [
+    'Every command requires approval',
+    '每条命令均需批准',
+    'Ask before sensitive operations',
+    '在执行敏感操作前询问',
+    '仅在执行敏感操作前询问',
+    'Automatically decide if commands run',
+    '自动决定是否运行命令',
+    '自动判断是否直接运行命令',
+    'Run all commands without restriction',
+    '无限制运行所有命令',
+    '无限制地运行所有命令',
+    '免审批无限制运行所有命令',
+  ];
+
+  function isDefaultPresetBadgeElement(el, scopeRoot) {
+    if (!el) return false;
+    const parentBadge = el.parentElement && el.parentElement !== scopeRoot ? el.parentElement : null;
+    const parentBadgeText = parentBadge ? lower(normalize(parentBadge.textContent || '')) : '';
+    const hasBadgeSvg =
+      Boolean(el.querySelector?.('svg')) ||
+      Boolean(parentBadge && (parentBadgeText === 'default' || parentBadgeText === '默认') && parentBadge.querySelector?.('svg'));
+    if (hasBadgeSvg && !el.closest?.('button[aria-label*="Agent permissions preset" i],button[aria-label*="智能体权限预设"]')) {
+      return true;
+    }
+    if (!scopeRoot?.querySelectorAll) return false;
+    const firstTitleMatch = [...scopeRoot.querySelectorAll('*')].find((node) => {
+      if (!node || node.tagName === 'svg' || node.closest?.('svg')) return false;
+      if (node.childElementCount > 0) return false;
+      const t = lower(normalize(node.textContent || ''));
+      return t === 'default' || t === '按需询问';
+    });
+    return Boolean(firstTitleMatch && firstTitleMatch !== el && !el.contains(firstTitleMatch));
+  }
+
+  function resolvePermissionPresetLabel(key, el) {
+    if (!el) return undefined;
+    const lowerKey = lower(key);
+    if (!Object.prototype.hasOwnProperty.call(PERMISSION_PRESET_LABELS, lowerKey)) return undefined;
+    if (lowerKey === 'autonomous') return undefined;
+
+    const ariaPresetContainer = el.closest?.('[aria-label*="Agent permissions preset" i],[aria-label*="智能体权限预设"]');
+    const row = el.closest?.('[role="menuitem"],[role="option"],button,li,[role="listitem"]');
+    if (lowerKey === 'default' && isDefaultPresetBadgeElement(el, row || ariaPresetContainer)) {
+      return undefined;
+    }
+
+    if (ariaPresetContainer) {
+      return PERMISSION_PRESET_LABELS[lowerKey];
+    }
+
+    if (!row) return undefined;
+
+    const rowText = normalize(row.textContent || '');
+    const menuContainer = row.closest?.('[role="menu"],[role="listbox"],[data-select-popup]');
+    const containerText = normalize(menuContainer?.textContent || '');
+    const inPresetContext =
+      (menuContainer && /(?:Local Permissions|本地权限|Permission Presets?|Permissions Presets?|权限预设|Security Presets?|安全预设)/i.test(containerText)) ||
+      PERMISSION_PRESET_SUBTITLES.some((s) => rowText.includes(s));
+    if (!inPresetContext) return undefined;
+
+    if (lowerKey === 'default') {
+      const isDefaultPresetRow =
+        rowText.includes('Ask before sensitive operations') ||
+        rowText.includes('执行敏感操作前询问');
+      if (!isDefaultPresetRow) return undefined;
+      if (isDefaultPresetBadgeElement(el, row)) return undefined;
+    }
+
+    return PERMISSION_PRESET_LABELS[lowerKey];
   }
 
   const TEMPLATE_RULES = [
@@ -899,8 +985,18 @@
     {
       key: "Agent permissions preset selector, current: {preset}", pattern: /^Agent permissions preset selector,\s*current:\s*(.+)$/i,
       replace: (_, preset) => {
-        const pMap = { Turbo: '极速模式 (Turbo)', Autonomous: '自主模式', Default: '默认模式' };
-        return `智能体权限预设选择器，当前：${pMap[preset.trim()] || preset}`;
+        const clean = preset.trim();
+        return `智能体权限预设选择器，当前：${PERMISSION_PRESET_ARIA_LABELS[clean.toLowerCase()] || clean}`;
+      }
+    },
+    {
+      key: "Agent permissions preset: {preset}, {detail}", pattern: /^Agent permissions preset:\s*([^,]+),\s*(.+)$/i,
+      replace: (_, preset, detail) => {
+        const cleanPreset = preset.trim();
+        const presetLabel = PERMISSION_PRESET_ARIA_LABELS[cleanPreset.toLowerCase()] || cleanPreset;
+        const detailNorm = normalize(detail);
+        const detailLabel = entryFor(detailNorm) || detail.trim();
+        return `智能体权限预设：${presetLabel}，${detailLabel}`;
       }
     },
 
@@ -2438,6 +2534,11 @@
       const localized = original.replace(/\s+\(default\)(\s*)$/i, '（默认）$1');
       if (localized !== original) { lastMatchedKeys = ['{name} (Default)']; return localized; }
     }
+    const permissionPresetLabel = resolvePermissionPresetLabel(key, el);
+    if (permissionPresetLabel !== undefined) {
+      lastMatchedKeys = [key];
+      return original.match(/^\s*/)[0] + permissionPresetLabel + original.match(/\s*$/)[0];
+    }
     if (el?.closest?.('[data-testid="ssh-connect-error"],[data-testid="toast-notification"][data-notification-tag="ssh-connect-failed"]')
         && (original.includes('\n') || /^.+\s+reported:\s*/i.test(key) || /^[A-Z][A-Z0-9_]{2,}:\s+/.test(key))) {
       return translateSshErrorText(original, el);
@@ -3100,7 +3201,7 @@
     for (const mutation of mutations) {
       const targetEl = mutation.target.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target.parentElement;
       const inStaticProtected = Boolean(
-        targetEl?.closest?.('[data-gravitybox-protect],.monaco-editor,.xterm,[data-message-id],[data-message-author-role],[data-testid="planner-response-text"],.markdown,.prose,pre,code') &&
+        targetEl?.closest?.('[data-gravitybox-protect],.monaco-editor,.xterm,[data-message-id],[data-message-author-role],[data-testid="planner-response-text"],.markdown,.prose,pre,code,.code-block,.code-line,.line-content,[data-line-tokens],.notebook-code-cell,.notebook-code-input,.notebook-output-text,[data-testid="csv-scroll-viewport"],[data-testid="lsp-reference-item"]') &&
         !targetEl.closest?.('[data-testid="conversation-row-sidebar"],[data-testid*="model"]')
       );
       if (mutation.type === 'childList') {

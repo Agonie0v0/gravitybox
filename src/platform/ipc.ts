@@ -335,6 +335,8 @@ export async function resolveClientIpcTarget(
     platform?: NodeJS.Platform;
     verifyServerIdentity?: WindowsPipeServerIdentityVerifier;
     helperPath?: string;
+    resolveHelperPathImpl?: (overridePath?: string) => string | null;
+    verifyPipeServerImpl?: typeof verifyPipeServer;
   } = {},
 ): Promise<ClientIpcTarget | null> {
   const platform = options.platform ?? process.platform;
@@ -352,19 +354,23 @@ export async function resolveClientIpcTarget(
     if (!identity || !identity.sameUserSid || identity.serverPid !== session.pid) {
       throw new Error(bt('main.socket_mismatch'));
     }
-  } else if (process.platform === 'win32') {
-    const helperPath = resolveWin32HelperPath(options.helperPath);
-    if (helperPath) {
-      const verified = await verifyPipeServer(session.pipeName, {
-        expectedPid: session.pid,
-        helperPath,
-      });
-      if (verified.reason === 'pipe_not_found') {
-        return null;
-      }
-      if (!verified.verified || !verified.sameUserSid || verified.serverPid !== session.pid) {
-        throw new Error(bt('main.socket_mismatch'));
-      }
+  } else if (process.platform === 'win32' || options.resolveHelperPathImpl || options.verifyPipeServerImpl) {
+    const resolveHelper = options.resolveHelperPathImpl ?? resolveWin32HelperPath;
+    const verifyPipe = options.verifyPipeServerImpl ?? verifyPipeServer;
+    const helperPath = resolveHelper(options.helperPath);
+    if (!helperPath) {
+      throw new Error(bt('main.socket_mismatch'));
+    }
+    const verified = await verifyPipe(session.pipeName, {
+      expectedPid: session.pid,
+      expectedExe: 'node.exe',
+      helperPath,
+    });
+    if (verified.reason === 'pipe_not_found') {
+      return null;
+    }
+    if (!verified.verified || !verified.sameUserSid || verified.serverPid !== session.pid) {
+      throw new Error(bt('main.socket_mismatch'));
     }
   }
   return {

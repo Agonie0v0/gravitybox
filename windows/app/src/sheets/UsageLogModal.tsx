@@ -4,6 +4,7 @@ import { Modal } from '../components/Modal';
 import { BrandIcons } from '../components/ModelIcon';
 import { useApp } from '../context/AppContext';
 import {
+  formatAccountOptionLabel,
   formatCompactTokens,
   formatInteger,
   formatLocalDateInput,
@@ -15,10 +16,17 @@ import {
 } from '../lib/format';
 import { backendRequest, pickSaveJsonPath, saveJsonFile } from '../lib/tauri';
 import { cleanSshHostLabel, normalizeSshEnvironment } from '../lib/ssh';
-import type { UsageEventRow, UsageEventsReply, UsagePeriodKey } from '../lib/types';
+import type {
+  AvailableAccountUsageOption,
+  UsageEventRow,
+  UsageEventsReply,
+  UsagePeriodKey,
+} from '../lib/types';
 
 const PERIODS: UsagePeriodKey[] = ['today', '7d', '30d', 'all', 'custom'];
 const PAGE_SIZE = 200;
+const EXPORT_PAGE_SIZE = 500;
+const EXPORT_MAX_PAGES = 200;
 
 function defaultLogStartDate(): string {
   const d = new Date();
@@ -30,6 +38,8 @@ export function UsageLogModal({
   open,
   initialPeriod,
   initialEnvironmentId = 'all',
+  initialAccountId = 'all',
+  availableAccounts = [],
   initialStartDate,
   initialEndDate,
   onClose,
@@ -37,21 +47,25 @@ export function UsageLogModal({
   open: boolean;
   initialPeriod: UsagePeriodKey;
   initialEnvironmentId?: string;
+  initialAccountId?: string;
+  availableAccounts?: AvailableAccountUsageOption[];
   initialStartDate?: string;
   initialEndDate?: string;
   onClose: () => void;
 }) {
-  const { t, locale, isDark, sshEnvironments, showToast } = useApp();
+  const { t, locale, isDark, config, sshEnvironments, showToast } = useApp();
   const [period, setPeriod] = useState<UsagePeriodKey>(initialPeriod);
   const [startDate, setStartDate] = useState<string>(() => initialStartDate || defaultLogStartDate());
   const [endDate, setEndDate] = useState<string>(() => initialEndDate || formatLocalDateInput(new Date()));
   const [environmentId, setEnvironmentId] = useState<string>(initialEnvironmentId);
+  const [accountId, setAccountId] = useState<string>(initialAccountId);
   const [query, setQuery] = useState('');
   const [offset, setOffset] = useState(0);
   const [rows, setRows] = useState<UsageEventRow[]>([]);
   const [total, setTotal] = useState(0);
   const [scope, setScope] = useState('');
   const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [error, setError] = useState('');
   const [pageInput, setPageInput] = useState('1');
   const snapshotIdRef = useRef<string | null>(null);
@@ -63,6 +77,7 @@ export function UsageLogModal({
   const normalizedSshHosts = sshEnvironments.map((env) =>
     normalizeSshEnvironment(env, t('ssh.remote_fallback')),
   );
+  const accountOptions = availableAccounts.filter((opt) => opt.id && opt.id !== 'all');
 
   const releaseSnapshot = useCallback(() => {
     const id = snapshotIdRef.current;
@@ -76,6 +91,7 @@ export function UsageLogModal({
     async (opts: {
       period: UsagePeriodKey;
       environmentId: string;
+      accountId: string;
       query: string;
       offset: number;
       startDate?: string;
@@ -101,6 +117,9 @@ export function UsageLogModal({
         }
         if (opts.environmentId && opts.environmentId !== 'all') {
           payload.environmentId = opts.environmentId;
+        }
+        if (opts.accountId && opts.accountId !== 'all') {
+          payload.accountId = opts.accountId;
         }
         if (opts.force) {
           payload.force = true;
@@ -132,6 +151,7 @@ export function UsageLogModal({
       const nextEnd = initialEndDate || formatLocalDateInput(new Date());
       setPeriod(initialPeriod);
       setEnvironmentId(initialEnvironmentId);
+      setAccountId(initialAccountId);
       setStartDate(nextStart);
       setEndDate(nextEnd);
       setQuery('');
@@ -140,6 +160,7 @@ export function UsageLogModal({
         void fetchRows({
           period: initialPeriod,
           environmentId: initialEnvironmentId,
+          accountId: initialAccountId,
           query: '',
           offset: 0,
           startDate: nextStart,
@@ -153,7 +174,16 @@ export function UsageLogModal({
     return () => {
       if (debounceRef.current) window.clearTimeout(debounceRef.current);
     };
-  }, [open, initialPeriod, initialEnvironmentId, initialStartDate, initialEndDate, fetchRows, releaseSnapshot]);
+  }, [
+    open,
+    initialPeriod,
+    initialEnvironmentId,
+    initialAccountId,
+    initialStartDate,
+    initialEndDate,
+    fetchRows,
+    releaseSnapshot,
+  ]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
@@ -163,7 +193,9 @@ export function UsageLogModal({
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
     debounceRef.current = window.setTimeout(() => {
       setOffset(0);
-      void fetchRows({ period, environmentId, query: val, offset: 0, startDate, endDate });
+      if (period !== 'custom' || isCustomRangeValid) {
+        void fetchRows({ period, environmentId, accountId, query: val, offset: 0, startDate, endDate });
+      }
     }, 180);
   };
 
@@ -175,6 +207,7 @@ export function UsageLogModal({
       void fetchRows({
         period: next,
         environmentId,
+        accountId,
         query,
         offset: 0,
         startDate,
@@ -193,6 +226,7 @@ export function UsageLogModal({
       void fetchRows({
         period: 'custom',
         environmentId,
+        accountId,
         query,
         offset: 0,
         startDate: nextStart,
@@ -206,15 +240,36 @@ export function UsageLogModal({
     releaseSnapshot();
     setEnvironmentId(nextEnv);
     setOffset(0);
-    void fetchRows({
-      period,
-      environmentId: nextEnv,
-      query,
-      offset: 0,
-      startDate,
-      endDate,
-      force: true,
-    });
+    if (period !== 'custom' || isCustomRangeValid) {
+      void fetchRows({
+        period,
+        environmentId: nextEnv,
+        accountId,
+        query,
+        offset: 0,
+        startDate,
+        endDate,
+        force: true,
+      });
+    }
+  };
+
+  const handleAccountChange = (nextAcc: string) => {
+    releaseSnapshot();
+    setAccountId(nextAcc);
+    setOffset(0);
+    if (period !== 'custom' || isCustomRangeValid) {
+      void fetchRows({
+        period,
+        environmentId,
+        accountId: nextAcc,
+        query,
+        offset: 0,
+        startDate,
+        endDate,
+        force: true,
+      });
+    }
   };
 
   const handleJumpPage = () => {
@@ -223,30 +278,86 @@ export function UsageLogModal({
       setPageInput(String(currentPage));
       return;
     }
+    if (period === 'custom' && !isCustomRangeValid) return;
     const nextOffset = (n - 1) * PAGE_SIZE;
     setOffset(nextOffset);
-    void fetchRows({ period, environmentId, query, offset: nextOffset, startDate, endDate });
+    void fetchRows({
+      period,
+      environmentId,
+      accountId,
+      query,
+      offset: nextOffset,
+      startDate,
+      endDate,
+    });
   };
 
   const handleExport = async () => {
+    if (exporting || (period === 'custom' && !isCustomRangeValid)) return;
     const periodTag = period === 'custom' ? `${startDate}_${endDate}` : period;
     const targetPath = await pickSaveJsonPath(
       t('usage_log.title'),
       t('usage_log.export.filename', { period: periodTag }),
     );
     if (!targetPath) return;
+    setExporting(true);
     try {
+      const collected: UsageEventRow[] = [];
+      let snapId = snapshotIdRef.current;
+      let expectedTotal = total;
+      let exportScope = scope || t('usage_log.scope.default');
+
+      for (let page = 0; page < EXPORT_MAX_PAGES; page += 1) {
+        const reqOffset = page * EXPORT_PAGE_SIZE;
+        if (page > 0 && reqOffset >= expectedTotal) break;
+        const payload: Record<string, unknown> = {
+          command: 'usage_events',
+          period,
+          query,
+          offset: reqOffset,
+          limit: EXPORT_PAGE_SIZE,
+        };
+        if (period === 'custom' && startDate && endDate) {
+          payload.startDate = startDate;
+          payload.endDate = endDate;
+        }
+        if (environmentId && environmentId !== 'all') payload.environmentId = environmentId;
+        if (accountId && accountId !== 'all') payload.accountId = accountId;
+        if (snapId) {
+          payload.snapshotId = snapId;
+        } else {
+          payload.pinSnapshot = true;
+        }
+        const pageRes = await backendRequest<UsageEventsReply>(payload);
+        if (pageRes.snapshot_id) {
+          snapId = pageRes.snapshot_id;
+          snapshotIdRef.current = pageRes.snapshot_id;
+        }
+        if (pageRes.scope) exportScope = pageRes.scope;
+        if (typeof pageRes.total === 'number' && Number.isFinite(pageRes.total)) {
+          expectedTotal = pageRes.total;
+        }
+        const batch = pageRes.rows ?? [];
+        if (batch.length === 0) break;
+        collected.push(...batch);
+        if (collected.length >= expectedTotal || batch.length < EXPORT_PAGE_SIZE) break;
+      }
+
       await saveJsonFile(targetPath, {
         period,
         ...(period === 'custom' ? { startDate, endDate } : {}),
+        environmentId,
+        accountId,
         query,
-        scope,
-        total,
-        rows,
+        scope: exportScope,
+        total: collected.length,
+        rows: collected,
       });
-      showToast(t('usage_log.export.done'));
+      showToast(t('usage_log.export.saved', { count: formatInteger(collected.length, locale), scope: exportScope }));
     } catch (err) {
       showToast(t('usage_log.export.failed', { error: err instanceof Error ? err.message : String(err) }), true);
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -260,13 +371,14 @@ export function UsageLogModal({
             <button
               type="button"
               className="gb-btn gb-btn-sm"
-              disabled={loading || (period === 'custom' && !isCustomRangeValid)}
+              disabled={loading || exporting || (period === 'custom' && !isCustomRangeValid)}
               onClick={() => {
                 releaseSnapshot();
                 setOffset(0);
                 void fetchRows({
                   period,
                   environmentId,
+                  accountId,
                   query,
                   offset: 0,
                   startDate,
@@ -281,16 +393,16 @@ export function UsageLogModal({
             <button
               type="button"
               className="gb-btn gb-btn-sm"
-              disabled={loading || rows.length === 0}
+              disabled={loading || exporting || rows.length === 0 || (period === 'custom' && !isCustomRangeValid)}
               onClick={handleExport}
             >
               <Download size={12} />
-              <span>{t('usage.export_btn')}</span>
+              <span>{exporting ? t('usage_log.loading') : t('usage.export_btn')}</span>
             </button>
           </div>
         </div>
 
-        {/* Search + Environment + Period filter */}
+        {/* Search + Environment + Account + Period filter */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <div style={{ position: 'relative', flex: 1, minWidth: 160 }}>
             <Search
@@ -326,6 +438,24 @@ export function UsageLogModal({
               {normalizedSshHosts.map((host) => (
                 <option key={host.id || host.hostLabel} value={host.id}>
                   {t('usage_log.env.ssh_label', { host: host.hostLabel })}
+                </option>
+              ))}
+            </select>
+          )}
+          {accountOptions.length > 0 && (
+            <select
+              className="gb-select"
+              style={{ height: 30, fontSize: 12, maxWidth: 170 }}
+              aria-label={t('usage_log.account.a11y')}
+              value={accountId}
+              onChange={(e) => handleAccountChange(e.target.value)}
+            >
+              <option value="all">{t('usage_log.account.all')}</option>
+              {accountOptions.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.id === 'unattributed'
+                    ? t('usage.account.unattributed')
+                    : formatAccountOptionLabel(opt, Boolean(config.privacyMaskAccounts))}
                 </option>
               ))}
             </select>
@@ -442,10 +572,16 @@ export function UsageLogModal({
                   : out > 0 && typeof streamSec === 'number' && Number.isFinite(streamSec) && streamSec > 0
                   ? out / streamSec
                   : null;
-              const ts = row.timestamp
-                ? typeof row.timestamp === 'number'
-                  ? formatShortDateTime(row.timestamp)
-                  : formatShortDateTime(new Date(row.timestamp))
+              const rawTs =
+                typeof row.timestamp_seconds === 'number' &&
+                Number.isFinite(row.timestamp_seconds) &&
+                row.timestamp_seconds > 0
+                  ? row.timestamp_seconds * 1000
+                  : row.timestamp;
+              const ts = rawTs
+                ? typeof rawTs === 'number'
+                  ? formatShortDateTime(rawTs < 1e12 ? rawTs * 1000 : rawTs)
+                  : formatShortDateTime(new Date(rawTs))
                 : t('usage_event.time_unknown');
 
               return (
@@ -483,11 +619,15 @@ export function UsageLogModal({
                       )}
                       {(() => {
                         const rowEnvId = row.environmentId || row.environment_id || '';
-                        const isRemote =
-                          (rowEnvId && rowEnvId !== 'local') || row.environmentKind === 'ssh';
+                        const rowEnvKind = row.environmentKind || row.environment_kind || '';
+                        const isRemote = (rowEnvId && rowEnvId !== 'local') || rowEnvKind === 'ssh';
                         if (!isRemote) return null;
                         const label = cleanSshHostLabel(
-                          row.hostLabel || row.host_label || row.environmentLabel || rowEnvId,
+                          row.hostLabel ||
+                            row.host_label ||
+                            row.environmentLabel ||
+                            row.environment_label ||
+                            rowEnvId,
                           t('ssh.remote_fallback'),
                         );
                         return (
@@ -551,11 +691,19 @@ export function UsageLogModal({
             <button
               type="button"
               className="gb-btn gb-btn-sm"
-              disabled={loading || offset <= 0}
+              disabled={loading || exporting || offset <= 0 || (period === 'custom' && !isCustomRangeValid)}
               onClick={() => {
                 const next = Math.max(0, offset - PAGE_SIZE);
                 setOffset(next);
-                void fetchRows({ period, environmentId, query, offset: next, startDate, endDate });
+                void fetchRows({
+                  period,
+                  environmentId,
+                  accountId,
+                  query,
+                  offset: next,
+                  startDate,
+                  endDate,
+                });
               }}
             >
               {t('usage_log.prev_page')}
@@ -563,11 +711,19 @@ export function UsageLogModal({
             <button
               type="button"
               className="gb-btn gb-btn-sm"
-              disabled={loading || offset + rows.length >= total}
+              disabled={loading || exporting || offset + rows.length >= total || (period === 'custom' && !isCustomRangeValid)}
               onClick={() => {
                 const next = offset + PAGE_SIZE;
                 setOffset(next);
-                void fetchRows({ period, environmentId, query, offset: next, startDate, endDate });
+                void fetchRows({
+                  period,
+                  environmentId,
+                  accountId,
+                  query,
+                  offset: next,
+                  startDate,
+                  endDate,
+                });
               }}
             >
               {t('usage_log.next_page')}
@@ -577,7 +733,7 @@ export function UsageLogModal({
               className="gb-input tabular"
               style={{ width: 46, height: 26, textAlign: 'center' }}
               value={pageInput}
-              disabled={loading || total === 0}
+              disabled={loading || total === 0 || (period === 'custom' && !isCustomRangeValid)}
               onChange={(e) => setPageInput(e.target.value)}
               onBlur={handleJumpPage}
               onKeyDown={(e) => {

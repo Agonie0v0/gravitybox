@@ -4,9 +4,12 @@ use crate::antigravity::{
 };
 use crate::autostart;
 use crate::backend::BackendManager;
-use crate::config::{load_config, save_config, UiConfig};
+use crate::config::{atomic_replace_file, load_config, save_config, UiConfig};
 use crate::ipc_pipe::{normalize_windows_path, strip_verbatim_prefix};
-use crate::tray::{hide_tray_window, show_main_window_and_focus, update_tray_menu_language};
+use crate::tray::{
+    hide_tray_window, set_tray_autohide_suppressed as set_tray_autohide_flag,
+    show_main_window_and_focus, update_tray_menu_language,
+};
 use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -117,6 +120,9 @@ const ALLOWED_EXTERNAL_HOSTS: &[&str] = &[
     "raw.githubusercontent.com",
     "cdn.jsdelivr.net",
     "accounts.google.com",
+    "cloud.google.com",
+    "platform.claude.com",
+    "developers.openai.com",
 ];
 
 fn validate_external_url(raw: &str) -> Result<String, String> {
@@ -214,25 +220,35 @@ fn is_path_within_state_dir(target: &Path, state_dir: &Path) -> bool {
     if normalized_path_is_within(&target_norm, &state_norm) {
         return true;
     }
-    // Also check canonicalized state_dir & existing target parent to defeat junctions/8.3 short paths
+    // Also walk existing ancestors + canonicalize state_dir to defeat junctions/symlinks/8.3 short paths,
+    // even when multiple trailing subdirectories of `target` do not exist yet.
     if let Ok(canon_state) = std::fs::canonicalize(state_dir) {
         let canon_state_norm = normalize_windows_path(&canon_state);
         if normalized_path_is_within(&target_norm, &canon_state_norm) {
             return true;
         }
-        if let Some(parent) = target.parent() {
-            if let Ok(canon_parent) = std::fs::canonicalize(parent) {
-                let canon_target = match target.file_name() {
-                    Some(name) => canon_parent.join(name),
-                    None => canon_parent,
-                };
-                let canon_target_norm = normalize_windows_path(&canon_target);
+        let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+        let mut cursor = Some(target);
+        while let Some(cur) = cursor {
+            if let Ok(canon_anc) = std::fs::canonicalize(cur) {
+                let mut rebuilt = canon_anc;
+                for seg in trailing.iter().rev() {
+                    rebuilt.push(seg);
+                }
+                let canon_target_norm = normalize_windows_path(&rebuilt);
                 if normalized_path_is_within(&canon_target_norm, &canon_state_norm)
                     || normalized_path_is_within(&canon_target_norm, &state_norm)
                 {
                     return true;
                 }
+                break;
             }
+            if let Some(name) = cur.file_name() {
+                trailing.push(name.to_os_string());
+            } else {
+                break;
+            }
+            cursor = cur.parent();
         }
     }
     false
@@ -253,13 +269,16 @@ fn is_safe_local_windows_path(raw: &str) -> Option<PathBuf> {
     if s.starts_with(r"\\") || s.starts_with('/') {
         return None;
     }
-    // Require explicit local drive root `X:\` or `X:/` and reject `..` traversal components
+    // Require explicit local drive root `X:\` or `X:/`, reject NTFS Alternate Data Streams (`:`), and reject `..`
     let bytes = s.as_bytes();
     if bytes.len() < 3
         || !bytes[0].is_ascii_alphabetic()
         || bytes[1] != b':'
         || (bytes[2] != b'\\' && bytes[2] != b'/')
     {
+        return None;
+    }
+    if s[2..].contains(':') {
         return None;
     }
     if stripped
@@ -333,9 +352,9 @@ pub fn reveal_in_explorer(path: String) -> Result<(), String> {
     {
         let explorer = resolve_explorer_exe();
         if p.is_file() {
-            let select_arg = format!("/select,{}", p.to_string_lossy());
             Command::new(&explorer)
-                .arg(select_arg)
+                .arg("/select,")
+                .arg(&p)
                 .spawn()
                 .map_err(|e| format!("无法在资源管理器中定位文件: {}", e))?;
             Ok(())
@@ -353,6 +372,27 @@ pub fn reveal_in_explorer(path: String) -> Result<(), String> {
     {
         Err("Unsupported platform".to_string())
     }
+}
+
+#[tauri::command]
+pub fn open_recycle_bin() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        Command::new(resolve_explorer_exe())
+            .arg("shell:RecycleBinFolder")
+            .spawn()
+            .map_err(|e| format!("无法打开回收站: {}", e))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Unsupported platform".to_string())
+    }
+}
+
+#[tauri::command]
+pub fn set_tray_autohide_suppressed(suppressed: bool) {
+    set_tray_autohide_flag(suppressed);
 }
 
 #[tauri::command]
@@ -462,30 +502,11 @@ fn save_json_file_checked(path: &str, content: Value, state_dir: &Path) -> Resul
         return Err(format!("文件写入失败: {}", err));
     }
 
-    let mut last_err = None;
-    for attempt in 0..5u64 {
-        match std::fs::rename(&tmp, &target) {
-            Ok(()) => return Ok(()),
-            Err(err) => {
-                if std::fs::symlink_metadata(&target)
-                    .map(|m| m.file_type().is_file())
-                    .unwrap_or(false)
-                {
-                    let _ = std::fs::remove_file(&target);
-                    if std::fs::rename(&tmp, &target).is_ok() {
-                        return Ok(());
-                    }
-                }
-                last_err = Some(err);
-                std::thread::sleep(std::time::Duration::from_millis(25 * (attempt + 1)));
-            }
-        }
+    if let Err(err) = atomic_replace_file(&tmp, &target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("文件保存失败: {}", err));
     }
-    let _ = std::fs::remove_file(&tmp);
-    Err(format!(
-        "文件保存失败: {}",
-        last_err.map(|e| e.to_string()).unwrap_or_default()
-    ))
+    Ok(())
 }
 
 #[tauri::command]
@@ -499,8 +520,11 @@ pub fn save_json_file(
 
 #[tauri::command]
 pub fn quit_app(app: AppHandle, backend: State<'_, Arc<BackendManager>>) {
-    backend.graceful_stop();
-    app.exit(0);
+    let mgr = Arc::clone(backend.inner());
+    std::thread::spawn(move || {
+        mgr.graceful_stop();
+        app.exit(0);
+    });
 }
 
 #[cfg(test)]
@@ -519,6 +543,9 @@ mod tests {
         assert!(
             validate_external_url("https://accounts.google.com/o/oauth2/v2/auth?client_id=abc&scope=openid").is_ok()
         );
+        assert!(validate_external_url("https://cloud.google.com/vertex-ai/pricing").is_ok());
+        assert!(validate_external_url("https://platform.claude.com/docs/en/about-claude/pricing").is_ok());
+        assert!(validate_external_url("https://developers.openai.com/api/docs/pricing").is_ok());
 
         // Must reject HTTP, non-whitelisted hosts, prefix/suffix tricks, userinfo, quotes, spaces, control chars, ports
         assert!(validate_external_url("http://github.com/Enzoo404/gravitybox").is_err());
@@ -580,6 +607,7 @@ mod tests {
         assert!(validate_json_save_path("/weird.json", &state_dir).is_err());
         assert!(validate_json_save_path(r"\\attacker\share\leak.json", &state_dir).is_err());
         assert!(validate_json_save_path(r"C:\Temp\..\leak.json", &state_dir).is_err());
+        assert!(validate_json_save_path(r"C:\Temp\leak.json:evil_stream", &state_dir).is_err());
 
         // Must refuse overwriting files inside state_dir or any subdirectory (case-insensitive & verbatim)
         assert!(validate_json_save_path(&state_dir.join("config.json").to_string_lossy(), &state_dir).is_err());

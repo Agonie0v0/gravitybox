@@ -24,7 +24,7 @@ export async function restartBackend(): Promise<void> {
 export async function getAppInfo(): Promise<AppInfo> {
   if (!isTauriRuntime()) {
     return {
-      version: '1.2.0',
+      version: '1.2.1',
       stateDir: 'C:\\Users\\demo\\AppData\\Roaming\\GravityBox',
       pipeName: '\\\\.\\pipe\\gravitybox-dev',
       osLabel: 'Windows x86_64',
@@ -80,6 +80,9 @@ const ALLOWED_EXTERNAL_HOSTS = new Set([
   'raw.githubusercontent.com',
   'cdn.jsdelivr.net',
   'accounts.google.com',
+  'cloud.google.com',
+  'platform.claude.com',
+  'developers.openai.com',
 ]);
 
 export async function openExternalUrl(url: string): Promise<void> {
@@ -114,6 +117,16 @@ export async function openFolder(path: string): Promise<void> {
 export async function revealInExplorer(path: string): Promise<void> {
   if (!isTauriRuntime()) return;
   await invoke('reveal_in_explorer', { path });
+}
+
+export async function openRecycleBin(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke('open_recycle_bin');
+}
+
+export async function setTrayAutohideSuppressed(suppressed: boolean): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke('set_tray_autohide_suppressed', { suppressed });
 }
 
 export async function getAutostart(): Promise<boolean> {

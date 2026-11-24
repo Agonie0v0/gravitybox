@@ -651,6 +651,7 @@ function runRequest(payload: {
         writeFileSync(path, '', { flag: 'wx', mode: 0o600 });
     const db = new DatabaseSync(path, { readOnly: ['load', 'locks', 'receipts', 'version'].includes(operation) });
     try {
+        db.exec('PRAGMA busy_timeout=3000;');
         if (operation === 'load') {
             if (Number(db.prepare('PRAGMA user_version').get()?.user_version) !== 2)
                 throw Error(bt('ledger.err.unsupported_version'));
@@ -857,7 +858,7 @@ function runRequest(payload: {
 
             if (deleted > 0) {
                 invalidateAggregateIndexCache(getDbIdentity(path));
-                chmodSync(path, 0o600);
+                if (process.platform !== 'win32') chmodSync(path, 0o600);
                 const ratesPath = join(dirname(path), 'usage-rate-locks.json');
                 if (existsSync(ratesPath)) {
                     writeRateLocksJsonMirror(db, ratesPath);
@@ -1155,7 +1156,7 @@ function runRequest(payload: {
             safeRollback(db);
             throw error;
         }
-        chmodSync(path, 0o600);
+        if (process.platform !== 'win32') chmodSync(path, 0o600);
         if (locksWritten > 0 || (copiedLocks > 0 && existsSync(ratesPath))) {
             writeRateLocksJsonMirror(db, ratesPath);
             refreshImportedRatesStamp(path);

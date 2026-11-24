@@ -23,6 +23,7 @@ import { ToggleSwitch } from '../components/ToggleSwitch';
 import { useApp } from '../context/AppContext';
 import {
   displayAccountIdentity,
+  formatDetachedDaemonKinds,
   formatShortDateTime,
   maskAccountName,
   maskEmail,
@@ -39,8 +40,8 @@ import {
   sshStatePillClass,
   sshStateSortOrder,
 } from '../lib/ssh';
-import { backendRequest } from '../lib/tauri';
-import type { AccountRecord } from '../lib/types';
+import { backendRequest, getAntigravityRunning, launchAntigravity } from '../lib/tauri';
+import type { AccountRecord, SwitchPreflightReply } from '../lib/types';
 import { AccountPolicyModal } from '../sheets/AccountPolicyModal';
 import { AddAccountModal } from '../sheets/AddAccountModal';
 import { RenameAccountModal } from '../sheets/RenameAccountModal';
@@ -68,6 +69,7 @@ export function AccountsPage() {
     refreshAllQuotas,
     refreshSingleAccountQuota,
     refreshRemoteEnvironments,
+    closeAntigravitySafely,
     interactiveSwitchAccount,
     showToast,
     askConfirm,
@@ -133,16 +135,81 @@ export function AccountsPage() {
   };
 
   const handleRollback = async () => {
+    let preflight: SwitchPreflightReply | null = null;
+    try {
+      preflight = await backendRequest<SwitchPreflightReply>({ command: 'account_switch_preflight' });
+    } catch {
+      preflight = null;
+    }
+    if (preflight?.insidersRunning) {
+      showToast(t('assistant_account.insiders_running'), true);
+      return;
+    }
+
+    let hasUiRunning = Boolean(
+      preflight?.uiRunning ?? preflight?.stableRunning ?? preflight?.appRunning,
+    );
+    const detachedCount = Number(preflight?.detachedDaemonCount ?? 0);
+    const detachedKinds = preflight?.detachedDaemonKinds ?? [];
+    const detachedPids = preflight?.detachedDaemonPids ?? [];
+    if (!preflight || (!hasUiRunning && detachedCount === 0)) {
+      if (await getAntigravityRunning().catch(() => false)) {
+        hasUiRunning = true;
+      }
+    }
+    const needClose = hasUiRunning || detachedCount > 0;
+    const detachedOnly = !hasUiRunning && detachedCount > 0;
+    const kindsLabel = formatDetachedDaemonKinds(detachedKinds, t, locale);
+
     const confirmed = await askConfirm({
       title: t('accounts.rollback.confirm_title'),
-      body: t('accounts.rollback.confirm_body'),
-      confirmLabel: t('accounts.rollback.confirm_action'),
+      body: detachedOnly
+        ? t('accounts.rollback.detached_confirm_body', { count: detachedCount, kinds: kindsLabel })
+        : t('accounts.rollback.confirm_body'),
+      confirmLabel: detachedOnly
+        ? t('accounts.rollback.detached_confirm_action')
+        : t('accounts.rollback.confirm_action'),
       danger: true,
     });
     if (!confirmed) return;
+
+    if (needClose) {
+      const outcome = await closeAntigravitySafely(18_000, 'switch').catch(() => ({
+        closed: false,
+        reason: 'error',
+      }));
+      if (!outcome.closed) {
+        showToast(
+          detachedOnly
+            ? t('assistant_account.detached_daemons_remaining', {
+                kinds: kindsLabel,
+                pids: detachedPids.join(', ') || '-',
+              })
+            : outcome.reason === 'visible_window_open'
+            ? locale === 'en'
+              ? 'Visible Antigravity windows are still open. Save and close them before rolling back.'
+              : '检测到 Antigravity 仍有未关闭的可见窗口，请先保存并关闭后再撤销切换。'
+            : t('assistant_account.quit_first'),
+          true,
+        );
+        return;
+      }
+    }
+
     try {
-      const res = await backendRequest<{ message?: string }>({ command: 'account_switch_rollback' });
-      showToast(res?.message || t('accounts.rollback.restored'));
+      try {
+        const res = await backendRequest<{ message?: string }>({ command: 'account_switch_rollback' });
+        showToast(res?.message || t('accounts.rollback.restored'));
+      } finally {
+        if (hasUiRunning) {
+          await launchAntigravity().catch((e) => {
+            showToast(
+              t('assistant.relaunch_failed', { detail: e instanceof Error ? e.message : String(e) }),
+              true,
+            );
+          });
+        }
+      }
       await fetchAccounts();
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), true);
@@ -214,6 +281,8 @@ export function AccountsPage() {
       ? (autoSwitchPreview.account?.id ?? autoSwitchPreview.bestCandidate?.id ?? null)
       : null;
 
+  const monitoredLabel = monitoredModelDisplayName(autoSwitchConfig.monitored_model, locale);
+
   const masked = Boolean(config.privacyMaskAccounts);
 
   const previewReason = useMemo(() => {
@@ -240,7 +309,9 @@ export function AccountsPage() {
     return text;
   }, [accounts, autoSwitchPreview, masked, t]);
 
-  const monitoredLabel = monitoredModelDisplayName(autoSwitchConfig.monitored_model, locale);
+  const privacyLabel = masked
+    ? t('accounts.privacy.show', undefined, locale === 'en' ? 'Show Account Info' : '显示账号信息')
+    : t('accounts.privacy.hide', undefined, locale === 'en' ? 'Hide Account Info' : '隐藏账号信息');
 
   const normalizedSshHosts = useMemo(() => {
     const fallback = t('ssh.remote_fallback');
@@ -248,10 +319,6 @@ export function AccountsPage() {
       .map((env) => normalizeSshEnvironment(env, fallback))
       .sort((a, b) => sshStateSortOrder(b.state) - sshStateSortOrder(a.state) || a.hostLabel.localeCompare(b.hostLabel));
   }, [sshEnvironments, t]);
-
-  const privacyLabel = masked
-    ? t('accounts.privacy.show', undefined, locale === 'en' ? 'Show Account Info' : '显示账号信息')
-    : t('accounts.privacy.hide', undefined, locale === 'en' ? 'Hide Account Info' : '隐藏账号信息');
 
   return (
     <div className="gb-page-inner gb-fade-in">

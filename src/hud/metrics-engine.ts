@@ -879,6 +879,63 @@ export function parseExecutorMetadataBlob(
   return out;
 }
 
+const MAX_HISTORICAL_EXECUTOR_ITEMS = 32;
+
+export function mergeExecutorMetadataHistory(
+  latest: ParsedExecutorMetadata,
+  previous: ParsedExecutorMetadata | undefined,
+  rows: ReadonlyArray<ParsedExecutorMetadata>
+): ParsedExecutorMetadata {
+  const planEnumSet = new Set<number>();
+  const plannerNameSet = new Set<string>();
+  const execEnumSet = new Set<number>();
+
+  const pushPlanEnum = (val: unknown) => {
+    if (isPositiveSafeInt(val) && !planEnumSet.has(val) && planEnumSet.size < MAX_HISTORICAL_EXECUTOR_ITEMS) {
+      planEnumSet.add(val);
+    }
+  };
+  const pushPlannerName = (val: unknown) => {
+    const trimmed = typeof val === 'string' ? val.trim() : '';
+    if (trimmed && !plannerNameSet.has(trimmed) && plannerNameSet.size < MAX_HISTORICAL_EXECUTOR_ITEMS) {
+      plannerNameSet.add(trimmed);
+    }
+  };
+  const pushExecEnum = (val: unknown) => {
+    if (isPositiveSafeInt(val) && !execEnumSet.has(val) && execEnumSet.size < MAX_HISTORICAL_EXECUTOR_ITEMS) {
+      execEnumSet.add(val);
+    }
+  };
+
+  if (previous) {
+    for (const v of previous.historicalPlanModelEnums ?? []) pushPlanEnum(v);
+    for (const v of previous.historicalPlannerModelNames ?? []) pushPlannerName(v);
+    for (const v of previous.historicalExecutionModelEnums ?? []) pushExecEnum(v);
+  }
+
+  const ingestRow = (row: ParsedExecutorMetadata) => {
+    const plan = row.planModelEnum;
+    const exec = row.executionModelEnum;
+    if (isPositiveSafeInt(plan) && isPositiveSafeInt(exec) && plan !== exec) {
+      pushPlanEnum(plan);
+      pushPlannerName(row.plannerModelName);
+    }
+    if (isPositiveSafeInt(exec)) {
+      pushExecEnum(exec);
+    }
+  };
+
+  for (const row of rows) ingestRow(row);
+  ingestRow(latest);
+
+  return {
+    ...latest,
+    ...(planEnumSet.size > 0 ? { historicalPlanModelEnums: [...planEnumSet] } : {}),
+    ...(plannerNameSet.size > 0 ? { historicalPlannerModelNames: [...plannerNameSet] } : {}),
+    ...(execEnumSet.size > 0 ? { historicalExecutionModelEnums: [...execEnumSet] } : {}),
+  };
+}
+
 /**
  * 有效输出速度：只对匹配的 Token 与完整正耗时计算，保留未舍入结果。
  */
@@ -1246,6 +1303,26 @@ function createPendingExecutorSlot(params: {
   };
 }
 
+function sanitizeExecMetaPlannerModelName(
+  name: string | undefined,
+  executionModelEnum: number | undefined,
+  planRewritten: boolean,
+): string | undefined {
+  const trimmed = typeof name === 'string' ? name.trim() : '';
+  if (!trimmed || planRewritten) return undefined;
+  const execSpec = executionModelEnum !== undefined ? resolveObservedModelSpecByEnum(executionModelEnum) : null;
+  if (execSpec) {
+    const trimmedSlotKey = buildOrchestratorSlotKey('planner', trimmed);
+    if (
+      trimmedSlotKey === buildOrchestratorSlotKey('executor', execSpec.modelId) ||
+      trimmedSlotKey === buildOrchestratorSlotKey('planner', execSpec.modelId)
+    ) {
+      return undefined;
+    }
+  }
+  return trimmed;
+}
+
 function classifyContextModelSlot(params: {
   responseModel?: string;
   modelDisplayName?: string;
@@ -1564,12 +1641,20 @@ function resolveContextStagesAndActiveSlot(
         /\bgemini-pro-orchestrator\b|^gemini-flash-worker(?:-agy)?$/i.test(trimmedInputModel))
   );
   const inputExplicitCapacity = isPositiveSafeInt(input.modelCapacity) ? input.modelCapacity : undefined;
-  const execMetaPlanEnum = isPositiveSafeInt(input.executorMetadata?.planModelEnum)
+  const rawExecMetaPlanEnum = isPositiveSafeInt(input.executorMetadata?.planModelEnum)
     ? input.executorMetadata!.planModelEnum
     : undefined;
   const execMetaExecEnum = isPositiveSafeInt(input.executorMetadata?.executionModelEnum)
     ? input.executorMetadata!.executionModelEnum
     : undefined;
+  const execMetaPlanRewritten =
+    rawExecMetaPlanEnum !== undefined && execMetaExecEnum !== undefined && rawExecMetaPlanEnum === execMetaExecEnum;
+  const execMetaPlanEnum = execMetaPlanRewritten ? undefined : rawExecMetaPlanEnum;
+  const execMetaPlannerModelName = sanitizeExecMetaPlannerModelName(
+    input.executorMetadata?.plannerModelName,
+    execMetaExecEnum,
+    execMetaPlanRewritten,
+  );
   const executorExplicitCap =
     (isPositiveSafeInt(input.executorMetadata?.checkpointMaxTokenLimit)
       ? input.executorMetadata!.checkpointMaxTokenLimit
@@ -1578,13 +1663,47 @@ function resolveContextStagesAndActiveSlot(
       ? input.executorMetadata!.maxContextTokens
       : undefined);
 
+  const buildHistoricalSlotKeys = (
+    enums: ReadonlyArray<number> | undefined,
+    names?: ReadonlyArray<string> | undefined
+  ): Set<string> => {
+    const keys = new Set<string>();
+    if (enums) {
+      for (const e of enums) {
+        if (!isPositiveSafeInt(e)) continue;
+        const spec = resolveObservedModelSpecByEnum(e);
+        if (spec && spec.modelId !== 'unknown-model') {
+          keys.add(buildOrchestratorSlotKey('planner', spec.modelId));
+        }
+      }
+    }
+    if (names) {
+      for (const name of names) {
+        const trimmed = typeof name === 'string' ? name.trim() : '';
+        if (!trimmed) continue;
+        const spec = resolveModelCapacity(trimmed);
+        if (spec.modelId !== 'unknown-model' && spec.modelId !== 'orchestrator') {
+          keys.add(buildOrchestratorSlotKey('planner', spec.modelId));
+        }
+      }
+    }
+    return keys;
+  };
+  const historicalPlannerKeys = buildHistoricalSlotKeys(
+    input.executorMetadata?.historicalPlanModelEnums,
+    input.executorMetadata?.historicalPlannerModelNames
+  );
+  const historicalExecutorKeys = buildHistoricalSlotKeys(
+    input.executorMetadata?.historicalExecutionModelEnums
+  );
+
   if (usageContextEntries.length === 0) {
     const emptyPlanEnum = input.genMetadata?.planModelEnum ?? execMetaPlanEnum;
     const emptyExecEnum = input.genMetadata?.executionModelEnum ?? execMetaExecEnum;
     const emptySlot = classifyContextModelSlot({
       responseModel: input.genMetadata?.responseModel,
       modelDisplayName: input.genMetadata?.modelDisplayName,
-      plannerModelName: input.genMetadata?.plannerModelName ?? input.executorMetadata?.plannerModelName,
+      plannerModelName: input.genMetadata?.plannerModelName ?? execMetaPlannerModelName,
       modelEnum: input.genMetadata?.modelEnum ?? emptyPlanEnum,
       planModelEnum: emptyPlanEnum,
       executionModelEnum: emptyExecEnum,
@@ -1613,7 +1732,7 @@ function resolveContextStagesAndActiveSlot(
       if (emptySlot.role === 'executor') {
         const plannerSlot = createPendingPlannerSlot({
           planModelEnum: emptyPlanEnum,
-          plannerModelName: input.genMetadata?.plannerModelName ?? input.executorMetadata?.plannerModelName,
+          plannerModelName: input.genMetadata?.plannerModelName ?? execMetaPlannerModelName,
           inputPlannerSlot: inputAsStandaloneSlot?.role === 'planner' ? inputAsStandaloneSlot : null,
           capacityTokens: emptySlot.capacityTokens,
           isFallbackModel: emptySlot.isFallbackModel,
@@ -1641,7 +1760,7 @@ function resolveContextStagesAndActiveSlot(
       } else {
         const plannerSlot = createPendingPlannerSlot({
           planModelEnum: emptyPlanEnum,
-          plannerModelName: input.genMetadata?.plannerModelName ?? input.executorMetadata?.plannerModelName,
+          plannerModelName: input.genMetadata?.plannerModelName ?? execMetaPlannerModelName,
           inputPlannerSlot: inputAsStandaloneSlot?.role === 'planner' ? inputAsStandaloneSlot : null,
           capacityTokens: emptySlot.capacityTokens,
           isFallbackModel: emptySlot.isFallbackModel,
@@ -2043,7 +2162,7 @@ function resolveContextStagesAndActiveSlot(
     if (planners.length === 0) {
       const fallbackPlannerSlot = createPendingPlannerSlot({
         planModelEnum: effectivePlanModelEnum,
-        plannerModelName: latestEntry.genMeta?.plannerModelName ?? input.executorMetadata?.plannerModelName,
+        plannerModelName: latestEntry.genMeta?.plannerModelName ?? execMetaPlannerModelName,
         inputPlannerSlot: inputAsStandaloneSlot?.role === 'planner' ? inputAsStandaloneSlot : null,
         capacityTokens: activeAcc.slot.capacityTokens,
         isFallbackModel: activeAcc.slot.isFallbackModel,
@@ -2091,27 +2210,64 @@ function resolveContextStagesAndActiveSlot(
         }
       }
     }
+    const absorbInto = (
+      absorbedTarget: StageAccumulator & { lastSeenSeq: number },
+      other: StageAccumulator & { lastSeenSeq: number }
+    ) => {
+      absorbedTarget.peakContextTokens = Math.max(absorbedTarget.peakContextTokens, other.peakContextTokens);
+      if (other.compactionCount && other.compactionCount > 0) {
+        absorbedTarget.compactionCount = (absorbedTarget.compactionCount ?? 0) + other.compactionCount;
+      }
+      if (other.lastSeenSeq > absorbedTarget.lastSeenSeq) {
+        absorbedTarget.latestStep = other.latestStep;
+        absorbedTarget.latestPrompt = other.latestPrompt;
+        if (other.explicitCapacity !== undefined) {
+          absorbedTarget.explicitCapacity = other.explicitCapacity;
+        }
+        absorbedTarget.lastSeenSeq = other.lastSeenSeq;
+      } else if (absorbedTarget.explicitCapacity === undefined && other.explicitCapacity !== undefined) {
+        absorbedTarget.explicitCapacity = other.explicitCapacity;
+      }
+      if (other.slot.slotKey === effectiveActiveSlotKey) {
+        effectiveActiveSlotKey = absorbedTarget.slot.slotKey;
+      }
+    };
     const filteredOthersRaw: Array<StageAccumulator & { lastSeenSeq: number }> = [];
     for (const other of others) {
       if (!Boolean(other.latestStep)) continue;
       const absorbedTarget = peByModelId.get(other.slot.modelId);
       if (absorbedTarget) {
-        absorbedTarget.peakContextTokens = Math.max(absorbedTarget.peakContextTokens, other.peakContextTokens);
-        if (other.compactionCount && other.compactionCount > 0) {
-          absorbedTarget.compactionCount = (absorbedTarget.compactionCount ?? 0) + other.compactionCount;
+        absorbInto(absorbedTarget, other);
+        continue;
+      }
+      const histKey = buildOrchestratorSlotKey('planner', other.slot.modelId);
+      const inP = historicalPlannerKeys.has(histKey);
+      const inE = historicalExecutorKeys.has(histKey);
+      const promotedRole: 'planner' | 'executor' | null =
+        inP && !inE ? 'planner' : inE && !inP ? 'executor' : null;
+      if (promotedRole) {
+        const promotedKey = buildOrchestratorSlotKey(promotedRole, other.slot.modelId);
+        const existingPe = [...planners, ...executors].find((pe) => pe.slot.slotKey === promotedKey);
+        if (existingPe) {
+          absorbInto(existingPe, other);
+          continue;
         }
-        if (other.lastSeenSeq > absorbedTarget.lastSeenSeq) {
-          absorbedTarget.latestStep = other.latestStep;
-          absorbedTarget.latestPrompt = other.latestPrompt;
-          if (other.explicitCapacity !== undefined) {
-            absorbedTarget.explicitCapacity = other.explicitCapacity;
-          }
-          absorbedTarget.lastSeenSeq = other.lastSeenSeq;
-        } else if (absorbedTarget.explicitCapacity === undefined && other.explicitCapacity !== undefined) {
-          absorbedTarget.explicitCapacity = other.explicitCapacity;
+        const promoted: StageAccumulator & { lastSeenSeq: number } = {
+          ...other,
+          slot: {
+            ...other.slot,
+            role: promotedRole,
+            slotKey: promotedKey,
+          },
+        };
+        if (promotedRole === 'planner') {
+          planners.push(promoted);
+        } else {
+          executors.push(promoted);
         }
+        peByModelId.set(other.slot.modelId, promoted);
         if (other.slot.slotKey === effectiveActiveSlotKey) {
-          effectiveActiveSlotKey = absorbedTarget.slot.slotKey;
+          effectiveActiveSlotKey = promotedKey;
         }
         continue;
       }
@@ -3403,6 +3559,7 @@ interface CachedConversationState {
   parentMetaDigest: string;
   executorMetaDigest: string;
   executorMetadata?: ParsedExecutorMetadata;
+  executorHistoryMaxIdx?: number;
   stepPrefixCutoffIdx: number;
   stepPrefixDigest: string;
   genDigest: string;
@@ -3723,6 +3880,12 @@ export class ConversationMetricsEngine {
         canReuseIncremental && existing!.executorMetaDigest
           ? existing!.executorMetaDigest
           : undefined,
+      prevExecutorHistoryMaxIdx:
+        canReuseIncremental &&
+        existing!.executorMetadata &&
+        (existing!.executorHistoryMaxIdx ?? -1) >= 0
+          ? existing!.executorHistoryMaxIdx
+          : undefined,
       prevStepPrefixCutoffIdx,
       prevStepPrefixDigest:
         prevStepPrefixCutoffIdx !== undefined ? existing!.stepPrefixDigest : undefined,
@@ -3757,6 +3920,9 @@ export class ConversationMetricsEngine {
         executorMetaUnchanged,
         executorMetaDigest,
         executorMetaBlob,
+        executorMetaHistoryBlobs,
+        executorMetaHistoryMaxIdx,
+        executorMetaHistoryMode,
         trajectoryId,
         trajectoryType,
         forkStepIndex,
@@ -3775,12 +3941,31 @@ export class ConversationMetricsEngine {
         genBlobs,
       } = workerRes;
 
-      const executorMetadata: ParsedExecutorMetadata | undefined =
+      const baseExecutorMetadata: ParsedExecutorMetadata | undefined =
         executorMetaUnchanged && existing
           ? existing.executorMetadata
           : executorMetaBlob && executorMetaBlob.byteLength > 0
           ? parseExecutorMetadataBlob(executorMetaBlob)
           : undefined;
+      let executorMetadata: ParsedExecutorMetadata | undefined = baseExecutorMetadata;
+      let nextExecutorHistoryMaxIdx: number | undefined = existing?.executorHistoryMaxIdx;
+      if (executorMetaUnchanged) {
+        nextExecutorHistoryMaxIdx = existing?.executorHistoryMaxIdx ?? -1;
+      } else if (baseExecutorMetadata && executorMetaHistoryBlobs) {
+        executorMetadata = mergeExecutorMetadataHistory(
+          baseExecutorMetadata,
+          executorMetaHistoryMode === 'append' ? existing?.executorMetadata : undefined,
+          executorMetaHistoryBlobs.map((blob) => parseExecutorMetadataBlob(blob))
+        );
+        nextExecutorHistoryMaxIdx = executorMetaHistoryMaxIdx ?? -1;
+      } else if (baseExecutorMetadata) {
+        executorMetadata = mergeExecutorMetadataHistory(
+          baseExecutorMetadata,
+          existing?.executorMetadata,
+          []
+        );
+        nextExecutorHistoryMaxIdx = existing?.executorHistoryMaxIdx ?? -1;
+      }
 
       const selfLower = selfConversationId.toLowerCase();
       const selfTrajLower = trajectoryId?.toLowerCase() ?? '';
@@ -4168,6 +4353,7 @@ export class ConversationMetricsEngine {
         parentMetaDigest: parentMetaReadError ? existing?.parentMetaDigest ?? '' : parentMetaDigest,
         executorMetaDigest: executorMetaDigest ?? '',
         executorMetadata,
+        executorHistoryMaxIdx: nextExecutorHistoryMaxIdx,
         stepPrefixCutoffIdx,
         stepPrefixDigest,
         genDigest,

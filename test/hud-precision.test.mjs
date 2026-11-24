@@ -10,6 +10,7 @@ import {
   formatTurnDurationCard,
   formatTurnDurationCompact,
   parseExecutorMetadataBlob,
+  mergeExecutorMetadataHistory,
   parseLatestGenMetadataBlob,
   parseStepMetadataBlob,
   resolveModelCapacity,
@@ -2668,6 +2669,384 @@ test('P0-1 审计复验回归：2.34.0 可配置 Orchestrator 执行步宿主将
   assert.equal(resDomOnly.context.modelStages?.[1]?.role, 'executor');
   assert.equal(resDomOnly.context.modelStages?.[1]?.shortLabel, 'Hydrogen');
   assert.equal(resDomOnly.context.modelStages?.[1]?.isActive, true);
+});
+
+test('Orchestrator 新一轮起步：宿主执行阶段残留 executor_metadata（planModelEnum===executionModelEnum、plannerModelName=执行模型）不得把执行模型错标为规划', (t) => {
+  t.after(() => clearObservedIdeModelsForTest());
+  clearObservedIdeModelsForTest();
+  registerObservedIdeModels([
+    {
+      modelId: 'gemini-4-neon',
+      displayName: 'Gemini 4 Neon (High)',
+      modelOrAlias: 'MODEL_PLACEHOLDER_M532',
+      modelEnum: 1532,
+    },
+    {
+      modelId: 'gemini-4-hydrogen',
+      displayName: 'Gemini 4 Hydrogen (XHigh)',
+      modelOrAlias: 'MODEL_PLACEHOLDER_M528',
+      modelEnum: 1528,
+    },
+  ]);
+
+  const historySteps = [
+    { idx: 0, stepType: 14, status: 3 },
+    step({
+      idx: 1,
+      generation: {
+        modelEnum: 1532,
+        responseModel: 'gemini-4-neon',
+        modelDisplayName: 'Gemini 4 Neon (High)',
+        maxContextTokens: 512_000,
+      },
+      cachedReadTokens: 300_000,
+      rawInputTokens: 4_000,
+      cacheWriteTokens: 0,
+      outputTokens: 300,
+    }),
+    step({
+      idx: 3,
+      generation: {
+        modelEnum: 1532,
+        responseModel: 'gemini-4-neon',
+        modelDisplayName: 'Gemini 4 Neon (High)',
+        maxContextTokens: 512_000,
+      },
+      cachedReadTokens: 300_000,
+      rawInputTokens: 4_000,
+      cacheWriteTokens: 0,
+      outputTokens: 300,
+    }),
+    step({
+      idx: 5,
+      generation: {
+        modelEnum: 1528,
+        responseModel: 'gemini-4-hydrogen',
+        modelDisplayName: 'Gemini 4 Hydrogen (XHigh)',
+        maxContextTokens: 512_000,
+      },
+      cachedReadTokens: 320_000,
+      rawInputTokens: 4_000,
+      cacheWriteTokens: 0,
+      outputTokens: 300,
+    }),
+    step({
+      idx: 7,
+      generation: {
+        modelEnum: 1528,
+        responseModel: 'gemini-4-hydrogen',
+        modelDisplayName: 'Gemini 4 Hydrogen (XHigh)',
+        maxContextTokens: 512_000,
+      },
+      cachedReadTokens: 320_000,
+      rawInputTokens: 4_000,
+      cacheWriteTokens: 0,
+      outputTokens: 300,
+    }),
+  ];
+
+  const baseInput = {
+    conversationId: 'conv-orch-stale-exec-meta',
+    modelId: 'Orchestrator Gemini 4 Neon High',
+    isStreaming: true,
+    executorMetadata: {
+      planModelEnum: 1528,
+      executionModelEnum: 1528,
+      plannerModelName: 'gemini-4-hydrogen',
+      checkpointMaxTokenLimit: 512_000,
+    },
+    genMetadata: {
+      modelEnum: 1528,
+      planModelEnum: 1528,
+      executionModelEnum: 1528,
+      responseModel: 'gemini-4-hydrogen',
+      maxContextTokens: 512_000,
+    },
+  };
+
+  const assertNoHydrogenPlanner = (res, label) => {
+    assert.equal(res.context.isOrchestrator, true, `${label}: isOrchestrator`);
+    const stages = res.context.modelStages ?? [];
+    const slotKeys = stages.map((s) => s.slotKey);
+    assert.equal(new Set(slotKeys).size, slotKeys.length, `${label}: unique slotKey`);
+    assert.equal(stages.filter((s) => s.isActive).length, 1, `${label}: single active stage`);
+    const planners = stages.filter((s) => s.role === 'planner');
+    assert.equal(planners.length, 1, `${label}: single planner`);
+    assert.equal(planners[0]?.shortLabel, 'Neon', `${label}: planner shortLabel`);
+    assert.equal(
+      stages.some((s) => s.role === 'executor' && s.shortLabel === 'Hydrogen'),
+      true,
+      `${label}: has executor Hydrogen`,
+    );
+    assert.equal(
+      stages.some((s) => s.role === 'planner' && s.shortLabel === 'Hydrogen'),
+      false,
+      `${label}: no planner Hydrogen`,
+    );
+    assert.equal(
+      stages.some((s) => s.role === 'model' && s.shortLabel === 'Neon'),
+      false,
+      `${label}: no standalone model Neon`,
+    );
+  };
+
+  // 场景 A：已写入新一轮 user step（idx 9），规划步尚未落盘
+  const resWithUserStep = buildConversationHudMetrics({
+    ...baseInput,
+    steps: [...historySteps, { idx: 9, stepType: 14, status: 3 }],
+  });
+  assertNoHydrogenPlanner(resWithUserStep, 'withUserStep');
+  const activeWithUserStep = resWithUserStep.context.modelStages?.find((s) => s.isActive);
+  assert.equal(activeWithUserStep?.role, 'planner');
+  assert.equal(activeWithUserStep?.shortLabel, 'Neon');
+
+  // 场景 B：DB 滞后，新一轮 user step 尚未落盘
+  const resDbLag = buildConversationHudMetrics({
+    ...baseInput,
+    steps: historySteps,
+  });
+  assertNoHydrogenPlanner(resDbLag, 'dbLag');
+});
+
+test('Orchestrator 规划模型中途从 Neon 换成 Opus 后，历史 Neon 仍保留规划徽章（基于 executor_metadata 历史）', (t) => {
+  t.after(() => clearObservedIdeModelsForTest());
+  clearObservedIdeModelsForTest();
+  registerObservedIdeModels([
+    {
+      modelId: 'gemini-4-neon',
+      displayName: 'Gemini 4 Neon (High)',
+      modelOrAlias: 'MODEL_PLACEHOLDER_M532',
+      modelEnum: 1532,
+    },
+    {
+      modelId: 'gemini-4-hydrogen',
+      displayName: 'Gemini 4 Hydrogen (XHigh)',
+      modelOrAlias: 'MODEL_PLACEHOLDER_M528',
+      modelEnum: 1528,
+    },
+    {
+      modelId: 'claude-opus-5-5',
+      displayName: 'Claude Opus 5.5 (High)',
+      modelOrAlias: 'MODEL_PLACEHOLDER_M402',
+      modelEnum: 1402,
+    },
+  ]);
+
+  const mixedSteps = [
+    { idx: 0, stepType: 14, status: 3 },
+    step({
+      idx: 1,
+      generation: {
+        modelEnum: 1532,
+        responseModel: 'gemini-4-neon',
+        modelDisplayName: 'Gemini 4 Neon (High)',
+        maxContextTokens: 512_000,
+      },
+      cachedReadTokens: 300_000,
+      rawInputTokens: 4_000,
+      cacheWriteTokens: 0,
+      outputTokens: 300,
+    }),
+    step({
+      idx: 3,
+      generation: {
+        modelEnum: 1532,
+        responseModel: 'gemini-4-neon',
+        modelDisplayName: 'Gemini 4 Neon (High)',
+        maxContextTokens: 512_000,
+      },
+      cachedReadTokens: 300_000,
+      rawInputTokens: 4_000,
+      cacheWriteTokens: 0,
+      outputTokens: 300,
+    }),
+    step({
+      idx: 5,
+      generation: {
+        modelEnum: 1528,
+        responseModel: 'gemini-4-hydrogen',
+        modelDisplayName: 'Gemini 4 Hydrogen (XHigh)',
+        maxContextTokens: 512_000,
+      },
+      cachedReadTokens: 320_000,
+      rawInputTokens: 4_000,
+      cacheWriteTokens: 0,
+      outputTokens: 300,
+    }),
+    step({
+      idx: 7,
+      generation: {
+        modelEnum: 1528,
+        responseModel: 'gemini-4-hydrogen',
+        modelDisplayName: 'Gemini 4 Hydrogen (XHigh)',
+        maxContextTokens: 512_000,
+      },
+      cachedReadTokens: 320_000,
+      rawInputTokens: 4_000,
+      cacheWriteTokens: 0,
+      outputTokens: 300,
+    }),
+    { idx: 9, stepType: 14, status: 3 },
+    step({
+      idx: 10,
+      generation: {
+        modelEnum: 1402,
+        responseModel: 'claude-opus-5-5',
+        modelDisplayName: 'Claude Opus 5.5 (High)',
+        maxContextTokens: 840_000,
+      },
+      cachedReadTokens: 500_000,
+      rawInputTokens: 5_000,
+      cacheWriteTokens: 0,
+      outputTokens: 400,
+    }),
+    step({
+      idx: 12,
+      generation: {
+        modelEnum: 1528,
+        responseModel: 'gemini-4-hydrogen',
+        modelDisplayName: 'Gemini 4 Hydrogen (XHigh)',
+        maxContextTokens: 512_000,
+      },
+      cachedReadTokens: 40_000,
+      rawInputTokens: 3_000,
+      cacheWriteTokens: 0,
+      outputTokens: 500,
+    }),
+  ];
+
+  // 正例：携带 executor_metadata 历史依据时，已换下的 Neon 仍保留 planner 徽章
+  const withHistory = buildConversationHudMetrics({
+    conversationId: 'conv-orch-neon-to-opus',
+    modelId: 'Orchestrator Claude Opus 5.5 High',
+    steps: mixedSteps,
+    executorMetadata: {
+      planModelEnum: 1402,
+      executionModelEnum: 1528,
+      plannerModelName: 'claude-opus-5-5-high',
+      checkpointMaxTokenLimit: 840_000,
+      historicalPlanModelEnums: [1532, 1402],
+      historicalPlannerModelNames: ['gemini-4-neon-high', 'claude-opus-5-5-high'],
+      historicalExecutionModelEnums: [1528],
+    },
+  });
+  const stages = withHistory.context.modelStages ?? [];
+  assert.equal(new Set(stages.map((s) => s.slotKey)).size, stages.length, 'slotKey 必须唯一');
+  assert.equal(stages.filter((s) => s.isActive).length, 1, '仅允许一个激活阶段');
+  assert.equal(
+    stages.some((s) => s.role === 'planner' && s.shortLabel === 'Neon'),
+    true,
+    '历史 Neon 必须提升为 planner',
+  );
+  assert.equal(
+    stages.some((s) => s.role === 'planner' && s.shortLabel === 'Opus'),
+    true,
+    '当前 Opus 为 planner',
+  );
+  assert.equal(
+    stages.some((s) => s.role === 'executor' && s.shortLabel === 'Hydrogen'),
+    true,
+    '当前 Hydrogen 为 executor',
+  );
+  assert.equal(
+    stages.some((s) => s.role === 'model'),
+    false,
+    '不得残余无徽章独立 model 阶段',
+  );
+
+  // 对照组：缺失历史依据时不得凭空编造 Neon 为 planner
+  const withoutHistory = buildConversationHudMetrics({
+    conversationId: 'conv-orch-neon-to-opus-nohist',
+    modelId: 'Orchestrator Claude Opus 5.5 High',
+    steps: mixedSteps,
+    executorMetadata: {
+      planModelEnum: 1402,
+      executionModelEnum: 1528,
+      plannerModelName: 'claude-opus-5-5-high',
+      checkpointMaxTokenLimit: 840_000,
+    },
+  });
+  assert.equal(
+    withoutHistory.context.modelStages?.some((s) => s.role === 'model' && s.shortLabel === 'Neon'),
+    true,
+    '无历史依据时 Neon 应保守保持 model 角色',
+  );
+
+  // mergeExecutorMetadataHistory 纯函数过滤 plan===exec 执行期改写行
+  const merged = mergeExecutorMetadataHistory(
+    { planModelEnum: 1402, executionModelEnum: 1528, plannerModelName: 'claude-opus-5-5-high' },
+    undefined,
+    [
+      { planModelEnum: 1532, executionModelEnum: 1528, plannerModelName: 'gemini-4-neon-high' },
+      { planModelEnum: 1528, executionModelEnum: 1528, plannerModelName: 'gemini-4-hydrogen-high' },
+      { planModelEnum: 1402, executionModelEnum: 1528, plannerModelName: 'claude-opus-5-5-high' },
+    ],
+  );
+  assert.deepEqual(merged.historicalPlanModelEnums, [1532, 1402]);
+  assert.deepEqual(merged.historicalExecutionModelEnums, [1528]);
+  assert.deepEqual(merged.historicalPlannerModelNames, ['gemini-4-neon-high', 'claude-opus-5-5-high']);
+});
+
+test('sqlite-worker 增量扫描 executor_metadata 历史行：首次 full、追加 append 与损坏/无 idx 表降级', async (t) => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-hud-exechist-'));
+  const dbPath = path.join(baseDir, 'exec-hist.db');
+  const db = new DatabaseSync(dbPath);
+  t.after(() => {
+    try { db.close(); } catch {}
+    fs.rmSync(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  });
+  db.exec(`
+    CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER NOT NULL, status INTEGER NOT NULL, metadata BLOB);
+    CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB, size INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE executor_metadata (idx INTEGER PRIMARY KEY, data BLOB);
+  `);
+  const encodeExecMeta = (planEnum, execEnum) =>
+    Buffer.from(message(10, [...message(1, [...scalar(1, planEnum), ...message(60, scalar(1, execEnum))])]));
+  const insertStmt = db.prepare('INSERT INTO executor_metadata VALUES (?, ?)');
+  insertStmt.run(0, encodeExecMeta(1532, 1528));
+  insertStmt.run(1, encodeExecMeta(1528, 1528));
+  insertStmt.run(2, encodeExecMeta(1402, 1528));
+
+  const firstScan = await runHudDbScanInWorker({ dbPath, inlineBlobLimitBytes: 65_536 });
+  assert.equal(firstScan.executorMetaHistoryMode, 'full');
+  assert.equal(firstScan.executorMetaHistoryMaxIdx, 2);
+  assert.equal(firstScan.executorMetaHistoryBlobs?.length, 3);
+
+  insertStmt.run(3, encodeExecMeta(1532, 1528));
+  const secondScan = await runHudDbScanInWorker({
+    dbPath,
+    inlineBlobLimitBytes: 65_536,
+    prevExecutorMetaDigest: firstScan.executorMetaDigest,
+    prevExecutorHistoryMaxIdx: firstScan.executorMetaHistoryMaxIdx,
+  });
+  assert.equal(secondScan.executorMetaHistoryMode, 'append');
+  assert.equal(secondScan.executorMetaHistoryMaxIdx, 3);
+  assert.equal(secondScan.executorMetaHistoryBlobs?.length, 1);
+  assert.equal(parseExecutorMetadataBlob(secondScan.executorMetaHistoryBlobs[0]).planModelEnum, 1532);
+
+  // 对话回退/截断（execIdx < sinceIdx）时，必须退回 full 全量回扫并重置游标，不得丢弃新重写步骤
+  db.exec('DELETE FROM executor_metadata WHERE idx >= 2');
+  const rewindScan = await runHudDbScanInWorker({
+    dbPath,
+    inlineBlobLimitBytes: 65_536,
+    prevExecutorMetaDigest: secondScan.executorMetaDigest,
+    prevExecutorHistoryMaxIdx: secondScan.executorMetaHistoryMaxIdx,
+  });
+  assert.equal(rewindScan.executorMetaHistoryMode, 'full');
+  assert.equal(rewindScan.executorMetaHistoryMaxIdx, 1);
+  assert.equal(rewindScan.executorMetaHistoryBlobs?.length, 2);
+
+  insertStmt.run(2, encodeExecMeta(1402, 1528));
+  const afterRewindAppend = await runHudDbScanInWorker({
+    dbPath,
+    inlineBlobLimitBytes: 65_536,
+    prevExecutorMetaDigest: rewindScan.executorMetaDigest,
+    prevExecutorHistoryMaxIdx: rewindScan.executorMetaHistoryMaxIdx,
+  });
+  assert.equal(afterRewindAppend.executorMetaHistoryMode, 'append');
+  assert.equal(afterRewindAppend.executorMetaHistoryMaxIdx, 2);
+  assert.equal(afterRewindAppend.executorMetaHistoryBlobs?.length, 1);
+  assert.equal(parseExecutorMetadataBlob(afterRewindAppend.executorMetaHistoryBlobs[0]).planModelEnum, 1402);
 });
 
 test('P1-1 回归：>4MB 超大 gen_metadata 投影成功不静默丢弃，且 >64KB 历史行不阻塞 genPrefixCutoffIdx 增量推进', async (t) => {

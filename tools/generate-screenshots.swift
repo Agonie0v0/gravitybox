@@ -12,7 +12,7 @@ let appVersion: String = {
        let version = json["version"] as? String, !version.isEmpty {
         return version
     }
-    return "1.2.0"
+    return "1.2.1"
 }()
 let sourceDir = root.appendingPathComponent("质检报告/\(appVersion)-改造验收/原生布局")
 let targetDir = root.appendingPathComponent("assets/screenshots")

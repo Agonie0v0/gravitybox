@@ -34,6 +34,20 @@ export interface GracefulCloseOutcome {
   reason: string;
 }
 
+export interface SwitchPreflightReply {
+  ok?: boolean;
+  appRunning?: boolean;
+  uiRunning?: boolean;
+  stableRunning?: boolean;
+  insidersRunning?: boolean;
+  detachedDaemonCount?: number;
+  detachedDaemonKinds?: string[];
+  detachedDaemonPids?: number[];
+  hasRunningTask?: boolean;
+  safe?: boolean;
+  taskReason?: string;
+}
+
 export interface EnvironmentNode {
   environmentId?: string;
   id?: string;
@@ -243,14 +257,33 @@ export interface UsagePeriodSummaryData {
   pricing_warning_codes?: string[];
 }
 
+export interface AvailableAccountUsageOption {
+  id: string;
+  label: string;
+  email?: string;
+  name?: string | null;
+  type?: 'all' | 'account' | string;
+  total_tokens?: number;
+  request_count?: number;
+}
+
 export interface UsageSummaryReply {
   ok?: boolean;
   period: UsagePeriodKey;
   snapshotId?: string;
   selectedEnvironmentId?: string;
+  selected_environment_id?: string;
   selectedAccountId?: string;
+  selected_account_id?: string;
+  availableAccounts?: AvailableAccountUsageOption[];
+  available_accounts?: AvailableAccountUsageOption[];
   availableEnvironments?: EnvironmentNode[];
+  available_environments?: EnvironmentNode[];
   environments?: EnvironmentNode[];
+  unattributedRequests?: number;
+  unattributed_requests?: number;
+  unattributedTokens?: number;
+  unattributed_tokens?: number;
   environmentBreakdown?: {
     localSharePct?: number;
     sshSharePct?: number;
@@ -266,7 +299,12 @@ export interface UsageSummaryReply {
     [key: string]: unknown;
   };
   summary: UsagePeriodSummaryData & {
+    selectedAccountId?: string;
+    selected_account_id?: string;
+    availableAccounts?: AvailableAccountUsageOption[];
+    available_accounts?: AvailableAccountUsageOption[];
     selectedEnvironmentId?: string;
+    selected_environment_id?: string;
     availableEnvironments?: EnvironmentNode[];
     available_environments?: EnvironmentNode[];
     environmentBreakdown?: Record<string, unknown>;
@@ -403,6 +441,7 @@ export interface DashboardSummaryReply {
 export interface UsageEventRow {
   id?: string;
   timestamp?: number | string;
+  timestamp_seconds?: number;
   model?: string;
   modelId?: string;
   thinking_effort?: string | null;
@@ -429,10 +468,14 @@ export interface UsageEventRow {
   source?: string;
   environment_id?: string;
   environmentId?: string;
+  environment_kind?: string;
   environmentKind?: string;
+  environment_label?: string;
   environmentLabel?: string;
   host_label?: string;
   hostLabel?: string;
+  account_id?: string;
+  accountId?: string;
   account_email?: string;
   accountEmail?: string;
 }
@@ -449,7 +492,10 @@ export interface UsageEventsReply {
 }
 
 export interface MaintenanceEntry {
-  name: string;
+  id?: string;
+  name?: string;
+  title?: string;
+  subtitle?: string;
   category?: 'safe' | 'stateful' | string;
   bytes: number;
   fileCount?: number;
@@ -496,6 +542,7 @@ export interface PricingPayload {
   ok?: boolean;
   synced?: boolean;
   error?: string;
+  healedCount?: number;
   healedRecords?: number;
   prices?: Record<string, {
     input?: number;
@@ -505,11 +552,35 @@ export interface PricingPayload {
     state?: string;
     displayName?: string;
     provenance?: {
+      verification?: string;
       checkedAt?: string;
       validUntil?: string;
       sourceUrl?: string;
       state?: string;
     };
+  }>;
+  retiredPrices?: Record<string, {
+    input?: number;
+    output?: number;
+    cached?: number;
+    cacheWrite?: number;
+    state?: string;
+    displayName?: string;
+    provenance?: {
+      verification?: string;
+      checkedAt?: string;
+      validUntil?: string;
+      sourceUrl?: string;
+      state?: string;
+    };
+  }>;
+  pricingStatus?: Record<string, string>;
+  modelCatalogState?: Record<string, {
+    displayName?: string;
+    availability?: string;
+    tiers?: string[];
+    hostOrder?: number;
+    state?: string;
   }>;
   catalogState?: Record<string, {
     displayName?: string;
@@ -527,10 +598,15 @@ export interface PricingPayload {
   }>;
   status?: {
     version?: string;
+    feedVersion?: string;
     modelCount?: number;
     lastSyncedAt?: number;
+    lastSyncAt?: number;
     lastCheckedAt?: number;
+    lastCheckAt?: number;
     source?: string;
+    sourceUrl?: string;
     enabled?: boolean;
+    autoSyncEnabled?: boolean;
   };
 }
