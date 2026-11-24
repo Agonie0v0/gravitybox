@@ -183,13 +183,9 @@ fn dispatch(mut args: Vec<String>) -> Result<(), HelperError> {
                     })?;
                 } else if arg == "--confirm-background-exit"
                     || arg == "--confirm-background-exit=true"
-                    || arg == "--terminate-background"
-                    || arg == "--terminate-background=true"
                 {
                     confirm_background_exit = true;
-                } else if arg == "--confirm-background-exit=false"
-                    || arg == "--terminate-background=false"
-                {
+                } else if arg == "--confirm-background-exit=false" {
                     confirm_background_exit = false;
                 } else {
                     return Err(HelperError::invalid_args(
