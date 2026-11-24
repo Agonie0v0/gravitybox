@@ -1,31 +1,25 @@
-use std::ffi::c_void;
-use std::mem::size_of;
 use std::ptr;
 
 use serde::Serialize;
 use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_PATH_NOT_FOUND,
-    ERROR_PIPE_BUSY, GetLastError, HANDLE,
-};
-use windows_sys::Win32::Security::{
-    EqualSid, GetTokenInformation, IsValidSid, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_PIPE_BUSY, GetLastError,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
 };
 use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, WaitNamedPipeW};
-use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
-};
+use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
 use crate::error::HelperError;
 use crate::process::query_process_exe_path;
-use crate::util::{OwnedHandle, normalize_win_path, to_wide_null};
+use crate::util::{
+    OwnedHandle, TokenUserBuffer, normalize_win_path, path_file_name_lower,
+    process_has_same_user_sid, to_wide_null,
+};
 
 const REQUIRED_PIPE_PREFIX: &str = r"\\.\pipe\gravitybox-";
 const MAX_PIPE_SUFFIX_LEN: usize = 128;
-const MAX_TOKEN_USER_BYTES: usize = 64 * 1024;
 
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -68,86 +62,6 @@ pub(crate) fn validate_gravitybox_pipe_name(pipe_name: &str) -> Result<(), Helpe
     Ok(())
 }
 
-/// Pointer-aligned owned buffer holding a `TOKEN_USER` structure returned by `GetTokenInformation`.
-struct TokenUserBuffer {
-    buf: Vec<usize>,
-    byte_len: usize,
-}
-
-impl TokenUserBuffer {
-    fn from_process(process_handle: HANDLE) -> Result<Self, u32> {
-        let mut token_raw: HANDLE = ptr::null_mut();
-        let ok = unsafe { OpenProcessToken(process_handle, TOKEN_QUERY, &mut token_raw) };
-        if ok == 0 {
-            return Err(unsafe { GetLastError() });
-        }
-        let token = OwnedHandle::new(token_raw).ok_or(0u32)?;
-
-        let mut needed: u32 = 0;
-        let probe_ok = unsafe {
-            GetTokenInformation(token.as_raw(), TokenUser, ptr::null_mut(), 0, &mut needed)
-        };
-        if probe_ok != 0 {
-            return Err(0);
-        }
-        let err = unsafe { GetLastError() };
-        if err != ERROR_INSUFFICIENT_BUFFER {
-            return Err(err);
-        }
-        let needed_usize = needed as usize;
-        if needed_usize < size_of::<TOKEN_USER>() || needed_usize > MAX_TOKEN_USER_BYTES {
-            return Err(ERROR_INSUFFICIENT_BUFFER);
-        }
-
-        let words = needed_usize.div_ceil(size_of::<usize>());
-        let mut buf = vec![0usize; words];
-        let alloc_bytes = buf.len() * size_of::<usize>();
-        let mut actual: u32 = 0;
-        let read_ok = unsafe {
-            GetTokenInformation(
-                token.as_raw(),
-                TokenUser,
-                buf.as_mut_ptr() as *mut c_void,
-                alloc_bytes as u32,
-                &mut actual,
-            )
-        };
-        if read_ok == 0 {
-            return Err(unsafe { GetLastError() });
-        }
-        let actual_usize = actual as usize;
-        if actual_usize < size_of::<TOKEN_USER>() || actual_usize > alloc_bytes {
-            return Err(ERROR_INSUFFICIENT_BUFFER);
-        }
-
-        Ok(Self {
-            buf,
-            byte_len: actual_usize,
-        })
-    }
-
-    fn sid_ptr(&self) -> Option<*mut c_void> {
-        if self.byte_len < size_of::<TOKEN_USER>() {
-            return None;
-        }
-        let tu = unsafe { &*(self.buf.as_ptr() as *const TOKEN_USER) };
-        let sid = tu.User.Sid;
-        if sid.is_null() {
-            return None;
-        }
-        let base = self.buf.as_ptr() as usize;
-        let end = base.checked_add(self.byte_len)?;
-        let p = sid as usize;
-        if p < base || p >= end {
-            return None;
-        }
-        if unsafe { IsValidSid(sid) } == 0 {
-            return None;
-        }
-        Some(sid)
-    }
-}
-
 fn open_pipe_for_identity_check(pipe_w: &[u16]) -> Result<OwnedHandle, u32> {
     // SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION prevents a squatting server from
     // impersonating this client process. FILE_READ_ATTRIBUTES uses minimal metadata access
@@ -180,20 +94,28 @@ fn open_pipe_for_identity_check(pipe_w: &[u16]) -> Result<OwnedHandle, u32> {
     Err(ERROR_PIPE_BUSY)
 }
 
-fn exe_matches_filter(exe_path: &str, expected_exe: &str) -> bool {
-    let norm_filter = normalize_win_path(expected_exe);
-    let norm_exe = normalize_win_path(exe_path);
-    if norm_filter.is_empty() || norm_exe.is_empty() {
+/// Strictly match `exe_path` against `expected_exe`:
+/// - When `expected_exe` contains a path separator (`\` or `/`), require exact normalized full-path equality.
+/// - Otherwise, require exact case-insensitive executable filename equality (defeating directory-name spoofing
+///   such as `C:\evil\node.exe\malware.exe` against `node.exe`).
+pub(crate) fn exe_matches_filter(exe_path: &str, expected_exe: &str) -> bool {
+    let trimmed = expected_exe.trim();
+    if trimmed.is_empty() || exe_path.trim().is_empty() {
         return false;
     }
-    norm_exe.contains(&norm_filter)
+    if trimmed.contains('\\') || trimmed.contains('/') {
+        normalize_win_path(exe_path) == normalize_win_path(trimmed)
+    } else {
+        path_file_name_lower(exe_path) == trimmed.to_lowercase()
+    }
 }
 
 /// Open an existing GravityBox Named Pipe with `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`
 /// and minimal `FILE_READ_ATTRIBUTES` access, resolve its server PID via
-/// `GetNamedPipeServerProcessId`, verify same Windows user SID via `OpenProcessToken` +
-/// `GetTokenInformation(TokenUser)` + `EqualSid`, and optionally validate `expected_pid` and
-/// `expected_exe`.
+/// `GetNamedPipeServerProcessId`, acquire the server process handle BEFORE releasing the pipe
+/// handle (eliminating the PID-reuse micro-TOCTOU window), verify same Windows user SID via
+/// `OpenProcessToken` + `GetTokenInformation(TokenUser)` + `EqualSid`, and optionally validate
+/// `expected_pid` and `expected_exe`.
 pub fn verify_pipe_server(
     pipe_name: &str,
     expected_pid: Option<u32>,
@@ -252,29 +174,25 @@ pub fn verify_pipe_server(
         return Err(HelperError::win32("GetNamedPipeServerProcessId", err));
     }
 
-    // Drop the pipe handle immediately once server PID is resolved.
+    // Open the server process handle while still holding the live pipe handle to eliminate the
+    // micro-TOCTOU window where the server exits and its PID is recycled before OpenProcess.
+    let server_proc = OwnedHandle::new(unsafe {
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, server_pid)
+    });
+
+    // Release the pipe handle immediately after acquiring the server process handle.
     drop(pipe_handle);
 
-    let self_user = TokenUserBuffer::from_process(unsafe { GetCurrentProcess() })
+    let self_user = TokenUserBuffer::from_current_process()
         .map_err(|err| HelperError::win32("GetTokenInformation(self)", err))?;
     let self_sid = self_user
         .sid_ptr()
         .ok_or_else(|| HelperError::new("WIN32_ERROR", "failed to resolve current user SID"))?;
 
-    let server_proc = OwnedHandle::new(unsafe {
-        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, server_pid)
-    });
-
     let (exe_path, same_user_sid) = match server_proc {
         Some(proc_handle) => {
             let exe = query_process_exe_path(proc_handle.as_raw()).unwrap_or_default();
-            let same_sid = match TokenUserBuffer::from_process(proc_handle.as_raw()) {
-                Ok(server_user) => match server_user.sid_ptr() {
-                    Some(server_sid) => unsafe { EqualSid(self_sid, server_sid) != 0 },
-                    None => false,
-                },
-                Err(_) => false,
-            };
+            let same_sid = process_has_same_user_sid(proc_handle.as_raw(), self_sid);
             (exe, same_sid)
         }
         None => (String::new(), false),
@@ -385,13 +303,60 @@ mod tests {
     }
 
     #[test]
+    fn exe_matches_filter_prevents_directory_name_spoofing() {
+        // Exact filename match (case-insensitive)
+        assert!(exe_matches_filter(
+            r"C:\Program Files\nodejs\node.exe",
+            "node.exe"
+        ));
+        assert!(exe_matches_filter(
+            r"C:\Program Files\nodejs\node.exe",
+            "NODE.EXE"
+        ));
+        // Directory-name spoofing MUST be rejected
+        assert!(!exe_matches_filter(
+            r"C:\evil\node.exe\malware.exe",
+            "node.exe"
+        ));
+        // Substring / partial filename MUST be rejected
+        assert!(!exe_matches_filter(
+            r"C:\Program Files\nodejs\node.exe",
+            "node"
+        ));
+        assert!(!exe_matches_filter(
+            r"C:\Program Files\nodejs\fake-node.exe",
+            "node.exe"
+        ));
+        // Full-path filter requires exact normalized path equality
+        assert!(exe_matches_filter(
+            r"C:\Program Files\nodejs\node.exe",
+            r"C:/Program Files/nodejs/node.exe"
+        ));
+        assert!(!exe_matches_filter(
+            r"C:\evil\Program Files\nodejs\node.exe",
+            r"C:\Program Files\nodejs\node.exe"
+        ));
+        assert!(!exe_matches_filter(
+            r"C:\Program Files\nodejs\node.exe",
+            r"nodejs\node.exe"
+        ));
+    }
+
+    #[test]
     fn verifies_in_process_named_pipe_server_identity() {
         let self_pid = std::process::id();
+        let current_exe = std::env::current_exe().expect("current_exe");
+        let exact_exe_name = current_exe
+            .file_name()
+            .expect("exe filename")
+            .to_string_lossy()
+            .to_string();
+        let exact_exe_full = current_exe.to_string_lossy().to_string();
 
-        // 1. Matching current process PID and exe name
+        // 1. Matching current process PID and exact executable filename
         let pipe_ok = unique_test_pipe_name("self-ok");
         let _server_ok = create_test_pipe(&pipe_ok);
-        let ok_res = verify_pipe_server(&pipe_ok, Some(self_pid), Some("gravitybox_win_helper"))
+        let ok_res = verify_pipe_server(&pipe_ok, Some(self_pid), Some(&exact_exe_name))
             .expect("verify_pipe_server match");
         assert!(ok_res.ok);
         assert!(ok_res.verified);
@@ -401,7 +366,16 @@ mod tests {
         assert!(!ok_res.exe_path.is_empty());
         assert!(ok_res.reason.is_none());
 
-        // 2. Mismatched expected PID
+        // 2. Matching exact full executable path
+        let pipe_full = unique_test_pipe_name("self-full");
+        let _server_full = create_test_pipe(&pipe_full);
+        let full_res = verify_pipe_server(&pipe_full, Some(self_pid), Some(&exact_exe_full))
+            .expect("verify_pipe_server full path match");
+        assert!(full_res.ok);
+        assert!(full_res.verified);
+        assert!(full_res.same_user_sid);
+
+        // 3. Mismatched expected PID
         let pipe_pid = unique_test_pipe_name("self-pid");
         let _server_pid = create_test_pipe(&pipe_pid);
         let wrong_pid = self_pid.saturating_add(1);
@@ -413,11 +387,11 @@ mod tests {
         assert_eq!(pid_mismatch.server_pid, Some(self_pid));
         assert_eq!(pid_mismatch.reason.as_deref(), Some("pid_mismatch"));
 
-        // 3. Mismatched expected exe
+        // 4. Mismatched expected exe (including non-exact substring)
         let pipe_exe = unique_test_pipe_name("self-exe");
         let _server_exe = create_test_pipe(&pipe_exe);
         let exe_mismatch =
-            verify_pipe_server(&pipe_exe, Some(self_pid), Some("definitely_not_this.exe"))
+            verify_pipe_server(&pipe_exe, Some(self_pid), Some("gravitybox_win_helper"))
                 .expect("verify_pipe_server exe_mismatch");
         assert!(exe_mismatch.ok);
         assert!(!exe_mismatch.verified);

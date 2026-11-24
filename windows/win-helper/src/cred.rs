@@ -9,7 +9,7 @@ use windows_sys::Win32::Security::Credentials::{
 };
 
 use crate::error::HelperError;
-use crate::util::{read_stdin_bounded, to_wide_null, zeroize_bytes};
+use crate::util::{read_stdin_bounded, to_wide_null, zeroize_bytes, zeroize_u16};
 
 /// Windows generic credential blob maximum size is 5 * 512 = 2560 bytes (`CRED_MAX_CREDENTIAL_BLOB_SIZE`).
 const CRED_MAX_BLOB_BYTES: usize = 5 * 512;
@@ -20,6 +20,12 @@ impl Drop for CredPtrGuard {
     fn drop(&mut self) {
         if !self.0.is_null() {
             unsafe {
+                let cred = &*self.0;
+                let blob_len = cred.CredentialBlobSize as usize;
+                if blob_len > 0 && !cred.CredentialBlob.is_null() {
+                    let blob_slice = std::slice::from_raw_parts_mut(cred.CredentialBlob, blob_len);
+                    zeroize_bytes(blob_slice);
+                }
                 CredFree(self.0 as *const c_void);
             }
         }
@@ -92,10 +98,14 @@ pub(crate) fn decode_credential_blob(bytes: &[u8]) -> Result<String, HelperError
         while units.last() == Some(&0) {
             units.pop();
         }
-        if !units.contains(&0) {
-            if let Ok(s) = String::from_utf16(&units) {
-                return Ok(s);
-            }
+        let decoded = if !units.contains(&0) {
+            String::from_utf16(&units).ok()
+        } else {
+            None
+        };
+        zeroize_u16(&mut units);
+        if let Some(s) = decoded {
+            return Ok(s);
         }
     }
 
@@ -192,9 +202,8 @@ pub fn cred_write_from_stdin() -> Result<CredWriteResponse, HelperError> {
     let mut input = parse_res
         .map_err(|_| HelperError::invalid_input("invalid JSON payload for cred-write"))?;
     let res = cred_write_raw(&input.service, &input.account, &input.value);
-    unsafe {
-        zeroize_bytes(input.value.as_bytes_mut());
-    }
+    let mut secret_bytes = std::mem::take(&mut input.value).into_bytes();
+    zeroize_bytes(&mut secret_bytes);
     res
 }
 

@@ -1,14 +1,147 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, c_void};
 use std::io::{self, Read};
+use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_INSUFFICIENT_BUFFER, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+};
+use windows_sys::Win32::Security::{
+    EqualSid, GetTokenInformation, IsValidSid, TOKEN_QUERY, TOKEN_USER, TokenUser,
+};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use crate::error::HelperError;
 
 /// Maximum bytes accepted on stdin (1 MiB) to guard against unbounded allocation.
 pub const MAX_STDIN_BYTES: usize = 1024 * 1024;
+
+/// Maximum bytes allocated for a `TOKEN_USER` query (64 KiB).
+const MAX_TOKEN_USER_BYTES: usize = 64 * 1024;
+
+/// Pointer-aligned owned buffer holding a `TOKEN_USER` structure returned by `GetTokenInformation`.
+pub struct TokenUserBuffer {
+    buf: Vec<usize>,
+    byte_len: usize,
+}
+
+impl TokenUserBuffer {
+    pub fn from_process(process_handle: HANDLE) -> Result<Self, u32> {
+        let mut token_raw: HANDLE = ptr::null_mut();
+        let ok = unsafe { OpenProcessToken(process_handle, TOKEN_QUERY, &mut token_raw) };
+        if ok == 0 {
+            return Err(unsafe { GetLastError() });
+        }
+        let token = OwnedHandle::new(token_raw).ok_or(0u32)?;
+
+        let mut needed: u32 = 0;
+        let probe_ok = unsafe {
+            GetTokenInformation(token.as_raw(), TokenUser, ptr::null_mut(), 0, &mut needed)
+        };
+        if probe_ok != 0 {
+            return Err(0);
+        }
+        let err = unsafe { GetLastError() };
+        if err != ERROR_INSUFFICIENT_BUFFER {
+            return Err(err);
+        }
+        let needed_usize = needed as usize;
+        if needed_usize < size_of::<TOKEN_USER>() || needed_usize > MAX_TOKEN_USER_BYTES {
+            return Err(ERROR_INSUFFICIENT_BUFFER);
+        }
+
+        let words = needed_usize.div_ceil(size_of::<usize>());
+        let mut buf = vec![0usize; words];
+        let alloc_bytes = buf.len() * size_of::<usize>();
+        let mut actual: u32 = 0;
+        let read_ok = unsafe {
+            GetTokenInformation(
+                token.as_raw(),
+                TokenUser,
+                buf.as_mut_ptr() as *mut c_void,
+                alloc_bytes as u32,
+                &mut actual,
+            )
+        };
+        if read_ok == 0 {
+            return Err(unsafe { GetLastError() });
+        }
+        let actual_usize = actual as usize;
+        if actual_usize < size_of::<TOKEN_USER>() || actual_usize > alloc_bytes {
+            return Err(ERROR_INSUFFICIENT_BUFFER);
+        }
+
+        Ok(Self {
+            buf,
+            byte_len: actual_usize,
+        })
+    }
+
+    pub fn from_current_process() -> Result<Self, u32> {
+        // `GetCurrentProcess()` returns a pseudo-handle that must not be closed.
+        Self::from_process(unsafe { GetCurrentProcess() })
+    }
+
+    pub fn sid_ptr(&self) -> Option<*mut c_void> {
+        if self.byte_len < size_of::<TOKEN_USER>() {
+            return None;
+        }
+        let tu = unsafe { &*(self.buf.as_ptr() as *const TOKEN_USER) };
+        let sid = tu.User.Sid;
+        if sid.is_null() {
+            return None;
+        }
+        let base = self.buf.as_ptr() as usize;
+        let end = base.checked_add(self.byte_len)?;
+        let p = sid as usize;
+        if p < base || p >= end {
+            return None;
+        }
+        if unsafe { IsValidSid(sid) } == 0 {
+            return None;
+        }
+        Some(sid)
+    }
+}
+
+/// Check whether `process_handle` belongs to the same Windows user SID as `expected_sid`.
+/// Fails closed (`false`) if the process token cannot be queried (e.g. `ERROR_ACCESS_DENIED`).
+pub fn process_has_same_user_sid(process_handle: HANDLE, expected_sid: *mut c_void) -> bool {
+    if expected_sid.is_null() {
+        return false;
+    }
+    match TokenUserBuffer::from_process(process_handle) {
+        Ok(user) => match user.sid_ptr() {
+            Some(proc_sid) => unsafe { EqualSid(expected_sid, proc_sid) != 0 },
+            None => false,
+        },
+        Err(_) => false,
+    }
+}
+
+/// Case-insensitively check whether `raw` starts with the Win32 verbatim UNC prefix `\\?\UNC\`.
+pub fn is_verbatim_unc_path(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    bytes.len() >= 8
+        && &bytes[0..4] == br"\\?\"
+        && bytes[4..7].eq_ignore_ascii_case(b"UNC")
+        && bytes[7] == b'\\'
+}
+
+/// Check whether any path segment (split on `\` or `/`) is a parent-directory traversal (`..`).
+pub fn has_parent_dir_segment(path: &str) -> bool {
+    path.split(['\\', '/']).any(|seg| seg == "..")
+}
+
+/// Check whether `path` begins with an absolute local drive prefix (`^[A-Za-z]:[\\/]`).
+pub fn has_absolute_local_drive_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
 
 /// RAII wrapper for a Win32 `HANDLE` that closes itself on drop.
 pub struct OwnedHandle(HANDLE);
@@ -90,8 +223,8 @@ pub fn read_stdin_bounded() -> Result<Vec<u8>, HelperError> {
 /// - Lowercases for Windows case-insensitive comparison
 pub fn normalize_win_path(raw: &str) -> String {
     let mut s = raw.trim().replace('/', "\\");
-    if let Some(rest) = s.strip_prefix("\\\\?\\UNC\\") {
-        s = format!("\\\\{rest}");
+    if is_verbatim_unc_path(&s) {
+        s = format!("\\\\{}", &s[8..]);
     } else if let Some(rest) = s.strip_prefix("\\\\?\\") {
         s = rest.to_string();
     }

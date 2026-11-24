@@ -13,6 +13,7 @@ use crate::error::HelperError;
 use crate::util::to_wide_null;
 
 const VS_FFI_SIGNATURE: u32 = 0xFEEF_04BD;
+const MAX_VERSION_INFO_BYTES: u32 = 16 * 1024 * 1024;
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -159,6 +160,12 @@ pub fn pe_version(path: &str) -> Result<PeVersionResponse, HelperError> {
         return Err(HelperError::new(
             "NO_VERSION_INFO",
             format!("GetFileVersionInfoSizeW failed (error {err})"),
+        ));
+    }
+    if size > MAX_VERSION_INFO_BYTES {
+        return Err(HelperError::new(
+            "VERSION_INFO_TOO_LARGE",
+            format!("PE version info size ({size} bytes) exceeds 16 MiB limit"),
         ));
     }
 

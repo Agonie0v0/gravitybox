@@ -60,6 +60,9 @@ struct TcpListenRow {
     port: u16,
 }
 
+/// Maximum buffer allocation for `GetExtendedTcpTable` (32 MiB) to guard against unbounded allocation.
+const MAX_TCP_TABLE_BYTES: usize = 32 * 1024 * 1024;
+
 fn query_extended_tcp_table_raw(af: u32) -> Result<(Vec<u32>, usize), HelperError> {
     let mut size: u32 = 0;
     let first = unsafe {
@@ -78,9 +81,21 @@ fn query_extended_tcp_table_raw(af: u32) -> Result<(Vec<u32>, usize), HelperErro
     if size == 0 {
         return Ok((Vec::new(), 0));
     }
+    if (size as usize) > MAX_TCP_TABLE_BYTES {
+        return Err(HelperError::new(
+            "WIN32_ERROR",
+            "GetExtendedTcpTable required size exceeds 32 MiB limit",
+        ));
+    }
 
     for _attempt in 0..4 {
         let alloc_bytes = (size as usize).saturating_add(1024);
+        if alloc_bytes > MAX_TCP_TABLE_BYTES {
+            return Err(HelperError::new(
+                "WIN32_ERROR",
+                "GetExtendedTcpTable allocation exceeds 32 MiB limit",
+            ));
+        }
         let words = alloc_bytes.div_ceil(4);
         let mut buf = vec![0u32; words];
         let mut buf_size = (buf.len() * 4) as u32;
@@ -95,10 +110,18 @@ fn query_extended_tcp_table_raw(af: u32) -> Result<(Vec<u32>, usize), HelperErro
             )
         };
         if ret == NO_ERROR {
-            return Ok((buf, buf_size as usize));
+            let clamped = (buf_size as usize).min(buf.len() * 4);
+            return Ok((buf, clamped));
         }
         if ret == ERROR_INSUFFICIENT_BUFFER {
-            size = buf_size.max(size.saturating_mul(2));
+            let next = buf_size.max(size.saturating_mul(2));
+            if (next as usize) > MAX_TCP_TABLE_BYTES {
+                return Err(HelperError::new(
+                    "WIN32_ERROR",
+                    "GetExtendedTcpTable required size exceeds 32 MiB limit",
+                ));
+            }
+            size = next;
             continue;
         }
         return Err(HelperError::win32("GetExtendedTcpTable", ret));
@@ -111,14 +134,15 @@ fn query_extended_tcp_table_raw(af: u32) -> Result<(Vec<u32>, usize), HelperErro
 }
 
 fn query_ipv4_listeners() -> Result<Vec<TcpListenRow>, HelperError> {
-    let (buf, byte_len) = query_extended_tcp_table_raw(AF_INET as u32)?;
+    let (buf, raw_byte_len) = query_extended_tcp_table_raw(AF_INET as u32)?;
+    let byte_len = raw_byte_len.min(buf.len() * 4);
     let table_offset = offset_of!(MIB_TCPTABLE_OWNER_PID, table);
     if byte_len < table_offset || buf.is_empty() {
         return Ok(Vec::new());
     }
 
+    let num_entries = buf[0] as usize;
     let base_ptr = buf.as_ptr() as *const u8;
-    let num_entries = unsafe { (*(base_ptr as *const MIB_TCPTABLE_OWNER_PID)).dwNumEntries } as usize;
     let max_rows = (byte_len - table_offset) / size_of::<MIB_TCPROW_OWNER_PID>();
     let count = num_entries.min(max_rows);
 
@@ -148,15 +172,15 @@ fn query_ipv4_listeners() -> Result<Vec<TcpListenRow>, HelperError> {
 }
 
 fn query_ipv6_listeners() -> Result<Vec<TcpListenRow>, HelperError> {
-    let (buf, byte_len) = query_extended_tcp_table_raw(AF_INET6 as u32)?;
+    let (buf, raw_byte_len) = query_extended_tcp_table_raw(AF_INET6 as u32)?;
+    let byte_len = raw_byte_len.min(buf.len() * 4);
     let table_offset = offset_of!(MIB_TCP6TABLE_OWNER_PID, table);
     if byte_len < table_offset || buf.is_empty() {
         return Ok(Vec::new());
     }
 
+    let num_entries = buf[0] as usize;
     let base_ptr = buf.as_ptr() as *const u8;
-    let num_entries =
-        unsafe { (*(base_ptr as *const MIB_TCP6TABLE_OWNER_PID)).dwNumEntries } as usize;
     let max_rows = (byte_len - table_offset) / size_of::<MIB_TCP6ROW_OWNER_PID>();
     let count = num_entries.min(max_rows);
 
@@ -312,6 +336,12 @@ pub fn port_owner(port: u16) -> Result<PortOwnerResponse, HelperError> {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn tcp_table_num_entries_is_at_offset_zero() {
+        assert_eq!(offset_of!(MIB_TCPTABLE_OWNER_PID, dwNumEntries), 0);
+        assert_eq!(offset_of!(MIB_TCP6TABLE_OWNER_PID, dwNumEntries), 0);
+    }
 
     #[test]
     fn port_owner_detects_local_ephemeral_listener() {

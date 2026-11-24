@@ -1,3 +1,6 @@
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("gravitybox-win-helper requires a 64-bit Windows target");
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::c_void;
 use std::mem::{MaybeUninit, size_of};
@@ -27,7 +30,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::error::HelperError;
 use crate::util::{
-    OwnedHandle, from_wide_null, path_matches_prefix, zeroize_bytes, zeroize_u16,
+    OwnedHandle, TokenUserBuffer, from_wide_null, has_absolute_local_drive_prefix,
+    has_parent_dir_segment, is_verbatim_unc_path, normalize_win_path, path_matches_prefix,
+    process_has_same_user_sid, zeroize_bytes, zeroize_u16,
 };
 
 /// Upper bound when reading remote process CommandLine (64 KiB).
@@ -212,7 +217,7 @@ fn read_remote_bytes(handle: HANDLE, addr: u64, dst: &mut [u8]) -> Option<usize>
     if ok == 0 || read_len == 0 {
         None
     } else {
-        Some(read_len)
+        Some(read_len.min(dst.len()))
     }
 }
 
@@ -648,7 +653,82 @@ struct MatchedProcess {
     parent_pid: u32,
 }
 
-fn find_matching_processes(prefixes: &[String]) -> Result<Vec<MatchedProcess>, HelperError> {
+fn is_drive_root_normalized(norm: &str) -> bool {
+    let bytes = norm.as_bytes();
+    bytes.len() <= 3 && bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
+/// Strictly validate a `--prefix` passed to `app-graceful-close`:
+/// - Rejects empty/whitespace, NUL, wildcards (`*`/`?`), relative paths, `..` traversal segments,
+///   UNC/device paths (including case-insensitive `\\?\UNC\`), drive roots (`C:\`), and
+///   `%SystemRoot%` / `WINDIR` / `C:\Windows` and all of their subdirectories.
+pub(crate) fn validate_close_prefix(prefix: &str) -> Result<String, HelperError> {
+    if prefix.trim().is_empty() {
+        return Err(HelperError::invalid_args(
+            "app-graceful-close --prefix must be non-empty",
+        ));
+    }
+    if prefix.contains('\0') {
+        return Err(HelperError::invalid_args(
+            "app-graceful-close --prefix must not contain NUL characters",
+        ));
+    }
+    if is_verbatim_unc_path(prefix) {
+        return Err(HelperError::invalid_args(
+            "app-graceful-close --prefix must not be a UNC path",
+        ));
+    }
+
+    let cleaned = prefix.strip_prefix(r"\\?\").unwrap_or(prefix);
+    if cleaned.contains('*') || cleaned.contains('?') {
+        return Err(HelperError::invalid_args(
+            "app-graceful-close --prefix must not contain wildcard characters ('*' or '?')",
+        ));
+    }
+    if cleaned.starts_with(r"\\") || cleaned.starts_with("//") {
+        return Err(HelperError::invalid_args(
+            "app-graceful-close --prefix must not be a UNC or device path",
+        ));
+    }
+    if !has_absolute_local_drive_prefix(cleaned) {
+        return Err(HelperError::invalid_args(
+            "app-graceful-close --prefix must be an absolute local drive path (e.g. C:\\...)",
+        ));
+    }
+    if has_parent_dir_segment(cleaned) {
+        return Err(HelperError::invalid_args(
+            "app-graceful-close --prefix must not contain '..' parent directory segments",
+        ));
+    }
+
+    let normalized = normalize_win_path(cleaned);
+    if normalized.is_empty() || is_drive_root_normalized(&normalized) {
+        return Err(HelperError::invalid_args(
+            "app-graceful-close --prefix must not target a drive root",
+        ));
+    }
+
+    let protected_roots = [
+        std::env::var("SystemRoot").ok(),
+        std::env::var("WINDIR").ok(),
+        Some(r"C:\Windows".to_string()),
+    ];
+    for root in protected_roots.into_iter().flatten() {
+        let trimmed = root.trim();
+        if !trimmed.is_empty() && path_matches_prefix(&normalized, trimmed) {
+            return Err(HelperError::invalid_args(
+                "app-graceful-close --prefix must not target the Windows system directory",
+            ));
+        }
+    }
+
+    Ok(normalized)
+}
+
+fn find_matching_processes(
+    prefixes: &[String],
+    self_sid: *mut c_void,
+) -> Result<Vec<MatchedProcess>, HelperError> {
     let self_pid = std::process::id();
     let entries = snapshot_processes()?;
     let mut matched = Vec::new();
@@ -659,7 +739,16 @@ fn find_matching_processes(prefixes: &[String]) -> Result<Vec<MatchedProcess>, H
         if pid == 0 || pid == self_pid || !seen.insert(pid) {
             continue;
         }
-        let Some(exe_path) = query_pid_exe_path(pid) else {
+        let Some(handle) =
+            OwnedHandle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) })
+        else {
+            continue;
+        };
+        // Strictly restrict graceful close to processes owned by the current Windows user SID.
+        if !process_has_same_user_sid(handle.as_raw(), self_sid) {
+            continue;
+        }
+        let Some(exe_path) = query_process_exe_path(handle.as_raw()) else {
             continue;
         };
         if prefixes.iter().any(|p| path_matches_prefix(&exe_path, p)) {
@@ -777,9 +866,10 @@ fn post_wm_close_all(targets: &[HWND]) {
     }
 }
 
-/// Terminate a single PID after re-verifying its live executable image path against `prefixes`.
-/// Prevents PID-reuse TOCTOU races and never terminates self.
-fn terminate_matching_pid(pid: u32, prefixes: &[String]) {
+/// Terminate a single PID after re-verifying both same Windows user SID and live executable
+/// image path against `prefixes`. Prevents PID-reuse TOCTOU races, cross-user termination, and
+/// self-termination.
+fn terminate_matching_pid(pid: u32, prefixes: &[String], self_sid: *mut c_void) {
     let self_pid = std::process::id();
     if pid == 0 || pid == self_pid {
         return;
@@ -789,6 +879,9 @@ fn terminate_matching_pid(pid: u32, prefixes: &[String]) {
     }) else {
         return;
     };
+    if !process_has_same_user_sid(handle.as_raw(), self_sid) {
+        return;
+    }
     let Some(exe_path) = query_process_exe_path(handle.as_raw()) else {
         return;
     };
@@ -802,11 +895,12 @@ fn terminate_matching_pid(pid: u32, prefixes: &[String]) {
 
 fn wait_without_force_kill(
     prefixes: &[String],
+    self_sid: *mut c_void,
     deadline: Instant,
     non_visible_reason: &str,
 ) -> Result<GracefulCloseResponse, HelperError> {
     loop {
-        let matched = find_matching_processes(prefixes)?;
+        let matched = find_matching_processes(prefixes, self_sid)?;
         if matched.is_empty() {
             return Ok(GracefulCloseResponse {
                 ok: true,
@@ -835,7 +929,8 @@ fn wait_without_force_kill(
     }
 }
 
-/// Progressive 3-stage safe shutdown for processes under `prefixes`:
+/// Progressive 3-stage safe shutdown for processes under `prefixes` (strictly scoped to the
+/// current Windows user SID and validated non-system local prefixes):
 /// - Stage 1: Send `WM_CLOSE` to visible top-level windows (retrying once after 1.5s if no owned
 ///   modal dialog is open). NEVER force-kills while any visible top-level window remains open.
 /// - Stage 2: Once 0 visible top-level windows are continuously confirmed for 1200ms, send
@@ -849,13 +944,23 @@ pub fn app_graceful_close(
     prefixes: &[String],
     opts: GracefulCloseOptions,
 ) -> Result<GracefulCloseResponse, HelperError> {
-    if prefixes.is_empty() || prefixes.iter().any(|p| p.trim().is_empty()) {
+    if prefixes.is_empty() {
         return Err(HelperError::invalid_args(
             "app-graceful-close requires at least one non-empty --prefix",
         ));
     }
+    let validated_prefixes: Vec<String> = prefixes
+        .iter()
+        .map(|p| validate_close_prefix(p))
+        .collect::<Result<Vec<_>, _>>()?;
 
-    let initial = find_matching_processes(prefixes)?;
+    let self_user = TokenUserBuffer::from_current_process()
+        .map_err(|err| HelperError::win32("GetTokenInformation(self)", err))?;
+    let self_sid = self_user
+        .sid_ptr()
+        .ok_or_else(|| HelperError::new("WIN32_ERROR", "failed to resolve current user SID"))?;
+
+    let initial = find_matching_processes(&validated_prefixes, self_sid)?;
     if initial.is_empty() {
         return Ok(GracefulCloseResponse {
             ok: true,
@@ -880,7 +985,7 @@ pub fn app_graceful_close(
     };
 
     loop {
-        let matched = find_matching_processes(prefixes)?;
+        let matched = find_matching_processes(&validated_prefixes, self_sid)?;
         if matched.is_empty() {
             return Ok(GracefulCloseResponse {
                 ok: true,
@@ -954,7 +1059,7 @@ pub fn app_graceful_close(
     }
 
     // Stage 2: 0 visible top-level windows confirmed for 1200ms -> send WM_CLOSE to hidden/tray windows.
-    let stage2_matched = find_matching_processes(prefixes)?;
+    let stage2_matched = find_matching_processes(&validated_prefixes, self_sid)?;
     if stage2_matched.is_empty() {
         return Ok(GracefulCloseResponse {
             ok: true,
@@ -970,7 +1075,7 @@ pub fn app_graceful_close(
         } else {
             "background_resident"
         };
-        return wait_without_force_kill(prefixes, stage1_deadline, non_visible);
+        return wait_without_force_kill(&validated_prefixes, self_sid, stage1_deadline, non_visible);
     }
     post_wm_close_all(stage2_windows.hidden_close_targets());
 
@@ -982,7 +1087,7 @@ pub fn app_graceful_close(
     };
 
     loop {
-        let matched = find_matching_processes(prefixes)?;
+        let matched = find_matching_processes(&validated_prefixes, self_sid)?;
         if matched.is_empty() {
             return Ok(GracefulCloseResponse {
                 ok: true,
@@ -999,7 +1104,12 @@ pub fn app_graceful_close(
             } else {
                 "background_resident"
             };
-            return wait_without_force_kill(prefixes, stage1_deadline, non_visible);
+            return wait_without_force_kill(
+                &validated_prefixes,
+                self_sid,
+                stage1_deadline,
+                non_visible,
+            );
         }
         let now = Instant::now();
         if now >= stage2_deadline {
@@ -1014,7 +1124,7 @@ pub fn app_graceful_close(
     // Default mode hard guard: NEVER call TerminateProcess without explicit user confirmation.
     // Report remaining windowless/tray processes as `background_resident` so the caller/UI can prompt.
     if !opts.confirm_background_exit {
-        let matched = find_matching_processes(prefixes)?;
+        let matched = find_matching_processes(&validated_prefixes, self_sid)?;
         if matched.is_empty() {
             return Ok(GracefulCloseResponse {
                 ok: true,
@@ -1038,7 +1148,7 @@ pub fn app_graceful_close(
     }
 
     // Stage 3a: Re-confirm 0 visible top-level windows, then terminate root processes first.
-    let stage3_matched = find_matching_processes(prefixes)?;
+    let stage3_matched = find_matching_processes(&validated_prefixes, self_sid)?;
     if stage3_matched.is_empty() {
         return Ok(GracefulCloseResponse {
             ok: true,
@@ -1058,12 +1168,12 @@ pub fn app_graceful_close(
     }
 
     for root_pid in select_root_pids(&stage3_matched) {
-        terminate_matching_pid(root_pid, prefixes);
+        terminate_matching_pid(root_pid, &validated_prefixes, self_sid);
     }
 
     let root_wait_deadline = Instant::now() + STAGE3_ROOT_WAIT_DURATION;
     loop {
-        let remaining = find_matching_processes(prefixes)?;
+        let remaining = find_matching_processes(&validated_prefixes, self_sid)?;
         if remaining.is_empty() {
             return Ok(GracefulCloseResponse {
                 ok: true,
@@ -1092,7 +1202,7 @@ pub fn app_graceful_close(
     }
 
     // Stage 3b: Re-confirm 0 visible top-level windows, then terminate any remaining windowless processes.
-    let remaining = find_matching_processes(prefixes)?;
+    let remaining = find_matching_processes(&validated_prefixes, self_sid)?;
     if remaining.is_empty() {
         return Ok(GracefulCloseResponse {
             ok: true,
@@ -1112,12 +1222,12 @@ pub fn app_graceful_close(
     }
 
     for proc_item in &remaining {
-        terminate_matching_pid(proc_item.pid, prefixes);
+        terminate_matching_pid(proc_item.pid, &validated_prefixes, self_sid);
     }
 
     let rem_wait_deadline = Instant::now() + STAGE3_REMAINING_WAIT_DURATION;
     loop {
-        let still = find_matching_processes(prefixes)?;
+        let still = find_matching_processes(&validated_prefixes, self_sid)?;
         if still.is_empty() {
             return Ok(GracefulCloseResponse {
                 ok: true,
@@ -1149,13 +1259,79 @@ mod tests {
 
     #[test]
     fn x64_peb_and_rtl_params_offsets_match_windows_abi() {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(target_pointer_width = "64")]
         {
             assert_eq!(offset_of!(PEB, ProcessParameters), 0x20);
             assert_eq!(offset_of!(RtlUserProcessParametersHead, command_line), 0x70);
             assert_eq!(offset_of!(RtlUserProcessParametersHead, environment), 0x80);
             assert_eq!(size_of::<RtlUserProcessParametersHead>(), 0x88);
         }
+    }
+
+    #[test]
+    fn validate_close_prefix_rejects_dangerous_inputs() {
+        for bad in [
+            "",
+            "   ",
+            "C:\\Apps\\bad\0dir",
+            r"C:\Apps\*",
+            r"C:\Apps\App?",
+            "Antigravity",
+            r".\Antigravity",
+            r"..\Antigravity",
+            r"C:Antigravity",
+            r"\Program Files\Antigravity",
+            r"C:\Program Files\..\Windows\System32",
+            r"C:\Apps\a\..\b",
+            r"C:\Apps\..",
+            r"\\server\share\Antigravity",
+            r"\\?\UNC\server\share\Antigravity",
+            r"\\?\uNc\server\share\Antigravity",
+            r"\\.\pipe\gravitybox-test",
+            r"C:\",
+            r"C:/",
+            r"D:\\\",
+            r"C:\Windows",
+            r"C:\Windows\",
+            r"c:/windows/system32",
+            r"C:\Windows\System32\cmd.exe",
+        ] {
+            let err = validate_close_prefix(bad).unwrap_err();
+            assert_eq!(err.code, "INVALID_ARGS", "expected INVALID_ARGS for {bad}");
+            let close_err = app_graceful_close(&[bad.to_string()], GracefulCloseOptions::default())
+                .unwrap_err();
+            assert_eq!(close_err.code, "INVALID_ARGS");
+        }
+
+        if let Ok(sys_root) = std::env::var("SystemRoot") {
+            assert_eq!(
+                validate_close_prefix(&sys_root).unwrap_err().code,
+                "INVALID_ARGS"
+            );
+            assert_eq!(
+                validate_close_prefix(&format!(r"{sys_root}\System32"))
+                    .unwrap_err()
+                    .code,
+                "INVALID_ARGS"
+            );
+        }
+
+        // Valid local application directories must pass
+        assert!(validate_close_prefix(r"C:\Program Files\Antigravity").is_ok());
+        assert!(
+            validate_close_prefix(r"C:\Users\demo\AppData\Local\Programs\Antigravity").is_ok()
+        );
+    }
+
+    #[test]
+    fn same_user_sid_matches_current_process() {
+        let self_user = TokenUserBuffer::from_current_process().expect("current user SID");
+        let self_sid = self_user.sid_ptr().expect("sid_ptr");
+        let self_handle = OwnedHandle::new(unsafe {
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, std::process::id())
+        })
+        .expect("OpenProcess self");
+        assert!(process_has_same_user_sid(self_handle.as_raw(), self_sid));
     }
 
     #[test]

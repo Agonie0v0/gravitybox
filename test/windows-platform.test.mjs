@@ -39,6 +39,7 @@ import {
   resolveIpcEndpoint,
   resolveWin32HelperPath,
   safeOpenFlagsNoFollow,
+  trashMove,
   validateIpcEndpointForClient,
   verifyIpcAuthToken,
   verifyPipeServer,
@@ -880,7 +881,7 @@ test('win32-helper: verifyPipeServer 原生 SID/PID 鉴权与 resolveClientIpcTa
   t.after(() => new Promise((res) => srv.close(() => res())));
   await writeIpcSession(stateDir, session);
 
-  // 1. 真实 Node Named Pipe 服务端：同用户 SID + PID + exe 匹配通过
+  // 1. 真实 Node Named Pipe 服务端：同用户 SID + PID + 精确文件名 / 精确完整路径匹配通过
   const okRes = await verifyPipeServer(session.pipeName, {
     expectedPid: process.pid,
     expectedExe: 'node.exe',
@@ -892,6 +893,24 @@ test('win32-helper: verifyPipeServer 原生 SID/PID 鉴权与 resolveClientIpcTa
   assert.equal(okRes.pipeName, session.pipeName);
   assert.equal(okRes.reason, null);
   assert.match(okRes.exePath.toLowerCase(), /node\.exe$/);
+
+  const okFullPathRes = await verifyPipeServer(session.pipeName, {
+    expectedPid: process.pid,
+    expectedExe: process.execPath,
+    helperPath,
+  });
+  assert.equal(okFullPathRes.verified, true);
+  assert.equal(okFullPathRes.reason, null);
+
+  // 1b. 子串匹配（非精确文件名）必须被拒绝，防止目录名/部分名称伪造
+  const substrExeRes = await verifyPipeServer(session.pipeName, {
+    expectedPid: process.pid,
+    expectedExe: 'node',
+    helperPath,
+  });
+  assert.equal(substrExeRes.verified, false);
+  assert.equal(substrExeRes.sameUserSid, true);
+  assert.equal(substrExeRes.reason, 'exe_mismatch');
 
   // 2. 错 expectedPid 必须返回 pid_mismatch
   const wrongPidRes = await verifyPipeServer(session.pipeName, {
@@ -967,6 +986,22 @@ test('win32-helper: appGracefulClose 默认零 TerminateProcess 返回 backgroun
   });
 
   assert.ok(child.pid && child.pid > 0, '隔离无窗口哑进程必须成功启动');
+
+  // 0. 危险 --prefix（盘符根 / SystemRoot / 相对路径 / 路径穿越 / UNC）及危险 trashMove 路径必须直接拒绝
+  for (const badPrefix of ['C:\\', 'C:\\Windows', 'C:\\Windows\\System32', 'relative\\app', 'C:\\Users\\demo\\..\\Windows', '\\\\?\\uNc\\server\\share\\app']) {
+    await assert.rejects(
+      () => appGracefulClose(badPrefix, { closeTimeoutMs: 500, helperPath }),
+      (err) => err instanceof Win32HelperError && err.code === 'INVALID_ARGS',
+      `危险 --prefix 必须被拒绝: ${badPrefix}`,
+    );
+  }
+  for (const badTrash of ['relative\\file.txt', 'C:\\Users\\demo\\..\\evil.txt', '\\\\?\\uNc\\server\\share\\file.txt']) {
+    await assert.rejects(
+      () => trashMove([badTrash], { helperPath }),
+      (err) => err instanceof Win32HelperError && err.code === 'INVALID_INPUT',
+      `危险 trashMove 输入必须被拒绝: ${badTrash}`,
+    );
+  }
 
   // 1. 默认模式严禁强杀：必须返回 closed: false, reason: background_resident，且进程仍存活
   const defaultRes = await appGracefulClose(dummyDir, {

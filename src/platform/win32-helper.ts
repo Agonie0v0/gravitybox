@@ -52,10 +52,6 @@ export interface Win32GracefulCloseOptions extends Win32HelperOptions {
    * Default `false`: strictly graceful WM_CLOSE only, zero TerminateProcess.
    */
   confirmBackgroundExit?: boolean;
-  /**
-   * @deprecated Use `confirmBackgroundExit` instead (kept for backwards compatibility).
-   */
-  terminateBackground?: boolean;
   graceMs?: number;
 }
 
@@ -453,16 +449,15 @@ export async function appProcesses(
  * 2. Once no visible windows remain, send WM_CLOSE to hidden/tray top-level windows and wait `graceMs`.
  *    In default mode (`confirmBackgroundExit !== true`), zero `TerminateProcess` calls are ever made;
  *    any remaining headless/tray processes return `{ closed: false, reason: 'background_resident' }`.
- * 3. Only when `confirmBackgroundExit` (or legacy alias `terminateBackground`) is explicitly `true`
- *    and 0 visible windows are re-confirmed, terminate remaining headless/background processes under `prefix`.
+ * 3. Only when `confirmBackgroundExit` is explicitly `true` and 0 visible windows are re-confirmed,
+ *    terminate remaining headless/background processes under `prefix` (same user SID only).
  */
 export async function appGracefulClose(
   prefix: string,
   options?: Win32GracefulCloseOptions,
 ): Promise<Win32GracefulCloseResult> {
   const closeTimeoutMs = Math.max(200, Math.floor(options?.closeTimeoutMs ?? 8_000));
-  const confirmBackgroundExit =
-    options?.confirmBackgroundExit === true || options?.terminateBackground === true;
+  const confirmBackgroundExit = options?.confirmBackgroundExit === true;
   const args = ['app-graceful-close', '--prefix', prefix, '--timeout-ms', String(closeTimeoutMs)];
   if (confirmBackgroundExit) {
     args.push('--confirm-background-exit');

@@ -43,10 +43,12 @@ jobs:
         run: npm run check:privacy
 
       - name: Run Win32 helper Rust tests
-        run: cargo test --manifest-path windows/win-helper/Cargo.toml
+        working-directory: windows/win-helper
+        run: cargo test
 
       - name: Build Win32 helper release binary
-        run: cargo build --release --manifest-path windows/win-helper/Cargo.toml
+        working-directory: windows/win-helper
+        run: cargo build --release
 
       - name: Run unit & integration tests
         run: npm run test:unit
