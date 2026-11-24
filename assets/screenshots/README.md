@@ -2,7 +2,7 @@
 
 This directory contains all **60 high-DPI (2x Retina) screenshots** referenced by [`README.md`](../../README.md) (English default) and [`README.zh-CN.md`](../../README.zh-CN.md) (Simplified Chinese), captured from the verified macOS Swift 6 / AppKit edition and In-IDE Telemetry HUD with automatic Light and Dark appearance pairs.
 
-> Community preview screenshots for the Windows x64 (`Tauri 2 / React`) edition introduced in `v1.2.1` will be added after community real-machine acceptance.
+> UI screenshots for the Windows x64 (`Tauri 2 / React`) edition introduced in `v1.2.1` (real-machine verified by `@Agonie0v0`) will be added in a follow-up update.
 
 ## Privacy Sanitization
 

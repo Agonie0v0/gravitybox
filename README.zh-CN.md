@@ -6,7 +6,7 @@
   <h1>GravityBox</h1>
 
   <p>
-    <strong>面向 Google Antigravity 的跨平台增强伴侣（macOS Apple Silicon 原生主线 · Windows x64 社区实验端）</strong><br />
+    <strong>面向 Google Antigravity 的跨平台增强伴侣（macOS Apple Silicon 原生主线 · Windows x64 社区共建端）</strong><br />
     零改包双语适配 · 输入框 Telemetry HUD · 双周期配额账单 · 多账号安全切换 · 可撤回缓存瘦身
   </p>
 
@@ -15,7 +15,7 @@
     <a href="https://github.com/Enzoo404/gravitybox/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Enzoo404/gravitybox/ci.yml?branch=main&style=flat-square&logo=github&label=macOS%20CI" alt="macOS CI Status"></a>
     <a href="https://github.com/Enzoo404/gravitybox/actions/workflows/ci-windows.yml"><img src="https://img.shields.io/github/actions/workflow/status/Enzoo404/gravitybox/ci-windows.yml?branch=main&style=flat-square&logo=github&label=Windows%20CI" alt="Windows CI Status"></a>
     <img src="https://img.shields.io/badge/macOS-14%2B%20%C2%B7%20Apple%20Silicon-111827?style=flat-square&logo=apple&logoColor=white" alt="macOS 14+ Apple Silicon">
-    <img src="https://img.shields.io/badge/Windows-10%2F11%20%C2%B7%20x64%20Preview-0078D4?style=flat-square&logo=windows&logoColor=white" alt="Windows 10/11 x64 Preview">
+    <img src="https://img.shields.io/badge/Windows-10%2F11%20%C2%B7%20x64%20Community-0078D4?style=flat-square&logo=windows&logoColor=white" alt="Windows 10/11 x64 Community">
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="MIT License"></a>
   </p>
 
@@ -49,7 +49,7 @@
 
 ## 概览
 
-**GravityBox**（`GravityBox v1.2.1`）是一款专为 **Google Antigravity** 官方正式版打造的轻量级、零侵入、重隐私伴侣工具箱，覆盖 **macOS（原生主线，作者主导并实机验收）** 与 **Windows x64（`v1.2.1` 起由社区共建合入的同仓实验端：`#17` 提议致谢 `@dysonkai`，`#27`、`#30`、`#32` 实现致谢 `@Agonie0v0`，待社区真机验收）**。双端共享同一套内置 Node 22 核心引擎，全程通过本机回环 CDP 与只读 SQLite 事务工作，绝不解包、篡改或重签名官方应用包。
+**GravityBox**（`GravityBox v1.2.1`）是一款专为 **Google Antigravity** 官方正式版打造的轻量级、零侵入、重隐私伴侣工具箱，覆盖 **macOS（原生主线，作者主导并实机验收）** 与 **Windows x64（`v1.2.1` 起由社区共建合入：`#27`、`#30`、`#32` 致谢 `@Agonie0v0` 贡献实现并完成真机验收，随 `v1.2.1` 同步分发）**。双端共享同一套内置 Node 22 核心引擎，全程通过本机回环 CDP 与只读 SQLite 事务工作，绝不解包、篡改或重签名官方应用包。
 
 | 核心能力 | 解决什么问题 |
 | :--- | :--- |
@@ -68,7 +68,7 @@
 | 目标平台 | 前端与系统助手 | IPC 与凭据机制 | 分发产物与验收状态 |
 | :--- | :--- | :--- | :--- |
 | **macOS 14+ (Apple Silicon `arm64`)** | 原生 **Swift 6 / AppKit** 五页主控制台与 `MenuFloatingPanel`（`native/`） | Unix Domain Socket IPC · macOS 钥匙串与 `0600` 本地文件 | **原生主线（作者已实机验收）**：通过 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 直接下载预构建 `GravityBox-<version>-arm64.dmg` |
-| **Windows 10/11 (x64)** | **Tauri 2 / React 19** 五页控制台与系统托盘面板（`windows/app/`）+ 静态链接 Rust Win32 助手（`windows/win-helper/`） | 每启动随机 Named Pipe（256-bit `authToken`、同用户 SID 与完整性校验）· Windows Credential Manager（2560 字节容量边界与内存清零） | **社区实验端（`v1.2.1`）**：由维护者/CI 统一产出预构建自包含 `-setup.exe` 与便携 `.zip`（**普通用户无需自行构建**）；**待社区真机验收后**随 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases) 直接提供下载 |
+| **Windows 10/11 (x64)** | **Tauri 2 / React 19** 五页控制台与系统托盘面板（`windows/app/`）+ 静态链接 Rust Win32 助手（`windows/win-helper/`） | 每启动随机 Named Pipe（256-bit `authToken`、同用户 SID 与完整性校验）· Windows Credential Manager（2560 字节容量边界与内存清零） | **社区共建端（`@Agonie0v0` 已完成真机验收）**：通过 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 随 `v1.2.1` 同步提供预构建自包含 `-setup.exe` 与便携 `.zip`（**普通用户无需自行构建**） |
 
 ---
 
@@ -83,9 +83,9 @@
 2. **启动并连接**：打开 **GravityBox**，通过侧栏或菜单栏点击 **「打开 Antigravity」**，或在 **设置 → 启动时自动打开 Antigravity** 开启后，打开 GravityBox 自动驻留菜单栏并拉起带调试端口的 Antigravity。若 `2.33.0+` 客户端是从外部直接启动且未开启调试端口，面板会弹出「未开启调试端口」横幅，点击 **「安全重启以连接」** 即可直接优雅重启并挂载（不在后台强杀进程）。
 3. **日常协作**：写代码时直接看输入框下方 **HUD**；查额度/快速切号直接唤起 **菜单栏浮窗**（支持 `⌘1/2/3` 快捷键与全屏跨空间展示）；深度分析与整理打开 **主控制台**（总览 · 账号 · 用量 · 设置 · 关于）。
 
-### Windows x64（社区实验端）
+### Windows x64（社区共建端）
 
-1. **直接下载（无需自行打包构建）**：Windows 端由维护者/CI 统一构建开箱即用的自包含产物——`GravityBox-<version>-win-x64-setup.exe`（用户级安装程序，默认安装到 `%LOCALAPPDATA%\Programs\GravityBox`，无需管理员权限）或 `GravityBox-<version>-win-x64.zip`（便携包，解压即用），已内置 Node 22 与 Win32 助手，**普通用户无需自己运行编译或打包命令**。*（待 `v1.2.1` 完成社区真机验收后，预构建包将直接发布在 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases)；参与内测或开发者也可获取预览构建产物或按下方构建指南本地打包。）*
+1. **直接下载（无需自行打包构建）**：前往 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 直接下载开箱即用的自包含产物——`GravityBox-<version>-win-x64-setup.exe`（用户级安装程序，默认安装到 `%LOCALAPPDATA%\Programs\GravityBox`，无需管理员权限）或 `GravityBox-<version>-win-x64.zip`（便携包，解压即用），已内置 Node 22 与 Win32 助手，**普通用户无需自己运行编译或打包命令**。*（已由 `@Agonie0v0` 完成 Windows 真机验收，随 `v1.2.1` 同步分发。）*
 2. **启动并连接**：运行 `GravityBox.exe`（需 Windows 10/11 x64 及系统 WebView2 运行时）。通过侧栏或系统托盘菜单点击 **「打开 Antigravity」**，或开启 **设置 → 启动时自动打开 Antigravity**。若外部启动的 Antigravity 未开启调试端口，点击横幅 **「安全重启以连接」** 即可优雅重启（严格遵守 Windows UIPI 与同用户 SID 边界，绝不静默调用 `TerminateProcess` 强杀官方编辑器）。
 3. **日常协作**：在 Antigravity 内直接查看 **HUD**；点击 **系统托盘浮窗** 快速浏览额度、用量与切换账号；打开 **主控制台**（总览 · 账号 · 用量 · 设置 · 关于）进行多账号与账单管理。
 
@@ -160,7 +160,7 @@ HUD 挂载于每个 Antigravity 对话输入框下方（含 `2.34.0+` 的 BTW �
 
 ## 界面与核心机制
 
-> *以下截图摄于已实机验收的 macOS 原生端（Swift 6 / AppKit）。Windows x64 端（Tauri 2 / React）已同步实现功能对等的五页主控制台（总览 · 账号 · 用量 · 设置 · 关于）与系统托盘面板，待社区真机验收后补充 Windows 实机截图。*
+> *以下截图摄于已实机验收的 macOS 原生端（Swift 6 / AppKit）。Windows x64 端（Tauri 2 / React）已同步实现功能对等的五页主控制台（总览 · 账号 · 用量 · 设置 · 关于）与系统托盘面板（已由 `@Agonie0v0` 完成真机验收，Windows 实机截图后续补充）。*
 
 <table>
   <tr>
@@ -245,7 +245,7 @@ HUD 挂载于每个 Antigravity 对话输入框下方（含 `2.34.0+` 的 BTW �
 
 ### v1.2.1 核心机制说明
 
-- **Windows x64 社区共建跨平台支持（`#17`、`#27`、`#30`、`#32`，致谢 `@dysonkai` 提议与 `@Agonie0v0` 贡献实现）**：引入同仓隔离的跨平台后端抽象（`src/platform/`）、原生 Rust Win32 助手（`windows/win-helper`，提供凭据管理器、SID 鉴权 Named Pipe、非破坏性 `IFileOperation` 回收站迁移与严格优雅退出边界）、Tauri 2 Windows 桌面控制台与托盘浮窗（`windows/app`），以及独立非阻塞 `windows-latest` CI 与自包含 ZIP / NSIS 安装包构建流（`tools/package-win.mjs`），所有 Windows 专属文件与 macOS `sourceDigest` 彻底隔离。
+- **Windows x64 社区共建跨平台支持（`#27`、`#30`、`#32`，致谢 `@Agonie0v0` 贡献实现）**：引入同仓隔离的跨平台后端抽象（`src/platform/`）、原生 Rust Win32 助手（`windows/win-helper`，提供凭据管理器、SID 鉴权 Named Pipe、非破坏性 `IFileOperation` 回收站迁移与严格优雅退出边界）、Tauri 2 Windows 桌面控制台与托盘浮窗（`windows/app`），以及独立非阻塞 `windows-latest` CI 与自包含 ZIP / NSIS 安装包构建流（`tools/package-win.mjs`），所有 Windows 专属文件与 macOS `sourceDigest` 彻底隔离。
 - **进程隔离、HUD 精度与视图保护加固（`#28`、`#33`，致谢 `@lvyandev` 与 `@MongoRolls`）**：在切号、回滚与存储维护期间隔离 `chrome_crashpad_handler` 与已脱离主进程树的后台守护进程（`language_server` / `sidecar`，`#28`）；细化权限四档翻译并新增代码查看、Diff、CSV 视口、LSP 引用与 Notebook 代码/输出区防误译保护（`#33`）；通过 `executor_metadata` 增量扫描保留对话回退/截断后的历史编排器角色；对齐 Windows 凭据 2560 字节边界、Named Pipe 完整性校验、NTFS 锁退避及请求明细全量分页导出。
 - **启动时自动打开 Antigravity**：因新版 Antigravity 默认不再开启调试端口（且本工具坚持不修改官方安装包），原「跟随 Antigravity 启停」已替换为 **设置 → 启动时自动打开 Antigravity**。开启后，打开 GravityBox 会自动静默驻留菜单栏 / 系统托盘并拉起带 `--remote-debugging-port=0` 调试端口的 Antigravity。
 - **SSH 远程窗口零外部 SSH 适配与多主机视图**：通过本机 CDP 通道直接适配 Antigravity `2.33.0+` SSH 远程窗口，不拉起任何外部 `ssh` 进程——提供完整双语热适配、实时对话状态栏 HUD、严格隔离本机账号的 `本机 / SSH: <host>` 只读双周期配额查看、切号/安全重启/维护时的活跃 SSH 保护提醒，以及 **总览** 伴生 SSH 主机列表与 **菜单栏 / 托盘浮窗** 可展开范围切换器。
@@ -264,7 +264,7 @@ HUD 挂载于每个 Antigravity 对话输入框下方（含 `2.34.0+` 的 BTW �
 - **macOS（原生主线）**：macOS 14 (Sonoma) 或 macOS 15+ (Sequoia)、Apple Silicon (`arm64`)、官方正式版 `/Applications/Antigravity.app`（不支持也不干扰 Insiders 预览版），内置运行环境、零外部依赖。
   - SHA-256 校验（可选）：`shasum -a 256 -c GravityBox-<version>-arm64.dmg.sha256`
   - 无损升级：退出旧版 GravityBox 后将新版拖入 `/Applications` 替换，或在 **关于** 页检查更新（默认关闭后台检查）。
-- **Windows x64（社区实验端）**：Windows 10/11 x64（需系统 WebView2 运行时）及官方正式版 Antigravity；由维护者/CI 统一构建开箱即用的自包含安装版（`GravityBox-<version>-win-x64-setup.exe`）与便携版（`GravityBox-<version>-win-x64.zip`，均附 `.sha256` 校验文件），**普通用户无需自行编译打包**，待社区真机验收后直接发布至 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases)。
+- **Windows x64（社区共建端）**：Windows 10/11 x64（需系统 WebView2 运行时）及官方正式版 Antigravity；由维护者/CI 统一构建开箱即用的自包含安装版（`GravityBox-<version>-win-x64-setup.exe`）与便携版（`GravityBox-<version>-win-x64.zip`，均附 `.sha256` 校验文件），已由 `@Agonie0v0` 完成真机验收，随 `v1.2.1` 直接发布至 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest)，**普通用户无需自行编译打包**。
   - PowerShell 校验（可选）：`Get-FileHash GravityBox-<version>-win-x64.zip -Algorithm SHA256`
 - **本地数据与缓存路径**：
   - macOS：状态库 `~/Library/Application Support/GravityBox`（缓存位于 `~/Library/Caches/GravityBox`）
@@ -373,7 +373,7 @@ Antigravity 运行时会持续持有本地 SQLite（`state.vscdb`）与认证文
 
 **社区致谢**：
 - **代码贡献**：`@Agonie0v0`（`#26` `sqlite-worker` 稳定性修复；`#27`、`#30`、`#32` Windows x64 跨平台同仓三阶段实现）
-- **问题反馈与特性建议**：`@Rentrer`（`#15`）、`@dysonkai`（`#17`）、`@Allenbayern`（`#19`、`#20`）、`@willingning-coder`（`#21`）、`@YangFuting`（`#24`）、`@lvyandev`（`#28`）、`@MongoRolls`（`#33`）
+- **问题反馈与特性建议**：`@Rentrer`（`#15`）、`@Allenbayern`（`#19`、`#20`）、`@willingning-coder`（`#21`）、`@YangFuting`（`#24`）、`@lvyandev`（`#28`）、`@MongoRolls`（`#33`）
 
 <div align="center">
   <a href="https://star-history.com/#Enzoo404/gravitybox&Date">

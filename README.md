@@ -6,7 +6,7 @@
   <h1>GravityBox</h1>
 
   <p>
-    <strong>Cross-Platform Companion for Google Antigravity (macOS Apple Silicon · Windows x64 Preview)</strong><br />
+    <strong>Cross-Platform Companion for Google Antigravity (macOS Apple Silicon · Windows x64 Community)</strong><br />
     Zero-Patch Bilingual UI · In-IDE Telemetry HUD · Dual-Window Quotas · Safe Account Switching · Reversible Cache Trim
   </p>
 
@@ -15,7 +15,7 @@
     <a href="https://github.com/Enzoo404/gravitybox/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Enzoo404/gravitybox/ci.yml?branch=main&style=flat-square&logo=github&label=macOS%20CI" alt="macOS CI Status"></a>
     <a href="https://github.com/Enzoo404/gravitybox/actions/workflows/ci-windows.yml"><img src="https://img.shields.io/github/actions/workflow/status/Enzoo404/gravitybox/ci-windows.yml?branch=main&style=flat-square&logo=github&label=Windows%20CI" alt="Windows CI Status"></a>
     <img src="https://img.shields.io/badge/macOS-14%2B%20%C2%B7%20Apple%20Silicon-111827?style=flat-square&logo=apple&logoColor=white" alt="macOS 14+ Apple Silicon">
-    <img src="https://img.shields.io/badge/Windows-10%2F11%20%C2%B7%20x64%20Preview-0078D4?style=flat-square&logo=windows&logoColor=white" alt="Windows 10/11 x64 Preview">
+    <img src="https://img.shields.io/badge/Windows-10%2F11%20%C2%B7%20x64%20Community-0078D4?style=flat-square&logo=windows&logoColor=white" alt="Windows 10/11 x64 Community">
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="MIT License"></a>
   </p>
 
@@ -49,7 +49,7 @@
 
 ## Overview
 
-**GravityBox** (`GravityBox v1.2.1`) is a lightweight, privacy-first companion for the official stable release of **Google Antigravity** across **macOS (native primary edition, author-verified)** and **Windows x64 (community-contributed preview added in `v1.2.1` via `#17`, `#27`, `#30`, `#32` — thanks to `@dysonkai` for proposing and `@Agonie0v0` for implementing, pending community real-machine acceptance)**. Both editions share a self-contained Node 22 engine and communicate via local loopback CDP and read-only SQLite transactions—never unpacking, modifying, or re-signing the official Antigravity application bundle.
+**GravityBox** (`GravityBox v1.2.1`) is a lightweight, privacy-first companion for the official stable release of **Google Antigravity** across **macOS (native primary edition, author-verified)** and **Windows x64 (community-contributed edition added in `v1.2.1` via `#27`, `#30`, `#32` — implemented and real-machine verified by `@Agonie0v0`, distributed alongside `v1.2.1`)**. Both editions share a self-contained Node 22 engine and communicate via local loopback CDP and read-only SQLite transactions—never unpacking, modifying, or re-signing the official Antigravity application bundle.
 
 | Capability | What It Solves |
 | :--- | :--- |
@@ -68,7 +68,7 @@
 | Platform | Frontend & Helper | IPC & Credentials | Distribution & Acceptance Status |
 | :--- | :--- | :--- | :--- |
 | **macOS 14+ (Apple Silicon `arm64`)** | Native **Swift 6 / AppKit** 5-page console & `MenuFloatingPanel` (`native/`) | Unix Domain Socket IPC · macOS Keychain & `0600` local files | **Primary Edition (Author-verified)**: Prebuilt `GravityBox-<version>-arm64.dmg` via [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) |
-| **Windows 10/11 (x64)** | **Tauri 2 / React 19** 5-page console & tray panel (`windows/app/`) + static Rust Win32 helper (`windows/win-helper/`) | Per-startup randomized Named Pipe (256-bit `authToken`, SID & integrity verified) · Windows Credential Manager (2560-byte cap & zeroization) | **Community Preview (`v1.2.1`)**: Prebuilt self-contained `-setup.exe` & portable `.zip` built by maintainers/CI (**no user compilation required**); **pending community real-machine acceptance** before publishing to [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases) |
+| **Windows 10/11 (x64)** | **Tauri 2 / React 19** 5-page console & tray panel (`windows/app/`) + static Rust Win32 helper (`windows/win-helper/`) | Per-startup randomized Named Pipe (256-bit `authToken`, SID & integrity verified) · Windows Credential Manager (2560-byte cap & zeroization) | **Community Edition (Verified by `@Agonie0v0`)**: Prebuilt self-contained `-setup.exe` & portable `.zip` (**no user compilation required**), distributed alongside `v1.2.1` via [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) |
 
 ---
 
@@ -83,9 +83,9 @@
 2. **Launch & Connect**: Open **GravityBox** and start official `/Applications/Antigravity.app` from the sidebar/menu bar (`Open Antigravity`), or enable **Settings → Auto-Open Antigravity on Launch** so GravityBox stays in the menu bar and launches Antigravity with debugging enabled. If Antigravity `2.33.0+` was opened externally without a debugging port, click **Safe Relaunch to Connect** in the banner for a clean restart without force-killing active work.
 3. **Use Across Three Surfaces**: Glance at the **HUD** below the composer while coding, click the **Menu Bar Panel** (`⌘1` / `⌘2` / `⌘3`) for instant checks across full-screen Spaces, or open the **Main Console** (`Overview · Accounts · Usage · Settings · About`).
 
-### Windows x64 (Community Preview)
+### Windows x64 (Community Edition)
 
-1. **Download (No Building Required)**: Windows distributes ready-to-use self-contained packages built by maintainers/CI—`GravityBox-<version>-win-x64-setup.exe` (user-level installer targeting `%LOCALAPPDATA%\Programs\GravityBox`, no admin elevation needed) or `GravityBox-<version>-win-x64.zip` (portable, extract and run). Both embed Node 22 and the Win32 helper—**end users never need to compile anything**. *(Once `v1.2.1` completes community real-machine acceptance, these prebuilt packages will be published directly on [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases); testers can also grab preview artifacts from CI or build locally via the developer section below.)*
+1. **Download (No Building Required)**: Download the ready-to-use self-contained package from [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest)—`GravityBox-<version>-win-x64-setup.exe` (user-level installer targeting `%LOCALAPPDATA%\Programs\GravityBox`, no admin elevation needed) or `GravityBox-<version>-win-x64.zip` (portable, extract and run). Both embed Node 22 and the Win32 helper—**end users never need to compile anything**. *(Real-machine verified on Windows by `@Agonie0v0` and distributed alongside `v1.2.1`.)*
 2. **Launch & Connect**: Run `GravityBox.exe` (requires Windows 10/11 x64 and the system WebView2 runtime). Launch official stable **Antigravity** from the sidebar or system tray (`Open Antigravity`), or enable **Settings → Auto-Open Antigravity on Launch**. If Antigravity was started externally without a remote debugging port, use **Safe Relaunch to Connect** (GravityBox respects Windows UIPI / same-user SID boundaries and never silently `TerminateProcess`-kills the editor).
 3. **Use Across Three Surfaces**: Inspect the **HUD** inside Antigravity, click the **System Tray Panel** for quick quota/usage/account checks, or open the **Main Console** (`Overview · Accounts · Usage · Settings · About`).
 
@@ -160,7 +160,7 @@ Hover over or click any capsule to inspect its breakdown (`Esc` or click outside
 
 ## Console & Workflows
 
-> *Screenshots below showcase the verified macOS Swift 6 / AppKit edition. On Windows x64, the Tauri 2 / React desktop app implements a feature-parity 5-page console (`Overview · Accounts · Usage · Settings · About`) and system tray panel; Windows screenshots will be added after community real-machine acceptance.*
+> *Screenshots below showcase the verified macOS Swift 6 / AppKit edition. On Windows x64, the Tauri 2 / React desktop app implements a feature-parity 5-page console (`Overview · Accounts · Usage · Settings · About`) and system tray panel (real-machine verified by `@Agonie0v0`; Windows UI screenshots will be added in a follow-up update).*
 
 <table>
   <tr>
@@ -245,7 +245,7 @@ Hover over or click any capsule to inspect its breakdown (`Esc` or click outside
 
 ### Key Behaviors in v1.2.1
 
-- **Co-Located Windows x64 Cross-Platform Support (`#17`, `#27`, `#30`, `#32` — thanks to `@dysonkai` & `@Agonie0v0`)**: Adds `src/platform/` backend abstractions, the static Rust Win32 helper (`windows/win-helper`), the Tauri 2 desktop UI & tray (`windows/app`), and independent non-blocking `windows-latest` CI / ZIP + NSIS packaging (`tools/package-win.mjs`). All Windows-specific files are excluded from the macOS release `sourceDigest`.
+- **Co-Located Windows x64 Cross-Platform Support (`#27`, `#30`, `#32` — thanks to `@Agonie0v0`)**: Adds `src/platform/` backend abstractions, the static Rust Win32 helper (`windows/win-helper`), the Tauri 2 desktop UI & tray (`windows/app`), and independent non-blocking `windows-latest` CI / ZIP + NSIS packaging (`tools/package-win.mjs`). All Windows-specific files are excluded from the macOS release `sourceDigest`.
 - **Process Isolation, View Guards & Ledger Accuracy (`#28`, `#33` — thanks to `@lvyandev` & `@MongoRolls`)**: Isolates `chrome_crashpad_handler` and detached background daemons (`language_server` / `sidecar`) during account switching and maintenance (`#28`); refines permission-preset translations and protects code, diff, CSV, LSP reference, and notebook code/output regions (`#33`); preserves historical Orchestrator roles across truncation via incremental `executor_metadata` scanning; aligns Windows 2560-byte credential limits, Named Pipe integrity checks, NTFS lock backoff, and full-page Request Log exports.
 - **Auto-Open Antigravity on Launch**: Because newer Antigravity builds disable the debugging port by default and GravityBox never patches the official bundle, enabling **Settings → Auto-Open Antigravity on Launch** keeps GravityBox in the menu bar / system tray and launches Antigravity with `--remote-debugging-port=0`.
 - **Zero-SSH Remote Windows & Multi-Host UI**: Adapts Antigravity `2.33.0+` SSH remote windows over local CDP without spawning external `ssh` processes—delivering bilingual UI, live HUD, isolated read-only `Local / SSH: <host>` dual-window quota views, active-SSH safety reminders, companion SSH host lists in **Overview**, and a scope selector in the menu bar / tray panel.
@@ -264,7 +264,7 @@ Hover over or click any capsule to inspect its breakdown (`Esc` or click outside
 - **macOS (Primary)**: Requires macOS 14 (Sonoma) or macOS 15+ (Sequoia), Apple Silicon (`arm64`), and official stable `/Applications/Antigravity.app` (Insiders is neither supported nor altered). Zero external runtime dependencies.
   - Optional checksum check: `shasum -a 256 -c GravityBox-<version>-arm64.dmg.sha256`
   - Upgrade by quitting GravityBox and dragging the new app over `/Applications/GravityBox.app` (or enabling **Auto-Check Updates** in **About**, off by default).
-- **Windows x64 (Community Preview)**: Requires Windows 10/11 x64, system WebView2 runtime, and official stable Antigravity. Prebuilt self-contained artifacts (`GravityBox-<version>-win-x64-setup.exe` and portable `GravityBox-<version>-win-x64.zip` with `.sha256` sidecars) are produced by maintainers/CI—**end users do not need to build from source**—and will be attached to [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases) once community real-machine acceptance is complete.
+- **Windows x64 (Community Edition)**: Requires Windows 10/11 x64, system WebView2 runtime, and official stable Antigravity. Prebuilt self-contained artifacts (`GravityBox-<version>-win-x64-setup.exe` and portable `GravityBox-<version>-win-x64.zip` with `.sha256` sidecars) are real-machine verified by `@Agonie0v0` and distributed alongside `v1.2.1` on [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest)—**end users do not need to build from source**.
   - Optional PowerShell checksum check: `Get-FileHash GravityBox-<version>-win-x64.zip -Algorithm SHA256`
 - **Persistent User Data**:
   - macOS: `~/Library/Application Support/GravityBox` (caches in `~/Library/Caches/GravityBox`)
@@ -373,7 +373,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md), [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT
 
 **Community Acknowledgements**:
 - **Code Contributions**: `@Agonie0v0` (`#26` `sqlite-worker` stability fix; `#27`, `#30`, `#32` Windows x64 cross-platform implementation)
-- **Bug Reports & Feature Proposals**: `@Rentrer` (`#15`), `@dysonkai` (`#17`), `@Allenbayern` (`#19`, `#20`), `@willingning-coder` (`#21`), `@YangFuting` (`#24`), `@lvyandev` (`#28`), `@MongoRolls` (`#33`)
+- **Bug Reports & Feature Proposals**: `@Rentrer` (`#15`), `@Allenbayern` (`#19`, `#20`), `@willingning-coder` (`#21`), `@YangFuting` (`#24`), `@lvyandev` (`#28`), `@MongoRolls` (`#33`)
 
 <div align="center">
   <a href="https://star-history.com/#Enzoo404/gravitybox&Date">
