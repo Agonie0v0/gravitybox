@@ -1251,11 +1251,12 @@ final class MenuExpandableAccountCardView: NSBox {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func apply(account: [String: Any], isCurrent: Bool, isLiveVerified: Bool, isRecommended: Bool, isExpanded: Bool, reachable: Bool, switchInFlight: Bool, globalBusy: Bool, singleBusy: Bool, singleError: String?, singleNotice: String? = nil, matchingSshHosts: [CanonicalHostEnvironment] = [], hasSshHosts: Bool = false, staleThresholdSeconds: TimeInterval = 300) {
+    func apply(account: [String: Any], isCurrent: Bool, isLiveVerified: Bool, isRecommended: Bool, isExpanded: Bool, reachable: Bool, switchInFlight: Bool, globalBusy: Bool, singleBusy: Bool, singleError: String?, singleNotice: String? = nil, matchingSshHosts: [CanonicalHostEnvironment] = [], hasSshHosts: Bool = false, staleThresholdSeconds: TimeInterval = 300, masked: Bool = AccountIdentity.isPrivacyMaskEnabled) {
         let email = account["email"] as? String ?? L10n.t("menu_panel.account_card.unnamed", fallback: "未命名账号")
         fullEmail = email
         let rawName = account["name"] as? String
-        let display = AccountIdentity.displayName(name: rawName, email: email)
+        let display = AccountIdentity.displayName(name: rawName, email: email, masked: masked)
+        let shownEmail = AccountIdentity.displayEmail(email, masked: masked)
         let tier = AccountIdentity.normalizeTier(account["subscription_tier"] as? String)
         let summary = QuotaPresentation.menuAccountSummary(account).replacingOccurrences(of: "\n", with: " · ")
 
@@ -1271,7 +1272,7 @@ final class MenuExpandableAccountCardView: NSBox {
         stateButton.setAccessibilityLabel(isCurrent ? roleCurrentTitle : switchToTitle)
         stateButton.setAccessibilityRole(.button)
         nameLabel.stringValue = display
-        emailLabel.stringValue = email
+        emailLabel.stringValue = shownEmail.isEmpty ? email : shownEmail
         emailLabel.toolTip = nil
 
         tierBadge.title = tier
@@ -1695,12 +1696,13 @@ final class MenuRemoteHostJumpRow: NSBox {
         }
     }
 
-    func apply(host: CanonicalHostEnvironment) {
+    func apply(host: CanonicalHostEnvironment, masked: Bool = AccountIdentity.isPrivacyMaskEnabled) {
         environmentId = host.environmentId
         statusDot.state = host.state
         let fallbackHost = host.cleanHostLabel
         let hostPart = fallbackHost.count > 14 ? String(fallbackHost.prefix(13)) + "…" : fallbackHost
-        let emailPart = host.email.isEmpty ? L10n.t("common.unknown", fallback: "未知") : host.email
+        let shownEmail = AccountIdentity.displayEmail(host.email, masked: masked)
+        let emailPart = shownEmail.isEmpty ? L10n.t("common.unknown", fallback: "未知") : shownEmail
         summaryLabel.stringValue = "\(hostPart) · \(emailPart)"
         summaryLabel.textColor = host.state.isOfflineLike ? Design.secondary : .labelColor
 

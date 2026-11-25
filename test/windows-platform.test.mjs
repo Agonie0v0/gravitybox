@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
 import { access, copyFile, mkdtemp, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -1247,4 +1248,73 @@ test('Stage 2 Windows 后端修复回归: 凭据容量裁剪、IPC 缺助手阻�
     assert.ok(tauriTsText.includes(`'${host}'`), `lib/tauri.ts ALLOWED_EXTERNAL_HOSTS 缺少 ${host}`);
     assert.ok(commandsRsText.includes(`"${host}"`), `commands.rs ALLOWED_EXTERNAL_HOSTS 缺少 ${host}`);
   }
+});
+
+test('v1.2.2 Windows 细节修复回归: EXDEV rmSync 重试参数、detachedOnly 透传及 user_cancelled/UIPI 分支', async (t) => {
+  // 1. Windows 跨盘 EXDEV 回退清理源目录必须携带 maxRetries 与 retryDelay，macOS 不附加该参数
+  const winRmCalls = [];
+  const exdevDir = await mkdtemp(join(tmpdir(), 'gb-exdev-rm-'));
+  t.after(() => rm(exdevDir, { recursive: true, force: true }));
+  const winSrc = join(exdevDir, 'win-src');
+  const winDst = join(exdevDir, 'win-dst');
+  await mkdir(winSrc, { recursive: true });
+  await writeFile(join(winSrc, 'a.txt'), 'ok', 'utf8');
+  await atomicRenameWithRetry(winSrc, winDst, {
+    platform: 'win32',
+    allowCrossDevice: true,
+    maxRetries: 5,
+    baseDelayMs: 30,
+    renameFn: () => {
+      const err = new Error('cross-device');
+      err.code = 'EXDEV';
+      throw err;
+    },
+    rmFn: (targetPath, opts) => {
+      winRmCalls.push({ targetPath, opts });
+      rmSync(targetPath, opts);
+    },
+  });
+  assert.equal(winRmCalls.length, 1);
+  assert.equal(winRmCalls[0].targetPath, winSrc);
+  assert.equal(winRmCalls[0].opts.recursive, true);
+  assert.equal(winRmCalls[0].opts.force, true);
+  assert.ok((winRmCalls[0].opts.maxRetries ?? 0) >= 1, 'win32 EXDEV rmFn 必须设置 maxRetries');
+  assert.ok((winRmCalls[0].opts.retryDelay ?? 0) >= 20, 'win32 EXDEV rmFn 必须设置 retryDelay');
+
+  const macRmCalls = [];
+  const macSrc = join(exdevDir, 'mac-src');
+  const macDst = join(exdevDir, 'mac-dst');
+  await mkdir(macSrc, { recursive: true });
+  await writeFile(join(macSrc, 'b.txt'), 'ok', 'utf8');
+  await atomicRenameWithRetry(macSrc, macDst, {
+    platform: 'darwin',
+    allowCrossDevice: true,
+    renameFn: () => {
+      const err = new Error('cross-device');
+      err.code = 'EXDEV';
+      throw err;
+    },
+    rmFn: (targetPath, opts) => {
+      macRmCalls.push({ targetPath, opts });
+      rmSync(targetPath, opts);
+    },
+  });
+  assert.equal(macRmCalls.length, 1);
+  assert.equal(macRmCalls[0].opts.maxRetries, undefined);
+  assert.equal(macRmCalls[0].opts.retryDelay, undefined);
+
+  // 2. 前端 closeAntigravitySafely 透传 detachedOnly，并补全 user_cancelled 与 uipi_access_denied 分支
+  const [appCtxText, accountsPageText, maintModalText] = await Promise.all([
+    readFile(new URL('../windows/app/src/context/AppContext.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../windows/app/src/pages/AccountsPage.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../windows/app/src/sheets/MaintenanceModal.tsx', import.meta.url), 'utf8'),
+  ]);
+  assert.match(appCtxText, /preConfirmedBackgroundExit\s*=\s*false/, 'AppContext closeAntigravitySafely 必须支持 preConfirmedBackgroundExit');
+  assert.match(appCtxText, /closeAntigravitySafely\(18_000,\s*'switch',\s*detachedOnly\)/, 'AppContext 切号必须透传 detachedOnly');
+  assert.match(accountsPageText, /closeAntigravitySafely\(18_000,\s*'switch',\s*detachedOnly\)/, 'AccountsPage 撤销必须透传 detachedOnly');
+  assert.match(accountsPageText, /outcome\.reason\s*===\s*'user_cancelled'/, 'AccountsPage 撤销必须处理 user_cancelled');
+  assert.match(accountsPageText, /outcome\.reason\s*===\s*'uipi_access_denied'/, 'AccountsPage 撤销必须处理 uipi_access_denied');
+  assert.equal((maintModalText.match(/closeAntigravitySafely\(15_000,\s*'maintenance',\s*detachedOnly\)/g) ?? []).length, 2, 'MaintenanceModal 清理与还原均必须透传 detachedOnly');
+  assert.equal((maintModalText.match(/closeOutcome\.reason\s*===\s*'user_cancelled'/g) ?? []).length, 2, 'MaintenanceModal 清理与还原均必须处理 user_cancelled');
+  assert.equal((maintModalText.match(/closeOutcome\.reason\s*===\s*'uipi_access_denied'/g) ?? []).length, 2, 'MaintenanceModal 清理与还原均必须处理 uipi_access_denied');
 });

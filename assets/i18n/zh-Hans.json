@@ -970,10 +970,8 @@
     "menu_panel.usage.scope_all_summary": "全部环境用量",
     "menu_panel.usage.scope_local_summary": "本机用量",
     "menu_panel.usage.scope_remote_summary": "{host} 用量",
-    "accounts.privacy.hide": "隐藏账号隐私信息",
-    "accounts.privacy.show": "显示账号隐私信息",
-    "settings.privacy.title": "隐藏账号隐私信息",
-    "settings.privacy.subtitle": "在总览页、账号页、用量筛选与托盘中隐藏用户名与邮箱，账号卡片与配额条保持可见"
+    "accounts.privacy.hide": "隐藏账号邮箱",
+    "accounts.privacy.show": "显示账号邮箱"
   },
   "backend": {
     "status.starting": "正在连接本机服务…",

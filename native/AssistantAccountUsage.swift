@@ -303,18 +303,24 @@ extension Assistant {
                 let r = rhs.element["id"] as? String == activeAccountId
                 return l == r ? lhs.offset < rhs.offset : l
             }.map(\.element)
+            let masked = privacyMaskAccounts
             for acc in ordered {
                 let id = acc["id"] as? String ?? ""
-                let accEmail = acc["email"] as? String ?? L10n.t("assistant_account.unknown_account")
-                let label = acc["name"] as? String ?? ""
-                let displayName = label.isEmpty ? accEmail : "\(label) · \(accEmail)"
+                let rawEmail = acc["email"] as? String ?? ""
+                let accEmail = rawEmail.isEmpty
+                    ? L10n.t("assistant_account.unknown_account")
+                    : AccountIdentity.displayEmail(rawEmail, masked: masked)
+                let label = (acc["name"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let displayName = (!label.isEmpty && label.caseInsensitiveCompare(rawEmail) != .orderedSame)
+                    ? "\(label) · \(accEmail)"
+                    : accEmail
                 let accTier = AccountIdentity.normalizeTier(acc["subscription_tier"] as? String)
                 let title = [displayName, accTier, QuotaPresentation.menuQuotaText(acc)].filter { !$0.isEmpty }.joined(separator: " · ")
                 let accItem = NSMenuItem(title: title, action: #selector(switchAccountFromMenu(_:)), keyEquivalent: "")
                 accItem.target = self
                 accItem.representedObject = id
                 let isBlocked = acc["disabled"] as? Bool == true || acc["validation_blocked"] as? Bool == true
-                let isCurrent = id == activeAccountId || (activeAccountId.isEmpty && accEmail == statusValue.activeAccountEmail)
+                let isCurrent = id == activeAccountId || (activeAccountId.isEmpty && rawEmail == statusValue.activeAccountEmail)
                 accItem.isEnabled = !isBlocked && !isCurrent
                 if isCurrent { accItem.state = .on }
                 switchSubmenu.addItem(accItem)
@@ -387,12 +393,9 @@ extension Assistant {
             let shouldCleanDetachedDaemons = !insidersRunning && !shouldQuitUi && detachedDaemonCount > 0
             let shouldRelaunchAfterSwitch = shouldQuitUi
             let hasRunningTask = (payload["hasRunningTask"] as? Bool == true) || (payload["safe"] as? Bool == false)
-            let display: String
-            if !name.isEmpty && name.caseInsensitiveCompare(email) != .orderedSame && !email.isEmpty {
-                display = L10n.shared.isEnglish ? "\(name) (\(email))" : "\(name)（\(email)）"
-            } else {
-                display = email.isEmpty ? (name.isEmpty ? L10n.t("assistant_account.target_fallback") : name) : email
-            }
+            let masked = privacyMaskAccounts
+            let targetDisplay = AccountIdentity.displayTarget(name: name, email: email, masked: masked, isEnglish: L10n.shared.isEnglish)
+            let display = targetDisplay.isEmpty ? L10n.t("assistant_account.target_fallback") : targetDisplay
             if insidersRunning {
                 self.accountSwitchInFlight = false
                 self.showMessage(L10n.t("assistant_account.insiders_running"), error: true)
@@ -410,7 +413,13 @@ extension Assistant {
                     case .success(let value):
                         self.singleAccountRefreshNotices[id] = nil
                         self.singleAccountRefreshErrors[id] = nil
-                        self.showMessage(value["message"] as? String ?? L10n.t("assistant_account.switched_to", ["email": email]))
+                        let maskedNow = self.privacyMaskAccounts
+                        let shownEmail = AccountIdentity.displayEmail(email, masked: maskedNow)
+                        let rawMsg = value["message"] as? String
+                        let finalMsg = maskedNow
+                            ? (rawMsg.map { AccountIdentity.maskEmailsInText($0, knownEmails: [email], masked: true) } ?? L10n.t("assistant_account.switched_to", ["email": shownEmail]))
+                            : (rawMsg ?? L10n.t("assistant_account.switched_to", ["email": email]))
+                        self.showMessage(finalMsg)
                         if shouldRelaunchAfterSwitch { self.relaunchAntigravityAfterSwitch() }
                         self.invalidateUsageReportCache()
                         self.refresh(); self.accountsPage?.fetch(); self.overview?.fetch(); completion?()
@@ -446,7 +455,13 @@ extension Assistant {
                         if case .success(let value) = response {
                             self.singleAccountRefreshNotices[id] = nil
                             self.singleAccountRefreshErrors[id] = nil
-                            self.showMessage(value["message"] as? String ?? L10n.t("assistant_account.switched_to", ["email": email]))
+                            let maskedNow = self.privacyMaskAccounts
+                            let shownEmail = AccountIdentity.displayEmail(email, masked: maskedNow)
+                            let rawMsg = value["message"] as? String
+                            let finalMsg = maskedNow
+                                ? (rawMsg.map { AccountIdentity.maskEmailsInText($0, knownEmails: [email], masked: true) } ?? L10n.t("assistant_account.switched_to", ["email": shownEmail]))
+                                : (rawMsg ?? L10n.t("assistant_account.switched_to", ["email": email]))
+                            self.showMessage(finalMsg)
                             if shouldRelaunchAfterSwitch { self.relaunchAntigravityAfterSwitch() }
                             self.invalidateUsageReportCache()
                             self.refresh(); self.accountsPage?.fetch(); self.overview?.fetch(); completion?()

@@ -7242,6 +7242,98 @@ import Cocoa
             }
         }
 
+        // 1.2.2 账号邮箱隐私遮挡与就地小眼睛、快捷键回归验证
+        do {
+            defer { AccountIdentity.isPrivacyMaskEnabled = false }
+            check(AccountIdentity.maskEmail("") == "", "maskEmail empty")
+            check(AccountIdentity.maskEmail("a@example.test") == "•@e•••.test", "maskEmail 1-char local")
+            check(AccountIdentity.maskEmail("ab@example.invalid") == "a•@e•••.invalid", "maskEmail 2-char local")
+            let multiLevelCorpEmail = "foo@" + "corp.company.example.invalid"
+            let aliceCorpEmail = "alice@" + "corp.example.invalid"
+            check(AccountIdentity.maskEmail(multiLevelCorpEmail) == "f••@c•••.invalid", "maskEmail 3-char local and multi-level domain must hide corporate domain")
+            check(AccountIdentity.maskEmail("zhangsan@example.invalid") == "zh•••n@e•••.invalid", "maskEmail >=4-char local keeps 2 head + 1 tail")
+            check(AccountIdentity.maskEmail("localonly") == "lo•••y", "maskEmail without @")
+
+            check(AccountIdentity.displayName(name: "主力工作号", email: "zhangsan@example.invalid", masked: true) == "主力工作号", "Custom nickname must remain visible when privacy mask is enabled")
+            check(AccountIdentity.displayName(name: "zhangsan@example.invalid", email: "zhangsan@example.invalid", masked: true) == "zh•••n@e•••.invalid", "Email-shaped name must still be masked")
+            check(AccountIdentity.displayName(name: "", email: "zhangsan@example.invalid", masked: true) == "zh•••n", "Fallback prefix without custom name must be masked")
+            check(AccountIdentity.displayName(name: "", email: "", masked: true) == "", "Empty identity must stay empty")
+            check(
+                AccountIdentity.maskEmailsInText("Switch to \(aliceCorpEmail) (80%)", knownEmails: [aliceCorpEmail], masked: true)
+                    == "Switch to al•••e@c•••.invalid (80%)",
+                "maskEmailsInText must mask emails inside prose"
+            )
+
+            let maskStateDir = state.appendingPathComponent("privacy-mask-regression")
+            try? FileManager.default.removeItem(at: maskStateDir)
+            try FileManager.default.createDirectory(at: maskStateDir, withIntermediateDirectories: true)
+            try Data(#"{"schema":2,"lastPage":0}"#.utf8).write(to: maskStateDir.appendingPathComponent("config.json"))
+
+            let maskHost = Assistant(state: maskStateDir)
+            maskHost.configuration = try ConfigurationStore(state: maskStateDir)
+            check(maskHost.configuration.value.privacyMaskAccounts == false, "Legacy config without privacyMaskAccounts must default to false")
+            AccountIdentity.isPrivacyMaskEnabled = maskHost.configuration.value.privacyMaskAccounts
+            maskHost.bridge = BackendBridge(resources: state, state: maskStateDir)
+            maskHost.reachable = true
+            maskHost.installApplicationMenu()
+
+            check(maskHost.privacyMaskMenuItem?.keyEquivalent == "m", "View menu privacy toggle must bind keyEquivalent 'm'")
+            check(maskHost.privacyMaskMenuItem?.keyEquivalentModifierMask == [.command, .shift], "View menu privacy toggle must use Shift+Cmd+M")
+
+            let dash = DashboardPage(app: maskHost)
+            maskHost.overview = dash
+            let accPage = AccountsPage(app: maskHost)
+            maskHost.accountsPage = accPage
+            let uPage = UsagePage(app: maskHost)
+            maskHost.usagePage = uPage
+            let mPanel = maskHost.ensureMenuPanelController()
+
+            let maskedTestAccounts: [[String: Any]] = [
+                ["id": "acc1", "name": "主力工作号", "email": "zhangsan@example.invalid", "subscription_tier": "PRO"],
+                ["id": "acc2", "name": "", "email": aliceCorpEmail, "subscription_tier": "FREE"]
+            ]
+            maskHost.cachedAccounts = maskedTestAccounts
+            maskHost.activeAccountId = "acc1"
+            dash.renderSummary([
+                "accounts": ["activeEmail": "zhangsan@example.invalid", "activeName": "主力工作号", "activeTier": "PRO", "isLiveVerified": true, "liveAccountEmail": "zhangsan@example.invalid"],
+                "usage": ["availability": "complete", "todayTokens": 100, "requestCount": 1, "estimatedUsd": 0.01, "totalTokens": 100, "totalRequestCount": 1, "allTimeEstimatedUsd": 0.01]
+            ], isStaleFallback: false)
+            accPage.fetch(["accounts": maskedTestAccounts, "activeId": "acc1"])
+            _ = UsageFilterSupport.syncAccountPopup(uPage.accountPopup, accounts: maskedTestAccounts, selectedId: "all", allTitle: "全部")
+            mPanel.selectTab(1, persist: true); mPanel.panelWillOpen(); pump()
+
+            check(dash.activeAccountLabel.stringValue == "主力工作号" && dash.activeEmailLabel.stringValue == "zhangsan@example.invalid", "Unmasked overview shows raw email")
+            check(!dash.privacyEyeButton.isHidden && (dash.privacyEyeButton.accessibilityValue() as? Int) == 0, "Unmasked overview eye button shows unmasked state")
+
+            maskHost.togglePrivacyMaskAccounts()
+            pump()
+            check(maskHost.privacyMaskAccounts == true && AccountIdentity.isPrivacyMaskEnabled == true, "togglePrivacyMaskAccounts must enable privacy masking")
+            let reloadedCfg = try ConfigurationStore(state: maskStateDir)
+            check(reloadedCfg.value.privacyMaskAccounts == true, "privacyMaskAccounts must persist to config.json")
+            check(dash.activeAccountLabel.stringValue == "主力工作号", "Masked overview preserves custom nickname")
+            check(dash.activeEmailLabel.stringValue == "zh•••n@e•••.invalid", "Masked overview masks active email")
+            check((dash.privacyEyeButton.accessibilityValue() as? Int) == 1, "Masked overview eye button updates accessibility state")
+            if let copyItem = dash.activeEmailLabel.menu?.items.first, let target = copyItem.target, let action = copyItem.action {
+                _ = target.perform(action, with: copyItem)
+                check(NSPasteboard.general.string(forType: .string) == "zhangsan@example.invalid", "Context copy menu must still copy unmasked raw email")
+            } else {
+                check(false, "Dashboard activeEmailLabel must retain copy menu when masked")
+            }
+            let accTextsMasked = allTextValues(accPage.cardsStack)
+            check(accTextsMasked.contains("主力工作号") && accTextsMasked.contains("zh•••n@e•••.invalid") && accTextsMasked.contains("al•••e@c•••.invalid") && accTextsMasked.contains("al•••e"), "AccountsPage must preserve custom name while masking emails and unnamed local parts")
+            check(!accTextsMasked.contains("zhangsan@example.invalid") && !accTextsMasked.contains(aliceCorpEmail), "AccountsPage must not leak raw emails when masked")
+            let popupTitles = (uPage.accountPopup.menu?.items ?? []).map(\.title)
+            check(popupTitles.contains("主力工作号 (zh•••n@e•••.invalid)") && popupTitles.contains("al•••e@c•••.invalid"), "Usage accountPopup must mask emails while keeping custom nickname")
+            let evCard = UsageEventCard(frame: NSRect(x: 0, y: 0, width: 520, height: 64))
+            evCard.configure(["model": "gemini-test", "account_email": "zhangsan@example.invalid", "input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "estimated_usd": 0.001], showLocalEnvironmentBadge: false)
+            check(evCard.accountLabel.stringValue == "zh•••n@e•••.invalid", "UsageEventCard must mask event account email")
+            check(mPanel.quotaEmailLabel.stringValue == "zh•••n@e•••.invalid", "MenuPanel quota header must mask email")
+
+            maskHost.togglePrivacyMaskAccounts()
+            pump()
+            check(maskHost.privacyMaskAccounts == false && dash.activeEmailLabel.stringValue == "zhangsan@example.invalid" && mPanel.quotaEmailLabel.stringValue == "zhangsan@example.invalid", "Second toggle must restore unmasked emails everywhere")
+        }
+
         let result:[String:Any] = ["stableOnlySelectionPassed":true,"nativeLayouts":captures.count,"captures":captures,"enCaptures":enCaptures,"enExtraCaptures":enExtraCaptures,"menuCaptures":6,"safeSwitchSharedFlowPassed":true,"emailWidthPassed":true,"partialPricingPassed":true,"headlessNoVisibleWindowLeaksPassed":true,"nativeAssertions":assertionCount,"scope":"isolated synthetic AppKit fixture; not installed-app acceptance"]
         window.orderOut(nil)
         assertNoVisibleWindowsOnScreen("after-main-window-orderOut")

@@ -283,9 +283,10 @@ export function TrayWindow() {
 
   const translationOn = status.translationEnabled !== false && status.mode !== 'paused';
   const masked = Boolean(config.privacyMaskAccounts);
-  const privacyLabel = masked
-    ? t('accounts.privacy.show', undefined, locale === 'en' ? 'Show Account Info' : '显示账号信息')
-    : t('accounts.privacy.hide', undefined, locale === 'en' ? 'Hide Account Info' : '隐藏账号信息');
+  const privacyActionTitle = masked
+    ? t('accounts.privacy.show', undefined, locale === 'en' ? 'Show Account Emails' : '显示账号邮箱')
+    : t('accounts.privacy.hide', undefined, locale === 'en' ? 'Hide Account Emails' : '隐藏账号邮箱');
+  const privacyLabel = `${privacyActionTitle} (Ctrl+Shift+M)`;
 
   const footerMainTarget: { page: string; label: string } =
     tab === 0
@@ -766,12 +767,18 @@ export function TrayWindow() {
                         <button
                           type="button"
                           className="gb-btn gb-btn-ghost gb-icon-btn"
-                          style={{ width: 24, height: 24, flexShrink: 0 }}
+                          style={{
+                            width: 24,
+                            height: 24,
+                            flexShrink: 0,
+                            color: masked ? 'var(--blue)' : 'var(--text-tertiary)',
+                          }}
                           aria-label={privacyLabel}
+                          aria-pressed={masked}
                           title={privacyLabel}
                           onClick={() => void updateConfig({ privacyMaskAccounts: !masked })}
                         >
-                          {masked ? <Eye size={13} /> : <EyeOff size={13} />}
+                          {masked ? <EyeOff size={13} /> : <Eye size={13} />}
                         </button>
                       </div>
                     </div>
@@ -844,12 +851,17 @@ export function TrayWindow() {
                 <button
                   type="button"
                   className="gb-btn gb-btn-ghost gb-icon-btn"
-                  style={{ width: 24, height: 24 }}
+                  style={{
+                    width: 24,
+                    height: 24,
+                    color: masked ? 'var(--blue)' : 'var(--text-tertiary)',
+                  }}
                   aria-label={privacyLabel}
+                  aria-pressed={masked}
                   title={privacyLabel}
                   onClick={() => void updateConfig({ privacyMaskAccounts: !masked })}
                 >
-                  {masked ? <Eye size={13} /> : <EyeOff size={13} />}
+                  {masked ? <EyeOff size={13} /> : <Eye size={13} />}
                 </button>
               </div>
             </div>

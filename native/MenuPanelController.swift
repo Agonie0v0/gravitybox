@@ -59,6 +59,7 @@ final class MenuPanelController: NSViewController {
     let quotaTierBadge = tierBadge("", scale: .regular)
     let quotaStatusBadge = pillBadge("", color: Design.blue)
     let quotaEmailLabel = text("", size: 11, color: .secondaryLabelColor, wrap: true)
+    let quotaPrivacyEyeButton: DesignButton
     /// @testonly 保留供 native-ui 单测读取首个配额进度条快照，生产界面统一通过 quotaGroupsContainer 渲染。
     private(set) var quotaGemini5h = MenuMeterRow(title: L10n.t("common.period.5h", fallback: "5 小时"))
     private(set) var quotaGeminiWeekly = MenuMeterRow(title: L10n.t("common.period.weekly", fallback: "每周"))
@@ -72,6 +73,7 @@ final class MenuPanelController: NSViewController {
 
     // Tab 2: Accounts Controls
     let accountsCountLabel = text(L10n.t("menu_panel.accounts.count", ["count": 0], fallback: "0 个账号"), size: 11, color: Design.secondary)
+    let accountsPrivacyEyeButton: DesignButton
     let accountsCardsStack = NSStackView()
     let accountsRemoteSectionStack = NSStackView()
     let accountsRemoteMoreHostsButton = MenuRemoteMoreHostsButton()
@@ -167,6 +169,8 @@ final class MenuPanelController: NSViewController {
         self.requestsTile = MenuMetricTileView(key: "requests", title: L10n.t("menu_panel.tile.requests", fallback: "请求数"))
         self.costTile = MenuMetricTileView(key: "cost", title: L10n.t("menu_panel.tile.cost", fallback: "API 费用估算"))
         self.cacheTile = MenuMetricTileView(key: "cache", title: L10n.t("menu_panel.tile.cache", fallback: "缓存命中率"))
+        self.quotaPrivacyEyeButton = makePrivacyEyeButton(target: nil, action: #selector(togglePrivacyMask), symbolSize: 12.5, buttonSize: 22)
+        self.accountsPrivacyEyeButton = makePrivacyEyeButton(target: nil, action: #selector(togglePrivacyMask), symbolSize: 12.5, buttonSize: 22)
 
         let warnTint = accessibleWarningColor()
         let warnIconBox = tintedIconBox(
@@ -205,6 +209,14 @@ final class MenuPanelController: NSViewController {
         super.init(nibName: nil, bundle: nil)
 
         headerRefreshButton.target = self
+        quotaPrivacyEyeButton.target = self
+        quotaPrivacyEyeButton.setContentHuggingPriority(.required, for: .horizontal)
+        quotaPrivacyEyeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        quotaPrivacyEyeButton.isHidden = true
+        accountsPrivacyEyeButton.target = self
+        accountsPrivacyEyeButton.setContentHuggingPriority(.required, for: .horizontal)
+        accountsPrivacyEyeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        accountsPrivacyEyeButton.isHidden = true
         headerRefreshButton.refusesFirstResponder = false
         headerRefreshButton.toolTip = nil
         headerRefreshButton.setAccessibilityLabel(L10n.t("common.refresh", fallback: "刷新"))
@@ -545,7 +557,7 @@ final class MenuPanelController: NSViewController {
         copyMenu.addItem(copyItem)
         quotaEmailLabel.menu = copyMenu
 
-        let nameRow = horizontal([quotaAccountNameLabel, quotaTierBadge, quotaStatusBadge, flexibleSpace()], spacing: 6)
+        let nameRow = horizontal([quotaAccountNameLabel, quotaTierBadge, quotaStatusBadge, flexibleSpace(), quotaPrivacyEyeButton], spacing: 6)
         nameRow.alignment = .centerY
         nameRow.detachesHiddenViews = true
         let identityStack = vertical([nameRow, quotaEmailLabel], spacing: 4)
@@ -607,8 +619,9 @@ final class MenuPanelController: NSViewController {
         let countCluster = horizontal([accountsCountLabel, accountsLocalOnlyNoteLabel], spacing: 4)
         countCluster.alignment = .firstBaseline
         countCluster.detachesHiddenViews = true
-        let topRow = horizontal([sectionTitleLabel, flexibleSpace(), countCluster], spacing: 8)
+        let topRow = horizontal([sectionTitleLabel, flexibleSpace(), countCluster, accountsPrivacyEyeButton], spacing: 6)
         topRow.alignment = .centerY
+        topRow.detachesHiddenViews = true
 
         accountsCardsStack.orientation = .vertical
         accountsCardsStack.alignment = .leading
@@ -1672,12 +1685,15 @@ final class MenuPanelController: NSViewController {
             let freshness = app.quotaFreshness(forHost: host, now: now)
 
             let hostDisplay = host.cleanHostLabel
+            let masked = app.privacyMaskAccounts
+            quotaPrivacyEyeButton.isHidden = email.isEmpty
+            applyPrivacyEyeButtonState(quotaPrivacyEyeButton, masked: masked, symbolSize: 12.5)
             quotaAccountNameLabel.stringValue = email.isEmpty
                 ? hostDisplay
-                : AccountIdentity.displayName(name: host.name, email: email)
+                : AccountIdentity.displayName(name: host.name, email: email, masked: masked)
             quotaEmailLabel.stringValue = email.isEmpty
                 ? L10n.t("ssh.context.remote_switch_hint", fallback: "远程主机账号由远端独立管理，此处仅供只读查看与刷新。")
-                : email
+                : AccountIdentity.displayEmail(email, masked: masked)
             quotaEmailLabel.toolTip = nil
             quotaHeaderEmail = email
             quotaTierBadge.title = tier
@@ -1758,9 +1774,13 @@ final class MenuPanelController: NSViewController {
 
         let active = app.resolvedMenuAccount()
         guard let account = active else {
+            let masked = app.privacyMaskAccounts
             let liveUnsaved = !app.statusValue.liveAccountEmail.isEmpty
+            quotaPrivacyEyeButton.isHidden = !liveUnsaved
+            applyPrivacyEyeButtonState(quotaPrivacyEyeButton, masked: masked, symbolSize: 12.5)
+            let shownLiveEmail = AccountIdentity.displayEmail(app.statusValue.liveAccountEmail, masked: masked)
             quotaAccountNameLabel.stringValue = !app.reachable ? L10n.t("menu_panel.usage.waiting_service", fallback: "正在等待本机服务…") : (liveUnsaved ? L10n.t("menu_panel.quota.unsaved_live", fallback: "运行中账号尚未保存") : L10n.t("menu_panel.quota.no_saved", fallback: "尚未保存账号"))
-            quotaEmailLabel.stringValue = liveUnsaved ? L10n.t("menu_panel.quota.detected_unsaved", ["email": app.statusValue.liveAccountEmail], fallback: "检测到 \(app.statusValue.liveAccountEmail)，请前往账号页保存") : L10n.t("menu_panel.quota.empty_hint", fallback: "点击下方按钮前往账号页，保存当前账号或从 JSON 导入")
+            quotaEmailLabel.stringValue = liveUnsaved ? L10n.t("menu_panel.quota.detected_unsaved", ["email": shownLiveEmail], fallback: "检测到 \(shownLiveEmail)，请前往账号页保存") : L10n.t("menu_panel.quota.empty_hint", fallback: "点击下方按钮前往账号页，保存当前账号或从 JSON 导入")
             quotaHeaderEmail = app.statusValue.liveAccountEmail
             quotaTierBadge.isHidden = true
             quotaStatusBadge.isHidden = true
@@ -1785,11 +1805,14 @@ final class MenuPanelController: NSViewController {
 
         let id = account["id"] as? String ?? ""
         let email = account["email"] as? String ?? ""
+        let masked = app.privacyMaskAccounts
+        quotaPrivacyEyeButton.isHidden = email.isEmpty
+        applyPrivacyEyeButtonState(quotaPrivacyEyeButton, masked: masked, symbolSize: 12.5)
         quotaHeaderEmail = email
-        let display = AccountIdentity.displayName(name: account["name"] as? String, email: email)
+        let display = AccountIdentity.displayName(name: account["name"] as? String, email: email, masked: masked)
         let tier = AccountIdentity.normalizeTier(account["subscription_tier"] as? String)
         quotaAccountNameLabel.stringValue = display
-        quotaEmailLabel.stringValue = email
+        quotaEmailLabel.stringValue = AccountIdentity.displayEmail(email, masked: masked)
         quotaEmailLabel.toolTip = nil
         quotaTierBadge.title = tier
         quotaTierBadge.isHidden = tier.isEmpty
@@ -1933,10 +1956,30 @@ final class MenuPanelController: NSViewController {
         }
     }
 
+    @objc func togglePrivacyMask() {
+        app.togglePrivacyMaskAccounts()
+    }
+
+    func refreshPrivacyMaskState() {
+        let masked = app.privacyMaskAccounts
+        applyPrivacyEyeButtonState(quotaPrivacyEyeButton, masked: masked, symbolSize: 12.5)
+        applyPrivacyEyeButtonState(accountsPrivacyEyeButton, masked: masked, symbolSize: 12.5)
+        guard isViewLoaded else { return }
+        renderedQuotaTabKey = ""
+        renderedRemoteJumpFingerprint = ""
+        lastMeasuredContentFingerprint = ""
+        syncQuotaTab()
+        syncAccountsTab()
+        syncFromAssistant(updateSize: true)
+    }
+
     private func syncAccountsTab() {
         let accounts = app.fusedAccountsForDisplay()
         let hosts = app.canonicalRemoteHosts()
         let hasSshHosts = !hosts.isEmpty
+        let masked = app.privacyMaskAccounts
+        accountsPrivacyEyeButton.isHidden = accounts.isEmpty && hosts.isEmpty
+        applyPrivacyEyeButtonState(accountsPrivacyEyeButton, masked: masked, symbolSize: 12.5)
         accountsCountLabel.stringValue = L10n.t("menu_panel.accounts.count", ["count": accounts.count], fallback: "\(accounts.count) 个账号")
         if hosts.isEmpty {
             accountsLocalOnlyNoteLabel.isHidden = true
@@ -2012,7 +2055,8 @@ final class MenuPanelController: NSViewController {
                 singleNotice: app.singleAccountRefreshNotices[id],
                 matchingSshHosts: matchingHosts,
                 hasSshHosts: hasSshHosts,
-                staleThresholdSeconds: app.quotaStaleThresholdSeconds
+                staleThresholdSeconds: app.quotaStaleThresholdSeconds,
+                masked: masked
             )
         }
 
@@ -2056,7 +2100,7 @@ final class MenuPanelController: NSViewController {
                 ?? contract.displayGroups.flatMap(\.windows).compactMap(\.percentage).first
             return "\(host.environmentId)|\(host.cleanHostLabel)|\(host.state.rawValue)|\(host.email)|\(host.windowCount)|\(primaryPct.map(String.init) ?? "-")"
         }.joined(separator: ";")
-        let nextFingerprint = "\(L10n.shared.currentLocale)#\(unmanaged.count)#\(hostSpecs)"
+        let nextFingerprint = "\(L10n.shared.currentLocale)#\(app.privacyMaskAccounts)#\(unmanaged.count)#\(hostSpecs)"
         if nextFingerprint == renderedRemoteJumpFingerprint && !accountsRemoteSectionStack.isHidden {
             return
         }
@@ -2099,7 +2143,7 @@ final class MenuPanelController: NSViewController {
                 remoteJumpRowsByEnvId[host.environmentId] = row
                 return row
             }()
-            jumpRow.apply(host: host)
+            jumpRow.apply(host: host, masked: app.privacyMaskAccounts)
         }
 
         let extraHosts = Array(unmanaged.dropFirst(2))
@@ -2162,7 +2206,7 @@ final class MenuPanelController: NSViewController {
             let remoteJumpKey = accountsRemoteSectionStack.isHidden ? "hidden" : "\(accountsRemoteSectionStack.arrangedSubviews.count)"
             tabFingerprint = "a:\(accountsCardsStack.arrangedSubviews.count):\(app.reachable):\(accountsLocalOnlyNoteLabel.isHidden):\(accountsLocalOnlyNoteLabel.stringValue):\(remoteJumpKey):\(cardsSummary)"
         }
-        let measureFingerprint = "\(selectedTab):\(L10n.shared.currentLocale):\(Int(screenMax)):\(debugPortBannerBox.isHidden):\(tabFingerprint)"
+        let measureFingerprint = "\(selectedTab):\(L10n.shared.currentLocale):\(app.privacyMaskAccounts):\(Int(screenMax)):\(debugPortBannerBox.isHidden):\(tabFingerprint)"
         if !force && measureFingerprint == lastMeasuredContentFingerprint {
             let sizeInSync: Bool
             if let panel = app.menuPanel, app.isMenuPanelShown {

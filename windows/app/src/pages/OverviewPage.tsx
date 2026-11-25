@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react';
 import {
   BarChart3,
   DollarSign,
+  Eye,
+  EyeOff,
   HardDrive,
   Languages,
   Layers,
@@ -47,6 +49,7 @@ export function OverviewPage() {
     locale,
     isDark,
     config,
+    updateConfig,
     reachable,
     status,
     dashboard,
@@ -93,6 +96,10 @@ export function OverviewPage() {
   const rawActiveEmail = (dashAccounts?.activeEmail ?? status.activeAccountEmail ?? '').trim();
   const activeEmail = rawActiveEmail ? (masked ? maskEmail(rawActiveEmail) : rawActiveEmail) : '';
   const activeTier = normalizeTier(dashAccounts?.activeTier ?? status.activeSubscriptionTier, locale);
+  const privacyActionTitle = masked
+    ? t('accounts.privacy.show', undefined, locale === 'en' ? 'Show Account Emails' : '显示账号邮箱')
+    : t('accounts.privacy.hide', undefined, locale === 'en' ? 'Hide Account Emails' : '隐藏账号邮箱');
+  const privacyLabel = `${privacyActionTitle} (Ctrl+Shift+M)`;
 
   const contract = useMemo(
     () => parseQuotaContract(dashAccounts as Record<string, unknown> | null, locale, { compact: true }),
@@ -341,6 +348,23 @@ export function OverviewPage() {
                 {activeName}
               </span>
               <TierBadge tier={activeTier} />
+              {rawActiveEmail && (
+                <button
+                  type="button"
+                  className="gb-btn gb-btn-ghost gb-icon-btn"
+                  style={{
+                    width: 22,
+                    height: 22,
+                    color: masked ? 'var(--blue)' : 'var(--text-tertiary)',
+                  }}
+                  aria-label={privacyLabel}
+                  aria-pressed={masked}
+                  title={privacyLabel}
+                  onClick={() => void updateConfig({ privacyMaskAccounts: !masked })}
+                >
+                  {masked ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              )}
             </div>
             <div
               className="selectable"

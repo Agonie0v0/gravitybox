@@ -202,6 +202,7 @@ final class DashboardPage: NSObject {
     // never be overwritten by the raw email (and so the badge always matches the visible copy).
     let accountStatusLabel = text("", size: 11, color: Design.secondary, wrap: true)
     let activeEmailLabel = text("", size: 11, color: .secondaryLabelColor, wrap: true)
+    let privacyEyeButton: DesignButton
     let tierBadge = TierBadge(L10n.t("overview.tier_pending"), scale: .regular)
     private let heroLocalScopeBadge = LocalScopeMicroBadge()
     let heroRemoteHostBadge = SshHostTagBadge(scale: .regular, showStatusDot: true)
@@ -260,6 +261,10 @@ final class DashboardPage: NSObject {
         self.app = app
         refreshQuotaButton = QuotaRefreshButton(target: nil, action: #selector(refreshActiveQuota))
         refreshQuotaButton.controlSize = .small
+        privacyEyeButton = makePrivacyEyeButton(target: nil, action: #selector(togglePrivacyMask), symbolSize: 13, buttonSize: 22)
+        privacyEyeButton.setContentHuggingPriority(.required, for: .horizontal)
+        privacyEyeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        privacyEyeButton.isHidden = true
 
         let warnTint = accessibleWarningColor()
         let debugIconBox = tintedIconBox(
@@ -342,7 +347,7 @@ final class DashboardPage: NSObject {
         heroLocalScopeBadge.toolTip = nil
         heroRemoteHostBadge.isHidden = true
         heroRemoteHostBadge.toolTip = nil
-        let titleRow = horizontal([activeAccountLabel, tierBadge, heroLocalScopeBadge, heroRemoteHostBadge, titleSpacer], spacing: 6)
+        let titleRow = horizontal([activeAccountLabel, tierBadge, heroLocalScopeBadge, heroRemoteHostBadge, privacyEyeButton, titleSpacer], spacing: 6)
         titleRow.alignment = .centerY
         titleRow.detachesHiddenViews = true
         tierBadge.setContentHuggingPriority(.required, for: .horizontal)
@@ -533,6 +538,7 @@ final class DashboardPage: NSObject {
             self?.syncBentoModelLimit(forBentoHeight: height)
         }
         refreshQuotaButton.target = self
+        privacyEyeButton.target = self
         safeRelaunchButton.target = self
         companionMoreButton.target = self
         contextPill.onSelectScope = { [weak self] scope in
@@ -544,6 +550,22 @@ final class DashboardPage: NSObject {
             renderSummary(boot, isStaleFallback: false)
         }
         update()
+    }
+
+    @objc func togglePrivacyMask() {
+        app.togglePrivacyMaskAccounts()
+    }
+
+    func refreshPrivacyMaskState() {
+        applyPrivacyEyeButtonState(privacyEyeButton, masked: app.privacyMaskAccounts, symbolSize: 13)
+        metricsKey = ""
+        companionFingerprint = ""
+        let envId = currentOverviewEnvironmentId()
+        if let cached = cachedSummariesByEnv[envId] ?? (envId == "all" ? lastSuccessfulSummary : nil) {
+            renderSummary(cached, isStaleFallback: false)
+        } else if let remote = app.selectedOverviewRemoteSession() {
+            renderRemoteHeroSection(remote)
+        }
     }
 
     private static func configureBentoHeaderTitle(_ label: NSTextField) {
@@ -1336,10 +1358,19 @@ final class DashboardPage: NSObject {
         let lastErr = (canonicalHost?.lastError.isEmpty == false ? canonicalHost?.lastError : nil)
             ?? ((remote["lastError"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
 
-        self.activeAccountLabel.stringValue = !name.isEmpty ? name : (!email.isEmpty ? email : host)
-        self.activeEmailLabel.stringValue = email.isEmpty
-            ? L10n.t("ssh.context.remote_switch_hint", fallback: "远程主机账号由远端独立管理，此处仅供只读查看与刷新。")
-            : email
+        let masked = app.privacyMaskAccounts
+        if !email.isEmpty {
+            applyPrivacyEyeButtonState(privacyEyeButton, masked: masked, symbolSize: 13)
+            privacyEyeButton.isHidden = false
+            self.activeAccountLabel.stringValue = AccountIdentity.displayName(name: name, email: email, masked: masked)
+            self.activeEmailLabel.stringValue = AccountIdentity.displayEmail(email, masked: masked)
+            enableTextCopy(self.activeEmailLabel, value: email, title: L10n.t("common.copy_full_email"))
+        } else {
+            privacyEyeButton.isHidden = true
+            self.activeAccountLabel.stringValue = !name.isEmpty ? name : host
+            self.activeEmailLabel.stringValue = L10n.t("ssh.context.remote_switch_hint", fallback: "远程主机账号由远端独立管理，此处仅供只读查看与刷新。")
+            self.activeEmailLabel.menu = nil
+        }
         self.activeEmailLabel.toolTip = nil
         self.tierBadge.title = normalizedTier.isEmpty ? tierRaw : normalizedTier
         self.tierBadge.isHidden = email.isEmpty || (normalizedTier.isEmpty && tierRaw.isEmpty)
@@ -1443,7 +1474,7 @@ final class DashboardPage: NSObject {
         let interval = now.timeIntervalSince(lastAt)
         let timeExpired = interval >= 15.0
 
-        let currentKey = "\(app.activeAccountId)_\(status.accountsRevision)_\(status.activeAccountEmail)_\(status.activeFiveHourQuota ?? -1)_\(status.liveAccountEmail)_\(status.remoteObservedVersion)_\(status.remoteSyncRevision)_\(requestedEnvId)"
+        let currentKey = "\(app.activeAccountId)_\(status.accountsRevision)_\(status.activeAccountEmail)_\(status.activeFiveHourQuota ?? -1)_\(status.liveAccountEmail)_\(status.remoteObservedVersion)_\(status.remoteSyncRevision)_\(requestedEnvId)_\(app.privacyMaskAccounts)"
         if !force && !timeExpired && currentKey == metricsKey { return }
         metricsLoading = true
         activeRequestEnvId = requestedEnvId
@@ -1757,32 +1788,33 @@ final class DashboardPage: NSObject {
         hostLbl.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         hostLbl.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
 
+        let shownEmail = AccountIdentity.displayEmail(host.email, masked: app.privacyMaskAccounts)
         let detailText: String
         let detailColor: NSColor
         if host.state == .authExpired {
             let expiredText = L10n.t("overview.ssh.session_expired", fallback: "登录已过期")
-            let parts = host.email.isEmpty ? [expiredText] : [host.email, expiredText]
+            let parts = shownEmail.isEmpty ? [expiredText] : [shownEmail, expiredText]
             detailText = parts.joined(separator: " · ")
             detailColor = accessibleWarningColor()
         } else if host.state == .offlineRecent {
             let disconnectedText = L10n.t("overview.ssh.disconnected", fallback: "已断开")
-            let parts = host.email.isEmpty ? [disconnectedText] : [host.email, disconnectedText]
+            let parts = shownEmail.isEmpty ? [disconnectedText] : [shownEmail, disconnectedText]
             detailText = parts.joined(separator: " · ")
             detailColor = Design.secondary
         } else if host.state == .historicalOnly {
             let histText = L10n.t("ssh.picker.state.historical_only", fallback: "历史记录")
-            let parts = host.email.isEmpty ? [histText] : [host.email, histText]
+            let parts = shownEmail.isEmpty ? [histText] : [shownEmail, histText]
             detailText = parts.joined(separator: " · ")
             detailColor = Design.secondary
         } else if !host.lastError.isEmpty {
             let errText = L10n.t("ssh.context.remote_probe_error", fallback: "远端配额刷新失败")
-            let parts = host.email.isEmpty ? [errText] : [host.email, errText]
+            let parts = shownEmail.isEmpty ? [errText] : [shownEmail, errText]
             detailText = parts.joined(separator: " · ")
             detailColor = accessibleWarningColor()
         } else {
             var parts: [String] = []
-            if !host.email.isEmpty {
-                parts.append(host.email)
+            if !shownEmail.isEmpty {
+                parts.append(shownEmail)
             }
             if let pct = primaryCoreQuotaPercentage(contract) {
                 parts.append("\(pct)%")
@@ -1865,7 +1897,7 @@ final class DashboardPage: NSObject {
             let pct = primaryCoreQuotaPercentage(contract).map(String.init) ?? "-"
             return "\(host.environmentId)|\(displayHost)|\(host.state.rawValue)|\(host.email)|\(host.lastError)|\(lowQuota)|\(pct)"
         }.joined(separator: "||")
-        let nextFingerprint = "\(L10n.shared.currentLocale)||\(sorted.count)||\(rowFingerprints)"
+        let nextFingerprint = "\(L10n.shared.currentLocale)||\(app.privacyMaskAccounts)||\(sorted.count)||\(rowFingerprints)"
         if !companionSection.isHidden && nextFingerprint == companionFingerprint {
             return
         }
@@ -1905,12 +1937,14 @@ final class DashboardPage: NSObject {
         clearCompanionSection()
         let detail = Self.shortError(error)
         self.activeAccountLabel.stringValue = bothFailed ? L10n.t("overview.status.error_both") : L10n.t("overview.status.error_accounts")
+        self.privacyEyeButton.isHidden = true
         self.tierBadge.isHidden = true
         self.accountStatusLabel.isHidden = false
         self.accountStatusLabel.stringValue = L10n.t("overview.status.retry_later", ["detail": detail])
         self.accountStatusLabel.textColor = accessibleWarningColor()
         self.accountStatusLabel.toolTip = nil
         self.activeEmailLabel.stringValue = L10n.t("overview.status.retry_hint")
+        self.activeEmailLabel.menu = nil
         self.activeEmailLabel.toolTip = nil
         let failedTxt = L10n.t("quota.read_failed")
         Self.syncQuotaBarRows([
@@ -2031,13 +2065,18 @@ final class DashboardPage: NSObject {
             let quotaContract = QuotaPresentation.contract(acc)
 
             if email.isEmpty {
+                self.privacyEyeButton.isHidden = true
                 self.activeAccountLabel.stringValue = L10n.t("overview.account.no_saved")
                 applyStatusLine(warnings: [], hasWarning: false)
                 self.activeEmailLabel.stringValue = L10n.t("overview.account.add_hint")
+                self.activeEmailLabel.menu = nil
                 self.activeEmailLabel.toolTip = nil
                 syncCompanionSection(localEmail: "")
             } else {
-                self.activeAccountLabel.stringValue = name.isEmpty ? email : name
+                let masked = app.privacyMaskAccounts
+                applyPrivacyEyeButtonState(self.privacyEyeButton, masked: masked, symbolSize: 13)
+                self.privacyEyeButton.isHidden = false
+                self.activeAccountLabel.stringValue = AccountIdentity.displayName(name: name, email: email, masked: masked)
                 syncCompanionSection(localEmail: email)
                 let isStale = acc["isStale"] as? Bool == true
 
@@ -2088,7 +2127,8 @@ final class DashboardPage: NSObject {
                 if !quotaWarning.isEmpty { warnings.append(quotaWarning) }
                 let hasWarning = !stale.hint.isEmpty || !quotaWarning.isEmpty || (finalBadgeTint != .secondaryLabelColor && !finalStatus.isEmpty)
                 applyStatusLine(warnings: warnings, hasWarning: hasWarning)
-                self.activeEmailLabel.stringValue = email
+                self.activeEmailLabel.stringValue = AccountIdentity.displayEmail(email, masked: app.privacyMaskAccounts)
+                enableTextCopy(self.activeEmailLabel, value: email, title: L10n.t("common.copy_full_email"))
                 self.activeEmailLabel.toolTip = nil
             }
             let normalizedTier = AccountIdentity.normalizeTier(tier)

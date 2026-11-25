@@ -25,8 +25,7 @@ import {
   displayAccountIdentity,
   formatDetachedDaemonKinds,
   formatShortDateTime,
-  maskAccountName,
-  maskEmail,
+  maskEmailsInText,
   normalizeTier,
 } from '../lib/format';
 import {
@@ -174,21 +173,33 @@ export function AccountsPage() {
     if (!confirmed) return;
 
     if (needClose) {
-      const outcome = await closeAntigravitySafely(18_000, 'switch').catch(() => ({
+      const outcome = await closeAntigravitySafely(18_000, 'switch', detachedOnly).catch(() => ({
         closed: false,
         reason: 'error',
       }));
       if (!outcome.closed) {
+        if (outcome.reason === 'user_cancelled') {
+          showToast(
+            locale === 'en'
+              ? 'Cancelled. You can quit Antigravity manually from the system tray.'
+              : '已取消。您可自行从系统托盘退出 Antigravity 后重试。',
+          );
+          return;
+        }
         showToast(
-          detachedOnly
+          outcome.reason === 'visible_window_open'
+            ? locale === 'en'
+              ? 'Visible Antigravity windows are still open. Save and close them before rolling back.'
+              : '检测到 Antigravity 仍有未关闭的可见窗口，请先保存并关闭后再撤销切换。'
+            : outcome.reason === 'uipi_access_denied'
+            ? locale === 'en'
+              ? 'Antigravity is running elevated (administrator). Close it manually before rolling back.'
+              : '检测到 Antigravity 以管理员权限运行，无法直接关闭。请先手动退出后再撤销切换。'
+            : detachedOnly
             ? t('assistant_account.detached_daemons_remaining', {
                 kinds: kindsLabel,
                 pids: detachedPids.join(', ') || '-',
               })
-            : outcome.reason === 'visible_window_open'
-            ? locale === 'en'
-              ? 'Visible Antigravity windows are still open. Save and close them before rolling back.'
-              : '检测到 Antigravity 仍有未关闭的可见窗口，请先保存并关闭后再撤销切换。'
             : t('assistant_account.quit_first'),
           true,
         );
@@ -288,30 +299,19 @@ export function AccountsPage() {
   const previewReason = useMemo(() => {
     const raw = autoSwitchPreview?.reason || t('accounts.smart_switch.best_current');
     if (!masked || !autoSwitchPreview?.reason) return raw;
-    let text = raw;
-    const items = [
-      autoSwitchPreview.account,
-      autoSwitchPreview.bestCandidate,
-      autoSwitchPreview.currentAccount,
-      ...accounts,
+    const knownEmails = [
+      autoSwitchPreview.account?.email,
+      autoSwitchPreview.bestCandidate?.email,
+      autoSwitchPreview.currentAccount?.email,
+      ...accounts.map((a) => a.email),
     ];
-    for (const item of items) {
-      if (!item) continue;
-      const email = String(item.email ?? '').trim();
-      const name = String(item.name ?? '').trim();
-      if (name && email) {
-        text = text.split(`${name} (${email})`).join(`${maskAccountName(name)} (${maskEmail(email)})`);
-      }
-      if (email) {
-        text = text.split(email).join(maskEmail(email));
-      }
-    }
-    return text;
+    return maskEmailsInText(raw, knownEmails, true);
   }, [accounts, autoSwitchPreview, masked, t]);
 
-  const privacyLabel = masked
-    ? t('accounts.privacy.show', undefined, locale === 'en' ? 'Show Account Info' : '显示账号信息')
-    : t('accounts.privacy.hide', undefined, locale === 'en' ? 'Hide Account Info' : '隐藏账号信息');
+  const privacyActionTitle = masked
+    ? t('accounts.privacy.show', undefined, locale === 'en' ? 'Show Account Emails' : '显示账号邮箱')
+    : t('accounts.privacy.hide', undefined, locale === 'en' ? 'Hide Account Emails' : '隐藏账号邮箱');
+  const privacyLabel = `${privacyActionTitle} (Ctrl+Shift+M)`;
 
   const normalizedSshHosts = useMemo(() => {
     const fallback = t('ssh.remote_fallback');
@@ -328,13 +328,18 @@ export function AccountsPage() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <button
             type="button"
-            className="gb-btn gb-btn-sm"
+            className="gb-btn gb-btn-ghost gb-icon-btn"
+            style={{
+              width: 28,
+              height: 28,
+              color: masked ? 'var(--blue)' : 'var(--text-secondary)',
+            }}
             aria-label={privacyLabel}
+            aria-pressed={masked}
             title={privacyLabel}
             onClick={() => void updateConfig({ privacyMaskAccounts: !masked })}
           >
-            {masked ? <Eye size={13} /> : <EyeOff size={13} />}
-            <span>{privacyLabel}</span>
+            {masked ? <EyeOff size={14} /> : <Eye size={14} />}
           </button>
           {accounts.length > 0 && (
             <button type="button" className="gb-btn gb-btn-sm" onClick={toggleAllCollapse}>
@@ -622,7 +627,7 @@ export function AccountsPage() {
                       type="button"
                       className="gb-btn gb-btn-ghost gb-icon-btn"
                       onClick={() => setOpenMenuId((cur) => (cur === acc.id ? null : acc.id))}
-                      aria-label={t('accounts.a11y.actions', { account: displayEmail || displayName })}
+                      aria-label={t('accounts.a11y.actions', { account: displayName || displayEmail })}
                     >
                       <MoreHorizontal size={15} />
                     </button>
@@ -633,8 +638,8 @@ export function AccountsPage() {
                       onClick={() => toggleSingleCollapse(acc.id)}
                       aria-label={
                         isCollapsed
-                          ? t('accounts.a11y.expand_details', { account: displayEmail || displayName })
-                          : t('accounts.a11y.collapse_details', { account: displayEmail || displayName })
+                          ? t('accounts.a11y.expand_details', { account: displayName || displayEmail })
+                          : t('accounts.a11y.collapse_details', { account: displayName || displayEmail })
                       }
                     >
                       {isCollapsed ? <ChevronDown size={15} /> : <ChevronUp size={15} />}

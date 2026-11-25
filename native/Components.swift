@@ -68,6 +68,34 @@ func button(_ title: String, target: AnyObject?, action: Selector) -> NSButton {
     view.bezelStyle = .rounded; view.isBordered = false; view.font = .systemFont(ofSize: 12, weight: .medium)
     return view
 }
+func makePrivacyEyeButton(target: AnyObject?, action: Selector, symbolSize: CGFloat = 13.5, buttonSize: CGFloat = 24) -> DesignButton {
+    let btn = DesignButton(title: "", target: target, action: action)
+    btn.isQuietAccessory = true
+    btn.imagePosition = .imageOnly
+    btn.controlSize = .small
+    btn.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+        btn.widthAnchor.constraint(equalToConstant: buttonSize),
+        btn.heightAnchor.constraint(equalToConstant: buttonSize)
+    ])
+    applyPrivacyEyeButtonState(btn, masked: AccountIdentity.isPrivacyMaskEnabled, symbolSize: symbolSize)
+    return btn
+}
+func applyPrivacyEyeButtonState(_ btn: NSButton, masked: Bool, symbolSize: CGFloat = 13.5, includeShortcutHint: Bool = true) {
+    let symbolName = masked ? "eye.slash" : "eye"
+    let img = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
+        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: symbolSize, weight: .medium))
+    img?.isTemplate = true
+    btn.image = img
+    btn.contentTintColor = masked ? Design.blue : .tertiaryLabelColor
+    let actionTitle = masked
+        ? L10n.t("accounts.privacy.show", fallback: "显示账号邮箱")
+        : L10n.t("accounts.privacy.hide", fallback: "隐藏账号邮箱")
+    btn.toolTip = nil
+    btn.setAccessibilityLabel(actionTitle)
+    btn.setAccessibilityHelp(includeShortcutHint ? "\(actionTitle) (⇧⌘M)" : actionTitle)
+    btn.setAccessibilityValue(masked ? 1 : 0)
+}
 class DesignCardBox: NSBox {
     var enablesHoverHighlight: Bool = false {
         didSet {

@@ -11,6 +11,7 @@ import {
 import {
   displayAccountIdentity,
   formatDetachedDaemonKinds,
+  maskEmailsInText,
 } from '../lib/format';
 import {
   getSystemLocales,
@@ -147,6 +148,7 @@ interface AppContextValue {
   closeAntigravitySafely: (
     timeoutMs?: number,
     purpose?: 'switch' | 'maintenance',
+    preConfirmedBackgroundExit?: boolean,
   ) => Promise<{ closed: boolean; reason?: string }>;
   interactiveSwitchAccount: (acc: { id: string; email: string; name?: string }) => Promise<void>;
   reconnectBackend: () => Promise<void>;
@@ -626,9 +628,10 @@ export function AppProvider({
     async (
       timeoutMs = 15_000,
       purpose: 'switch' | 'maintenance' = 'maintenance',
+      preConfirmedBackgroundExit = false,
     ): Promise<{ closed: boolean; reason?: string }> => {
-      let outcome = await quitAntigravityAndWait(timeoutMs, false);
-      if (!outcome.closed && outcome.reason === 'background_resident') {
+      let outcome = await quitAntigravityAndWait(timeoutMs, preConfirmedBackgroundExit);
+      if (!outcome.closed && outcome.reason === 'background_resident' && !preConfirmedBackgroundExit) {
         const confirmed = await askBackgroundExitConfirmation('', purpose);
         if (!confirmed) {
           return { closed: false, reason: 'user_cancelled' };
@@ -849,15 +852,18 @@ export function AppProvider({
         if (!confirmed) return;
 
         if (needClose) {
-          const outcome = await closeAntigravitySafely(18_000, 'switch');
+          const outcome = await closeAntigravitySafely(18_000, 'switch', detachedOnly);
           if (!outcome.closed) {
+            if (outcome.reason === 'user_cancelled') {
+              showToast(
+                locale === 'en'
+                  ? 'Cancelled. You can quit Antigravity manually from the system tray.'
+                  : '已取消。您可自行从系统托盘退出 Antigravity 后重试。',
+              );
+              return;
+            }
             showToast(
-              detachedOnly
-                ? t('assistant_account.detached_daemons_remaining', {
-                    kinds: kindsLabel,
-                    pids: detachedPids.join(', ') || '-',
-                  })
-                : outcome.reason === 'visible_window_open'
+              outcome.reason === 'visible_window_open'
                 ? locale === 'en'
                   ? 'Visible Antigravity windows are still open. Save and close them before switching accounts.'
                   : '检测到 Antigravity 仍有未关闭的可见窗口，请先保存并关闭后再切换账号。'
@@ -865,6 +871,11 @@ export function AppProvider({
                 ? locale === 'en'
                   ? 'Antigravity is running elevated (administrator). Close it manually before switching accounts.'
                   : '检测到 Antigravity 以管理员权限运行，无法直接关闭。请先手动退出后再切换账号。'
+                : detachedOnly
+                ? t('assistant_account.detached_daemons_remaining', {
+                    kinds: kindsLabel,
+                    pids: detachedPids.join(', ') || '-',
+                  })
                 : t('assistant_account.quit_first'),
               true,
             );
@@ -879,11 +890,13 @@ export function AppProvider({
             target: 'all',
             autoRefreshToken: true,
           });
-          showToast(
-            masked
-              ? t('assistant_account.switched_to', { email: identity.email || identity.name })
-              : switchRes?.message || t('assistant_account.switched_to', { email: acc.email }),
-          );
+          const maskedNow = Boolean(configRef.current.privacyMaskAccounts);
+          const switchedMsg = switchRes?.message
+            ? maskEmailsInText(switchRes.message, [acc.email], maskedNow)
+            : t('assistant_account.switched_to', {
+                email: displayAccountIdentity(acc.name, acc.email, locale, maskedNow).email || identity.name,
+              });
+          showToast(switchedMsg);
         } finally {
           if (hasUiRunning) {
             await launchAntigravity().catch((e) => {
@@ -1028,6 +1041,20 @@ export function AppProvider({
       window.clearInterval(dataInterval);
     };
   }, [fetchAccounts, fetchDashboard, fetchStatus]);
+
+  // Global keyboard shortcut: Ctrl+Shift+M (or Cmd+Shift+M) toggles privacy masking
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'm') {
+        const target = e.target as HTMLElement | null;
+        if (target?.isContentEditable) return;
+        e.preventDefault();
+        void updateConfig({ privacyMaskAccounts: !configRef.current.privacyMaskAccounts });
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [updateConfig]);
 
   // Scheduled periodic quota refresh per user config
   useEffect(() => {

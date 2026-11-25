@@ -268,22 +268,36 @@ export function MaintenanceModal({
       setFeedback({
         text: detachedOnly ? t('maintenance.simple.status_cleaning') : t('maintenance.simple.status_restarting_clean'),
       });
-      const closeOutcome = await closeAntigravitySafely(15_000, 'maintenance').catch(() => ({
+      const closeOutcome = await closeAntigravitySafely(15_000, 'maintenance', detachedOnly).catch(() => ({
         closed: false,
         reason: 'error',
       }));
       if (!closeOutcome.closed) {
         setBusy(false);
-        const msg = detachedOnly
-          ? t('maintenance.error.detached_daemons_remaining', {
-              kinds: kindsLabel,
-              pids: detachedPids.join(', ') || '-',
-            })
-          : closeOutcome.reason === 'visible_window_open'
-          ? locale === 'en'
-            ? 'Visible Antigravity windows are still open. Save and close them before cleaning.'
-            : '检测到 Antigravity 仍有未关闭的可见窗口，请先保存并关闭后再执行清理。'
-          : t('maintenance.error.quit_first_clear');
+        if (closeOutcome.reason === 'user_cancelled') {
+          const cancelMsg =
+            locale === 'en'
+              ? 'Cancelled. You can quit Antigravity manually from the system tray.'
+              : '已取消。您可自行从系统托盘退出 Antigravity 后重试。';
+          setFeedback({ text: cancelMsg, error: false });
+          showToast(cancelMsg);
+          return;
+        }
+        const msg =
+          closeOutcome.reason === 'visible_window_open'
+            ? locale === 'en'
+              ? 'Visible Antigravity windows are still open. Save and close them before cleaning.'
+              : '检测到 Antigravity 仍有未关闭的可见窗口，请先保存并关闭后再执行清理。'
+            : closeOutcome.reason === 'uipi_access_denied'
+            ? locale === 'en'
+              ? 'Antigravity is running elevated (administrator). Close it manually before cleaning.'
+              : '检测到 Antigravity 以管理员权限运行，无法直接关闭。请先手动退出后再执行清理。'
+            : detachedOnly
+            ? t('maintenance.error.detached_daemons_remaining', {
+                kinds: kindsLabel,
+                pids: detachedPids.join(', ') || '-',
+              })
+            : t('maintenance.error.quit_first_clear');
         setFeedback({ text: msg, error: true });
         showToast(msg, true);
         return;
@@ -334,22 +348,36 @@ export function MaintenanceModal({
       setFeedback({
         text: detachedOnly ? t('maintenance.simple.status_undoing') : t('maintenance.simple.status_restarting_undo'),
       });
-      const closeOutcome = await closeAntigravitySafely(15_000, 'maintenance').catch(() => ({
+      const closeOutcome = await closeAntigravitySafely(15_000, 'maintenance', detachedOnly).catch(() => ({
         closed: false,
         reason: 'error',
       }));
       if (!closeOutcome.closed) {
         setBusy(false);
-        const msg = detachedOnly
-          ? t('maintenance.error.detached_daemons_remaining', {
-              kinds: kindsLabel,
-              pids: detachedPids.join(', ') || '-',
-            })
-          : closeOutcome.reason === 'visible_window_open'
-          ? locale === 'en'
-            ? 'Visible Antigravity windows are still open. Save and close them before restoring.'
-            : '检测到 Antigravity 仍有未关闭的可见窗口，请先保存并关闭后再执行还原。'
-          : t('maintenance.restore.quit_body');
+        if (closeOutcome.reason === 'user_cancelled') {
+          const cancelMsg =
+            locale === 'en'
+              ? 'Cancelled. You can quit Antigravity manually from the system tray.'
+              : '已取消。您可自行从系统托盘退出 Antigravity 后重试。';
+          setFeedback({ text: cancelMsg, error: false });
+          showToast(cancelMsg);
+          return;
+        }
+        const msg =
+          closeOutcome.reason === 'visible_window_open'
+            ? locale === 'en'
+              ? 'Visible Antigravity windows are still open. Save and close them before restoring.'
+              : '检测到 Antigravity 仍有未关闭的可见窗口，请先保存并关闭后再执行还原。'
+            : closeOutcome.reason === 'uipi_access_denied'
+            ? locale === 'en'
+              ? 'Antigravity is running elevated (administrator). Close it manually before restoring.'
+              : '检测到 Antigravity 以管理员权限运行，无法直接关闭。请先手动退出后再执行还原。'
+            : detachedOnly
+            ? t('maintenance.error.detached_daemons_remaining', {
+                kinds: kindsLabel,
+                pids: detachedPids.join(', ') || '-',
+              })
+            : t('maintenance.restore.quit_body');
         setFeedback({ text: msg, error: true });
         showToast(msg, true);
         return;

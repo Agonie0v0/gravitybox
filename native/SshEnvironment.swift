@@ -1146,7 +1146,8 @@ enum SshEnvironmentVisuals {
             if item.state != .online {
                 rowPrimary += " · \(item.state.localizedStateLabel)"
             } else if let email = item.email?.trimmingCharacters(in: .whitespacesAndNewlines), !email.isEmpty {
-                let displayEmail = email.count > 22 ? String(email.prefix(20)) + "…" : email
+                let shownEmail = AccountIdentity.displayEmail(email, masked: AccountIdentity.isPrivacyMaskEnabled)
+                let displayEmail = shownEmail.count > 22 ? String(shownEmail.prefix(20)) + "…" : shownEmail
                 rowPrimary += " · \(displayEmail)"
             }
         }
@@ -1195,7 +1196,8 @@ enum SshEnvironmentVisuals {
                 if item.state != .online {
                     primaryStr = "● \(base) · \(item.state.localizedStateLabel)"
                 } else if let email = item.email, !email.isEmpty {
-                    let shortEmail = email.count > 22 ? String(email.prefix(20)) + "…" : email
+                    let shownEmail = AccountIdentity.displayEmail(email, masked: AccountIdentity.isPrivacyMaskEnabled)
+                    let shortEmail = shownEmail.count > 22 ? String(shownEmail.prefix(20)) + "…" : shownEmail
                     primaryStr = "● \(base) · \(shortEmail)"
                 } else {
                     primaryStr = "● \(base)"

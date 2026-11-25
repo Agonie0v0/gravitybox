@@ -36,6 +36,10 @@ export interface AtomicRenameRetryOptions {
   signal?: AbortSignal;
   platform?: NodeJS.Platform;
   renameFn?: (src: string, dest: string) => void;
+  rmFn?: (
+    targetPath: string,
+    options: { recursive: boolean; force: boolean; maxRetries?: number; retryDelay?: number },
+  ) => void;
   allowCrossDevice?: boolean;
 }
 
@@ -90,15 +94,25 @@ export async function atomicRenameWithRetry(
       const code = (error as NodeJS.ErrnoException | undefined)?.code;
       if (code === 'EXDEV' && options.allowCrossDevice) {
         const destExisted = existsSync(dest);
+        const rmFn = options.rmFn ?? rmSync;
+        const rmOpts =
+          platform === 'win32'
+            ? {
+                recursive: true,
+                force: true,
+                maxRetries: Math.max(1, maxRetries),
+                retryDelay: Math.max(20, baseDelayMs),
+              }
+            : { recursive: true, force: true };
         try {
           cpSync(src, dest, { recursive: true, force: true, errorOnExist: false });
         } catch (cpError) {
           if (!destExisted) {
-            try { rmSync(dest, { recursive: true, force: true }); } catch {}
+            try { rmFn(dest, rmOpts); } catch {}
           }
           throw cpError;
         }
-        rmSync(src, { recursive: true, force: true });
+        rmFn(src, rmOpts);
         return;
       }
       if (attempt >= maxRetries || !code || !WINDOWS_RETRYABLE_RENAME_CODES.has(code)) {

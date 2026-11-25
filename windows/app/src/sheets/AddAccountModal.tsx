@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { Modal } from '../components/Modal';
 import { useApp } from '../context/AppContext';
-import { displayAccountIdentity } from '../lib/format';
+import { displayAccountIdentity, maskEmailsInText } from '../lib/format';
 import {
   backendRequest,
   getAppInfo,
@@ -328,7 +328,8 @@ export function AddAccountModal({
             setOauthSessionId(null);
             setOauthAuthUrl('');
             setBusy(false);
-            showToast(st.message || t('oauth.msg.succeeded'));
+            const masked = Boolean(config.privacyMaskAccounts);
+            showToast(maskEmailsInText(st.message || t('oauth.msg.succeeded'), [rawCurrentEmail], masked));
             await refreshAll(true);
             onClose();
           } else if (phase === 'failed' || phase === 'cancelled' || phase === 'expired') {
@@ -406,7 +407,9 @@ export function AddAccountModal({
             if (task?.state === 'failed' || task?.state === 'cancelled' || task?.state === 'error') {
               throw new Error(task.error || task.message || t('assistant.action_incomplete'));
             }
-            if (task?.message) showToast(task.message);
+            if (task?.message) {
+              showToast(maskEmailsInText(task.message, [rawCurrentEmail], Boolean(config.privacyMaskAccounts)));
+            }
             completed = true;
             break;
           }
