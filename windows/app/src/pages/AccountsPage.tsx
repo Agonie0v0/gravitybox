@@ -309,8 +309,8 @@ export function AccountsPage() {
   }, [accounts, autoSwitchPreview, masked, t]);
 
   const privacyActionTitle = masked
-    ? t('accounts.privacy.show', undefined, locale === 'en' ? 'Show Account Emails' : '显示账号邮箱')
-    : t('accounts.privacy.hide', undefined, locale === 'en' ? 'Hide Account Emails' : '隐藏账号邮箱');
+    ? t('accounts.privacy.show', undefined, locale === 'en' ? 'Show Account Info' : '显示账号信息')
+    : t('accounts.privacy.hide', undefined, locale === 'en' ? 'Hide Account Info' : '隐藏账号信息');
   const privacyLabel = `${privacyActionTitle} (Ctrl+Shift+M)`;
 
   const normalizedSshHosts = useMemo(() => {
@@ -324,15 +324,15 @@ export function AccountsPage() {
     <div className="gb-page-inner gb-fade-in">
       {/* Page Header */}
       <div className="gb-page-header">
-        <h1 className="gb-page-title">{t('accounts.title')}</h1>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <h1 className="gb-page-title">{t('accounts.title')}</h1>
           <button
             type="button"
             className="gb-btn gb-btn-ghost gb-icon-btn"
             style={{
-              width: 28,
-              height: 28,
-              color: masked ? 'var(--blue)' : 'var(--text-secondary)',
+              width: 26,
+              height: 26,
+              color: masked ? 'var(--blue)' : 'var(--text-tertiary)',
             }}
             aria-label={privacyLabel}
             aria-pressed={masked}
@@ -341,6 +341,8 @@ export function AccountsPage() {
           >
             {masked ? <EyeOff size={14} /> : <Eye size={14} />}
           </button>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           {accounts.length > 0 && (
             <button type="button" className="gb-btn gb-btn-sm" onClick={toggleAllCollapse}>
               {allCollapsed ? <ChevronDown size={13} /> : <ChevronUp size={13} />}

@@ -97,8 +97,8 @@ export function OverviewPage() {
   const activeEmail = rawActiveEmail ? (masked ? maskEmail(rawActiveEmail) : rawActiveEmail) : '';
   const activeTier = normalizeTier(dashAccounts?.activeTier ?? status.activeSubscriptionTier, locale);
   const privacyActionTitle = masked
-    ? t('accounts.privacy.show', undefined, locale === 'en' ? 'Show Account Emails' : '显示账号邮箱')
-    : t('accounts.privacy.hide', undefined, locale === 'en' ? 'Hide Account Emails' : '隐藏账号邮箱');
+    ? t('accounts.privacy.show', undefined, locale === 'en' ? 'Show Account Info' : '显示账号信息')
+    : t('accounts.privacy.hide', undefined, locale === 'en' ? 'Hide Account Info' : '隐藏账号信息');
   const privacyLabel = `${privacyActionTitle} (Ctrl+Shift+M)`;
 
   const contract = useMemo(

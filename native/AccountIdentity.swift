@@ -61,6 +61,21 @@ struct AccountIdentity {
         return "\(maskedLocal)@\(maskedDomain)"
     }
 
+    static func maskDisplayName(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        if trimmed.contains("@") {
+            return maskEmail(trimmed)
+        }
+        let chars = Array(trimmed)
+        switch chars.count {
+        case 1: return "•"
+        case 2: return "\(chars[0])•"
+        case 3: return "\(chars[0])••"
+        default: return "\(chars[0])•••"
+        }
+    }
+
     static func displayEmail(_ email: String?, masked: Bool = isPrivacyMaskEnabled) -> String {
         let clean = (email ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return "" }
@@ -73,13 +88,10 @@ struct AccountIdentity {
 
     static func displayName(name: String?, email: String, masked: Bool) -> String {
         let trimmed = (name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
-            if masked && !cleanEmail.isEmpty && trimmed.caseInsensitiveCompare(cleanEmail) == .orderedSame {
-                return maskEmail(cleanEmail)
-            }
-            return trimmed
+            return masked ? maskDisplayName(trimmed) : trimmed
         }
+        let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanEmail.isEmpty else { return "" }
         let localPart = cleanEmail.components(separatedBy: "@").first ?? cleanEmail
         return masked ? maskLocalSegment(localPart) : localPart
@@ -93,11 +105,12 @@ struct AccountIdentity {
     ) -> String {
         let cleanName = (name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shownName = masked ? maskDisplayName(cleanName) : cleanName
         let shownEmail = displayEmail(cleanEmail, masked: masked)
-        if !cleanName.isEmpty && !shownEmail.isEmpty && cleanName.caseInsensitiveCompare(cleanEmail) != .orderedSame {
-            return isEnglish ? "\(cleanName) (\(shownEmail))" : "\(cleanName)（\(shownEmail)）"
+        if !shownName.isEmpty && !shownEmail.isEmpty && cleanName.caseInsensitiveCompare(cleanEmail) != .orderedSame {
+            return isEnglish ? "\(shownName) (\(shownEmail))" : "\(shownName)（\(shownEmail)）"
         }
-        return !shownEmail.isEmpty ? shownEmail : cleanName
+        return !shownEmail.isEmpty ? shownEmail : shownName
     }
 
     private static let emailRegex = try? NSRegularExpression(pattern: "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")

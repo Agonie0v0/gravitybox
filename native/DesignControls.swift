@@ -164,6 +164,15 @@ class DesignButton: NSButton {
                 grad.draw(in: path, angle: 90)
             }
             Design.drawSpecularBevel(in: rect, cornerRadius: cornerR, isDark: true)
+        } else if isQuietAccessory {
+            let activeHighlight = max(hp, pp)
+            if isEnabled && activeHighlight > 0.01 {
+                let fill = isDark
+                    ? NSColor.white.withAlphaComponent(0.10 * hp + 0.06 * pp)
+                    : NSColor.black.withAlphaComponent(0.055 * hp + 0.04 * pp)
+                fill.setFill()
+                NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7).fill()
+            }
         } else if inPopover {
             // Pure translucent glass overlay that blends with the popover's vibrant wallpaper tint in both Light and Dark mode.
             let enableScale: CGFloat = isEnabled ? 1.0 : 0.45
@@ -187,15 +196,6 @@ class DesignButton: NSButton {
             path.stroke()
             if isEnabled {
                 Design.drawSpecularBevel(in: rect, cornerRadius: cornerR, isDark: isDark)
-            }
-        } else if isQuietAccessory {
-            let activeHighlight = max(hp, pp)
-            if isEnabled && activeHighlight > 0.01 {
-                let fill = isDark
-                    ? NSColor.white.withAlphaComponent(0.10 * hp + 0.06 * pp)
-                    : NSColor.black.withAlphaComponent(0.055 * hp + 0.04 * pp)
-                fill.setFill()
-                NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7).fill()
             }
         } else {
             // 主窗口轻玻璃立体胶囊按钮（与左侧毛玻璃导航栏和菜单栏质感拉齐）
@@ -249,7 +249,11 @@ class DesignButton: NSButton {
         }
 
         let fgAlpha: CGFloat = primary ? ((isEnabled || isActivitySpinning) ? 1.0 : 0.88) : (isEnabled ? 1.0 : (isActivitySpinning ? 0.86 : 0.42))
-        let baseFg: NSColor = primary ? .white : (isQuietAccessory ? (hp > 0.25 ? Design.primary : Design.secondary) : Design.primary)
+        let baseFg: NSColor = primary
+            ? .white
+            : (isQuietAccessory
+                ? (contentTintColor ?? (hp > 0.25 ? Design.primary : Design.secondary))
+                : Design.primary)
         let fgColor = baseFg.withAlphaComponent(fgAlpha)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font ?? NSFont.systemFont(ofSize: 12, weight: .medium),

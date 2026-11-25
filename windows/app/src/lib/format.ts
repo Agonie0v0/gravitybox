@@ -223,6 +223,17 @@ export function maskEmail(email: string | undefined | null): string {
   return `${maskedLocal}@${maskedDomain}`;
 }
 
+export function maskDisplayName(name: string | undefined | null): string {
+  const trimmed = (name ?? '').trim();
+  if (!trimmed) return '';
+  if (trimmed.includes('@')) return maskEmail(trimmed);
+  const chars = Array.from(trimmed);
+  if (chars.length === 1) return '•';
+  if (chars.length === 2) return `${chars[0]}•`;
+  if (chars.length === 3) return `${chars[0]}••`;
+  return `${chars[0]}•••`;
+}
+
 export function displayAccountIdentity(
   name: string | undefined | null,
   email: string | undefined | null,
@@ -233,11 +244,7 @@ export function displayAccountIdentity(
   const cleanEmail = (email ?? '').trim();
   let resolvedName: string;
   if (cleanName) {
-    if (masked && cleanEmail && cleanName.toLowerCase() === cleanEmail.toLowerCase()) {
-      resolvedName = maskEmail(cleanEmail);
-    } else {
-      resolvedName = cleanName;
-    }
+    resolvedName = masked ? maskDisplayName(cleanName) : cleanName;
   } else if (cleanEmail) {
     const at = cleanEmail.indexOf('@');
     const local = at > 0 ? cleanEmail.slice(0, at) : cleanEmail;
@@ -262,11 +269,10 @@ export function formatAccountOptionLabel(
     return rawLabel || rawEmail || opt.id;
   }
   if (rawName && rawEmail && rawName.toLowerCase() !== rawEmail.toLowerCase()) {
-    return `${rawName} (${maskEmail(rawEmail)})`;
+    return `${maskDisplayName(rawName)} (${maskEmail(rawEmail)})`;
   }
   if (rawEmail) return maskEmail(rawEmail);
-  if (rawLabel.includes('@')) return maskEmail(rawLabel);
-  if (rawLabel) return rawLabel;
+  if (rawLabel) return maskDisplayName(rawLabel);
   return opt.id;
 }
 

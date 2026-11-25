@@ -399,8 +399,8 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         for (index, name) in names.enumerated() { let value = add(view, name, #selector(menuNavigate(_:)), String(index + 1)); value.tag = index }
         view.addItem(.separator())
         let maskTitle = privacyMaskAccounts
-            ? L10n.t("accounts.privacy.show", fallback: "显示账号邮箱")
-            : L10n.t("accounts.privacy.hide", fallback: "隐藏账号邮箱")
+            ? L10n.t("accounts.privacy.show", fallback: "显示账号信息")
+            : L10n.t("accounts.privacy.hide", fallback: "隐藏账号信息")
         let maskItem = NSMenuItem(title: maskTitle, action: #selector(togglePrivacyMaskAccounts(_:)), keyEquivalent: "m")
         maskItem.target = self
         maskItem.keyEquivalentModifierMask = [.command, .shift]
@@ -427,8 +427,8 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         AccountIdentity.isPrivacyMaskEnabled = masked
         if let privacyMaskMenuItem {
             privacyMaskMenuItem.title = masked
-                ? L10n.t("accounts.privacy.show", fallback: "显示账号邮箱")
-                : L10n.t("accounts.privacy.hide", fallback: "隐藏账号邮箱")
+                ? L10n.t("accounts.privacy.show", fallback: "显示账号信息")
+                : L10n.t("accounts.privacy.hide", fallback: "隐藏账号信息")
             privacyMaskMenuItem.state = masked ? .on : .off
         }
         overview?.refreshPrivacyMaskState()

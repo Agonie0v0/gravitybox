@@ -92,7 +92,7 @@ final class AccountsPage: NSObject {
     let autoSwitchStatusBadge = pillBadge(L10n.t("accounts.smart_switch.disabled"), color: Design.inactivePill)
     let policySubtitleLabel = text("", size: 11, color: Design.secondary)
     let configButton = button(L10n.t("accounts.smart_switch.config_btn"), target: nil, action: #selector(showPolicySettings))
-    let privacyEyeButton = makePrivacyEyeButton(target: nil, action: #selector(togglePrivacyMask))
+    let privacyEyeButton = makePrivacyEyeButton(target: nil, action: #selector(togglePrivacyMask), symbolSize: 14, buttonSize: 26)
     let toggleCollapseAllButton = button(L10n.t("accounts.collapse_all"), target: nil, action: #selector(toggleCollapseAllAccounts))
     let manageAccountsButton = button(L10n.t("accounts.manage_btn", fallback: "管理账号…"), target: nil, action: #selector(addAccount))
     let policyBox: NSBox
@@ -307,9 +307,9 @@ final class AccountsPage: NSObject {
         toggleCollapseAllButton.toolTip = nil
         toggleCollapseAllButton.setAccessibilityLabel(isAllCollapsedMode ? L10n.t("accounts.a11y.expand_all") : L10n.t("accounts.a11y.collapse_all"))
 
-        let headerActions = horizontal([privacyEyeButton, toggleCollapseAllButton, refreshQuotaBtn, manageAccountsButton], spacing: 8)
+        let headerActions = horizontal([toggleCollapseAllButton, refreshQuotaBtn, manageAccountsButton], spacing: 8)
         headerActions.detachesHiddenViews = true
-        let root = pageStack(title: L10n.t("accounts.title"), actions: headerActions)
+        let root = pageStack(title: L10n.t("accounts.title"), titleAccessory: privacyEyeButton, actions: headerActions)
         root.spacing = Design.Spacing.page
 
         // B12: 待生效横幅
@@ -1888,10 +1888,11 @@ final class AccountsPage: NSObject {
         if shouldSwitch, let candidate, let cId = candidate["id"] as? String, cId != activeId {
             let email = candidate["email"] as? String ?? ""
             let name = (candidate["name"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let shownName = masked ? AccountIdentity.maskDisplayName(name) : name
             let shownEmail = AccountIdentity.displayEmail(email, masked: masked)
-            let displayName = (!name.isEmpty && name.caseInsensitiveCompare(email) != .orderedSame && !shownEmail.isEmpty)
-                ? "\(name) · \(shownEmail)"
-                : (shownEmail.isEmpty ? name : shownEmail)
+            let displayName = (!shownName.isEmpty && name.caseInsensitiveCompare(email) != .orderedSame && !shownEmail.isEmpty)
+                ? "\(shownName) · \(shownEmail)"
+                : (shownEmail.isEmpty ? shownName : shownEmail)
             recommendationLabel.stringValue = L10n.t("accounts.smart_switch.recommend_low", ["display": displayName])
             recommendationLabel.textColor = .labelColor
             recommendationLabel.toolTip = nil
@@ -1902,10 +1903,11 @@ final class AccountsPage: NSObject {
         } else if let candidate, let cId = candidate["id"] as? String, cId != activeId {
             let email = candidate["email"] as? String ?? ""
             let name = (candidate["name"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let shownName = masked ? AccountIdentity.maskDisplayName(name) : name
             let shownEmail = AccountIdentity.displayEmail(email, masked: masked)
-            let displayName = (!name.isEmpty && name.caseInsensitiveCompare(email) != .orderedSame && !shownEmail.isEmpty)
-                ? "\(name) · \(shownEmail)"
-                : (shownEmail.isEmpty ? name : shownEmail)
+            let displayName = (!shownName.isEmpty && name.caseInsensitiveCompare(email) != .orderedSame && !shownEmail.isEmpty)
+                ? "\(shownName) · \(shownEmail)"
+                : (shownEmail.isEmpty ? shownName : shownEmail)
 
             recommendationLabel.stringValue = safeReason.isEmpty ? L10n.t("accounts.smart_switch.backup_display", ["display": displayName]) : safeReason
             recommendationLabel.textColor = Design.secondary
@@ -2013,7 +2015,7 @@ final class AccountsPage: NSObject {
     }
 
     func refreshPrivacyMaskState() {
-        applyPrivacyEyeButtonState(privacyEyeButton, masked: app.privacyMaskAccounts)
+        applyPrivacyEyeButtonState(privacyEyeButton, masked: app.privacyMaskAccounts, symbolSize: 14)
         renderedFingerprint = ""
         let remoteHosts = app.canonicalRemoteHosts()
         renderedFingerprint = computeRenderedFingerprint(remoteHosts: remoteHosts)

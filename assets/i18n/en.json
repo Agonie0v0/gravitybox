@@ -970,8 +970,8 @@
     "menu_panel.usage.scope_all_summary": "All environments usage",
     "menu_panel.usage.scope_local_summary": "Local usage",
     "menu_panel.usage.scope_remote_summary": "{host} usage",
-    "accounts.privacy.hide": "Hide Account Emails",
-    "accounts.privacy.show": "Show Account Emails"
+    "accounts.privacy.hide": "Hide Account Info",
+    "accounts.privacy.show": "Show Account Info"
   },
   "backend": {
     "status.starting": "Connecting to local service…",

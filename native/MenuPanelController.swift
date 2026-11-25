@@ -557,7 +557,9 @@ final class MenuPanelController: NSViewController {
         copyMenu.addItem(copyItem)
         quotaEmailLabel.menu = copyMenu
 
-        let nameRow = horizontal([quotaAccountNameLabel, quotaTierBadge, quotaStatusBadge, flexibleSpace(), quotaPrivacyEyeButton], spacing: 6)
+        let nameRowSpacer = flexibleSpace()
+        nameRowSpacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        let nameRow = horizontal([quotaAccountNameLabel, quotaTierBadge, quotaStatusBadge, quotaPrivacyEyeButton, nameRowSpacer], spacing: 6)
         nameRow.alignment = .centerY
         nameRow.detachesHiddenViews = true
         let identityStack = vertical([nameRow, quotaEmailLabel], spacing: 4)
@@ -619,7 +621,7 @@ final class MenuPanelController: NSViewController {
         let countCluster = horizontal([accountsCountLabel, accountsLocalOnlyNoteLabel], spacing: 4)
         countCluster.alignment = .firstBaseline
         countCluster.detachesHiddenViews = true
-        let topRow = horizontal([sectionTitleLabel, flexibleSpace(), countCluster, accountsPrivacyEyeButton], spacing: 6)
+        let topRow = horizontal([sectionTitleLabel, accountsPrivacyEyeButton, flexibleSpace(), countCluster], spacing: 6)
         topRow.alignment = .centerY
         topRow.detachesHiddenViews = true
 

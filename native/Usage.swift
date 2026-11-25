@@ -299,12 +299,13 @@ enum UsageFilterSupport {
             let title: String
             if masked {
                 let shownEmail = AccountIdentity.displayEmail(email, masked: true)
-                if !name.isEmpty && name.caseInsensitiveCompare(email) != .orderedSame && !shownEmail.isEmpty {
-                    title = "\(name) (\(shownEmail))"
+                let shownName = AccountIdentity.maskDisplayName(name)
+                if !shownName.isEmpty && name.caseInsensitiveCompare(email) != .orderedSame && !shownEmail.isEmpty {
+                    title = "\(shownName) (\(shownEmail))"
                 } else if !shownEmail.isEmpty {
                     title = shownEmail
                 } else if !label.isEmpty {
-                    title = label.contains("@") ? AccountIdentity.maskEmail(label) : label
+                    title = AccountIdentity.maskDisplayName(label)
                 } else {
                     title = id
                 }

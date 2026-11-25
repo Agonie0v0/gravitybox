@@ -7254,10 +7254,23 @@ import Cocoa
             check(AccountIdentity.maskEmail("zhangsan@example.invalid") == "zh•••n@e•••.invalid", "maskEmail >=4-char local keeps 2 head + 1 tail")
             check(AccountIdentity.maskEmail("localonly") == "lo•••y", "maskEmail without @")
 
-            check(AccountIdentity.displayName(name: "主力工作号", email: "zhangsan@example.invalid", masked: true) == "主力工作号", "Custom nickname must remain visible when privacy mask is enabled")
+            check(AccountIdentity.maskDisplayName("A") == "•", "maskDisplayName 1-char")
+            check(AccountIdentity.maskDisplayName("甲") == "•", "maskDisplayName 1-char CJK")
+            check(AccountIdentity.maskDisplayName("甲乙") == "甲•", "maskDisplayName 2-char CJK")
+            check(AccountIdentity.maskDisplayName("丙丁") == "丙•", "maskDisplayName 2-char CJK alt")
+            check(AccountIdentity.maskDisplayName("甲乙丙") == "甲••", "maskDisplayName 3-char CJK")
+            check(AccountIdentity.maskDisplayName("Alex Sample User") == "A•••", "maskDisplayName >=4-char Latin hides spaces and full initials")
+            check(AccountIdentity.maskDisplayName("主力工作号") == "主•••", "maskDisplayName >=4-char CJK")
+            check(AccountIdentity.maskDisplayName("zhangsan@example.invalid") == "zh•••n@e•••.invalid", "maskDisplayName delegates email-shaped names")
+            check(AccountIdentity.displayName(name: "主力工作号", email: "zhangsan@example.invalid", masked: true) == "主•••", "Custom nickname must be masked when privacy mask is enabled")
             check(AccountIdentity.displayName(name: "zhangsan@example.invalid", email: "zhangsan@example.invalid", masked: true) == "zh•••n@e•••.invalid", "Email-shaped name must still be masked")
             check(AccountIdentity.displayName(name: "", email: "zhangsan@example.invalid", masked: true) == "zh•••n", "Fallback prefix without custom name must be masked")
             check(AccountIdentity.displayName(name: "", email: "", masked: true) == "", "Empty identity must stay empty")
+            check(
+                AccountIdentity.displayTarget(name: "甲乙", email: "zhangsan@example.invalid", masked: true, isEnglish: false)
+                    == "甲•（zh•••n@e•••.invalid）",
+                "displayTarget must mask both nickname and email"
+            )
             check(
                 AccountIdentity.maskEmailsInText("Switch to \(aliceCorpEmail) (80%)", knownEmails: [aliceCorpEmail], masked: true)
                     == "Switch to al•••e@c•••.invalid (80%)",
@@ -7304,15 +7317,41 @@ import Cocoa
 
             check(dash.activeAccountLabel.stringValue == "主力工作号" && dash.activeEmailLabel.stringValue == "zhangsan@example.invalid", "Unmasked overview shows raw email")
             check(!dash.privacyEyeButton.isHidden && (dash.privacyEyeButton.accessibilityValue() as? Int) == 0, "Unmasked overview eye button shows unmasked state")
+            check(dash.privacyEyeButton.contentTintColor == nil && accPage.privacyEyeButton.contentTintColor == nil && mPanel.quotaPrivacyEyeButton.contentTintColor == nil, "Unmasked quiet eye buttons must clear active tint")
+            check(
+                accPage.privacyEyeButton.superview !== accPage.manageAccountsButton.superview
+                    && (accPage.privacyEyeButton.superview?.subviews.contains(where: { $0.identifier?.rawValue == "page-title" }) == true),
+                "AccountsPage privacyEyeButton must sit inline next to the page title"
+            )
+            if let quotaNameRow = mPanel.quotaPrivacyEyeButton.superview as? NSStackView {
+                let views = quotaNameRow.arrangedSubviews
+                check(
+                    views.last !== mPanel.quotaPrivacyEyeButton
+                        && (views.firstIndex(where: { $0 === mPanel.quotaPrivacyEyeButton }) ?? -1) == ((views.firstIndex(where: { $0 === mPanel.quotaStatusBadge }) ?? -2) + 1),
+                    "MenuPanel quotaPrivacyEyeButton must sit inline after status badge before spacer"
+                )
+            } else {
+                check(false, "MenuPanel quotaPrivacyEyeButton must live inside an NSStackView row")
+            }
+            if let accountsTopRow = mPanel.accountsPrivacyEyeButton.superview as? NSStackView {
+                let views = accountsTopRow.arrangedSubviews
+                check(
+                    views.count >= 3 && views[1] === mPanel.accountsPrivacyEyeButton,
+                    "MenuPanel accountsPrivacyEyeButton must sit inline right after section title"
+                )
+            } else {
+                check(false, "MenuPanel accountsPrivacyEyeButton must live inside an NSStackView row")
+            }
 
             maskHost.togglePrivacyMaskAccounts()
             pump()
             check(maskHost.privacyMaskAccounts == true && AccountIdentity.isPrivacyMaskEnabled == true, "togglePrivacyMaskAccounts must enable privacy masking")
             let reloadedCfg = try ConfigurationStore(state: maskStateDir)
             check(reloadedCfg.value.privacyMaskAccounts == true, "privacyMaskAccounts must persist to config.json")
-            check(dash.activeAccountLabel.stringValue == "主力工作号", "Masked overview preserves custom nickname")
+            check(dash.activeAccountLabel.stringValue == "主•••", "Masked overview masks custom nickname")
             check(dash.activeEmailLabel.stringValue == "zh•••n@e•••.invalid", "Masked overview masks active email")
             check((dash.privacyEyeButton.accessibilityValue() as? Int) == 1, "Masked overview eye button updates accessibility state")
+            check(dash.privacyEyeButton.contentTintColor == Design.blue && accPage.privacyEyeButton.contentTintColor == Design.blue && mPanel.quotaPrivacyEyeButton.contentTintColor == Design.blue && mPanel.accountsPrivacyEyeButton.contentTintColor == Design.blue, "Masked eye buttons must apply Design.blue active tint")
             if let copyItem = dash.activeEmailLabel.menu?.items.first, let target = copyItem.target, let action = copyItem.action {
                 _ = target.perform(action, with: copyItem)
                 check(NSPasteboard.general.string(forType: .string) == "zhangsan@example.invalid", "Context copy menu must still copy unmasked raw email")
@@ -7320,18 +7359,18 @@ import Cocoa
                 check(false, "Dashboard activeEmailLabel must retain copy menu when masked")
             }
             let accTextsMasked = allTextValues(accPage.cardsStack)
-            check(accTextsMasked.contains("主力工作号") && accTextsMasked.contains("zh•••n@e•••.invalid") && accTextsMasked.contains("al•••e@c•••.invalid") && accTextsMasked.contains("al•••e"), "AccountsPage must preserve custom name while masking emails and unnamed local parts")
-            check(!accTextsMasked.contains("zhangsan@example.invalid") && !accTextsMasked.contains(aliceCorpEmail), "AccountsPage must not leak raw emails when masked")
+            check(accTextsMasked.contains("主•••") && accTextsMasked.contains("zh•••n@e•••.invalid") && accTextsMasked.contains("al•••e@c•••.invalid") && accTextsMasked.contains("al•••e"), "AccountsPage must mask custom nicknames, emails, and unnamed local parts")
+            check(!accTextsMasked.contains("主力工作号") && !accTextsMasked.contains("zhangsan@example.invalid") && !accTextsMasked.contains(aliceCorpEmail), "AccountsPage must not leak raw nicknames or emails when masked")
             let popupTitles = (uPage.accountPopup.menu?.items ?? []).map(\.title)
-            check(popupTitles.contains("主力工作号 (zh•••n@e•••.invalid)") && popupTitles.contains("al•••e@c•••.invalid"), "Usage accountPopup must mask emails while keeping custom nickname")
+            check(popupTitles.contains("主••• (zh•••n@e•••.invalid)") && popupTitles.contains("al•••e@c•••.invalid") && !popupTitles.contains(where: { $0.contains("主力工作号") }), "Usage accountPopup must mask both nickname and email")
             let evCard = UsageEventCard(frame: NSRect(x: 0, y: 0, width: 520, height: 64))
             evCard.configure(["model": "gemini-test", "account_email": "zhangsan@example.invalid", "input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "estimated_usd": 0.001], showLocalEnvironmentBadge: false)
             check(evCard.accountLabel.stringValue == "zh•••n@e•••.invalid", "UsageEventCard must mask event account email")
-            check(mPanel.quotaEmailLabel.stringValue == "zh•••n@e•••.invalid", "MenuPanel quota header must mask email")
+            check(mPanel.quotaAccountNameLabel.stringValue == "主•••" && mPanel.quotaEmailLabel.stringValue == "zh•••n@e•••.invalid", "MenuPanel quota header must mask both nickname and email")
 
             maskHost.togglePrivacyMaskAccounts()
             pump()
-            check(maskHost.privacyMaskAccounts == false && dash.activeEmailLabel.stringValue == "zhangsan@example.invalid" && mPanel.quotaEmailLabel.stringValue == "zhangsan@example.invalid", "Second toggle must restore unmasked emails everywhere")
+            check(maskHost.privacyMaskAccounts == false && dash.activeAccountLabel.stringValue == "主力工作号" && dash.activeEmailLabel.stringValue == "zhangsan@example.invalid" && mPanel.quotaAccountNameLabel.stringValue == "主力工作号" && mPanel.quotaEmailLabel.stringValue == "zhangsan@example.invalid", "Second toggle must restore unmasked nicknames and emails everywhere")
         }
 
         let result:[String:Any] = ["stableOnlySelectionPassed":true,"nativeLayouts":captures.count,"captures":captures,"enCaptures":enCaptures,"enExtraCaptures":enExtraCaptures,"menuCaptures":6,"safeSwitchSharedFlowPassed":true,"emailWidthPassed":true,"partialPricingPassed":true,"headlessNoVisibleWindowLeaksPassed":true,"nativeAssertions":assertionCount,"scope":"isolated synthetic AppKit fixture; not installed-app acceptance"]

@@ -87,10 +87,11 @@ func applyPrivacyEyeButtonState(_ btn: NSButton, masked: Bool, symbolSize: CGFlo
         .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: symbolSize, weight: .medium))
     img?.isTemplate = true
     btn.image = img
-    btn.contentTintColor = masked ? Design.blue : .tertiaryLabelColor
+    btn.contentTintColor = masked ? Design.blue : nil
+    btn.needsDisplay = true
     let actionTitle = masked
-        ? L10n.t("accounts.privacy.show", fallback: "显示账号邮箱")
-        : L10n.t("accounts.privacy.hide", fallback: "隐藏账号邮箱")
+        ? L10n.t("accounts.privacy.show", fallback: "显示账号信息")
+        : L10n.t("accounts.privacy.hide", fallback: "隐藏账号信息")
     btn.toolTip = nil
     btn.setAccessibilityLabel(actionTitle)
     btn.setAccessibilityHelp(includeShortcutHint ? "\(actionTitle) (⇧⌘M)" : actionTitle)
@@ -286,20 +287,31 @@ final class DesignDividerView: NSView {
 func divider() -> NSView {
     DesignDividerView()
 }
-func pageHeader(title: String, actions: NSView? = nil) -> NSView {
+func pageHeader(title: String, titleAccessory: NSView? = nil, actions: NSView? = nil) -> NSView {
     let titleLabel = text(title, size: 24, weight: .semibold)
     titleLabel.identifier = NSUserInterfaceItemIdentifier("page-title")
     titleLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
     titleLabel.setContentCompressionResistancePriority(.required, for: .vertical)
-    guard let actions else { return titleLabel }
+    let leadingView: NSView
+    if let titleAccessory {
+        titleAccessory.setContentHuggingPriority(.required, for: .horizontal)
+        titleAccessory.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let titleGroup = horizontal([titleLabel, titleAccessory], spacing: 6)
+        titleGroup.alignment = .centerY
+        titleGroup.detachesHiddenViews = true
+        leadingView = titleGroup
+    } else {
+        leadingView = titleLabel
+    }
+    guard let actions else { return leadingView }
     actions.setContentHuggingPriority(.required, for: .horizontal)
     actions.setContentCompressionResistancePriority(.required, for: .horizontal)
-    let row = horizontal([titleLabel, flexibleSpace(), actions])
+    let row = horizontal([leadingView, flexibleSpace(), actions])
     row.alignment = .centerY
     return row
 }
-func pageStack(title: String, actions: NSView? = nil) -> NSStackView {
-    vertical([pageHeader(title: title, actions: actions)], spacing: 20)
+func pageStack(title: String, titleAccessory: NSView? = nil, actions: NSView? = nil) -> NSStackView {
+    vertical([pageHeader(title: title, titleAccessory: titleAccessory, actions: actions)], spacing: 20)
 }
 func fixedPage(_ stack: NSStackView) -> NSView {
     let container = NSView()

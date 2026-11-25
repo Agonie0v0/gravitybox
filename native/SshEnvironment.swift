@@ -240,7 +240,7 @@ struct CanonicalHostEnvironment {
 
     var displayName: String {
         if !email.isEmpty {
-            return AccountIdentity.displayName(name: name, email: email)
+            return AccountIdentity.displayName(name: name, email: email, masked: AccountIdentity.isPrivacyMaskEnabled)
         }
         return cleanHostLabel
     }
