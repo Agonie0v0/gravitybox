@@ -350,6 +350,25 @@ export function OverviewPage() {
                 {activeName}
               </span>
               <TierBadge tier={activeTier} />
+              {rawActiveEmail && (
+                <button
+                  type="button"
+                  className="gb-btn gb-privacy-eye-btn gb-icon-btn"
+                  style={{
+                    width: 22,
+                    height: 22,
+                    flexShrink: 0,
+                  }}
+                  aria-label={privacyLabel}
+                  aria-pressed={masked}
+                  title={privacyLabel}
+                  onClick={() => void updateConfig({ privacyMaskAccounts: !masked })}
+                >
+                  <span key={masked ? 'off' : 'on'} className="gb-privacy-eye-glyph">
+                    {masked ? <EyeOff size={13} /> : <Eye size={13} />}
+                  </span>
+                </button>
+              )}
             </div>
             <div
               key={`email-${masked ? 'm' : 'p'}`}
@@ -366,35 +385,15 @@ export function OverviewPage() {
               {activeEmail || t('overview.account.add_hint')}
             </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-            {rawActiveEmail && (
-              <button
-                type="button"
-                className="gb-btn gb-privacy-eye-btn gb-icon-btn"
-                style={{
-                  width: 24,
-                  height: 24,
-                }}
-                aria-label={privacyLabel}
-                aria-pressed={masked}
-                title={privacyLabel}
-                onClick={() => void updateConfig({ privacyMaskAccounts: !masked })}
-              >
-                <span key={masked ? 'off' : 'on'} className="gb-privacy-eye-glyph">
-                  {masked ? <EyeOff size={13.5} /> : <Eye size={13.5} />}
-                </span>
-              </button>
-            )}
-            <button
-              type="button"
-              className="gb-btn gb-btn-sm"
-              disabled={!reachable || quotaRefreshing}
-              onClick={() => void refreshAllQuotas()}
-            >
-              <RotateCw size={12} className={quotaRefreshing ? 'gb-spin' : undefined} />
-              <span>{t('common.refresh_quota')}</span>
-            </button>
-          </div>
+          <button
+            type="button"
+            className="gb-btn gb-btn-sm"
+            disabled={!reachable || quotaRefreshing}
+            onClick={() => void refreshAllQuotas()}
+          >
+            <RotateCw size={12} className={quotaRefreshing ? 'gb-spin' : undefined} />
+            <span>{t('common.refresh_quota')}</span>
+          </button>
         </div>
 
         <div className="gb-divider" />

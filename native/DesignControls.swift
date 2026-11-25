@@ -137,7 +137,8 @@ class DesignButton: NSButton {
 
     func setImage(_ newImage: NSImage?, animated: Bool) {
         let previous = self.image
-        if !animated || previous == nil || previous === newImage || !Design.shouldAnimate(in: self) {
+        let hasPreviousGlyph = (previous?.size.width ?? 0) > 2 && (previous?.size.height ?? 0) > 2
+        if !animated || !hasPreviousGlyph || previous === newImage || !Design.shouldAnimate(in: self) {
             iconTransitionMotion.cancel()
             outgoingTransitionImage = nil
             iconTransitionProgress = 1.0
@@ -388,7 +389,6 @@ class DesignButton: NSButton {
                 cg.translateBy(x: -iconRect.midX, y: -iconRect.midY)
             }
             func drawGlyph(_ glyph: NSImage, scale glyphScale: CGFloat, alpha glyphAlpha: CGFloat) {
-                let tintedColor = fgColor.withAlphaComponent(fgColor.alphaComponent * glyphAlpha)
                 let ctx = gctx?.cgContext
                 if abs(glyphScale - 1.0) > 0.001, let cg = ctx {
                     cg.saveGState()
@@ -397,12 +397,16 @@ class DesignButton: NSButton {
                     cg.translateBy(x: -iconRect.midX, y: -iconRect.midY)
                 }
                 if glyph.isTemplate, let cg = ctx {
+                    let layerRect = iconRect.insetBy(dx: -1, dy: -1)
                     cg.saveGState()
-                    cg.beginTransparencyLayer(in: iconRect, auxiliaryInfo: nil)
+                    if glyphAlpha < 0.999 {
+                        cg.setAlpha(glyphAlpha)
+                    }
+                    cg.beginTransparencyLayer(in: layerRect, auxiliaryInfo: nil)
                     glyph.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1.0, respectFlipped: true, hints: [.interpolation: NSNumber(value: NSImageInterpolation.high.rawValue)])
-                    cg.setBlendMode(.sourceAtop)
-                    tintedColor.setFill()
-                    cg.fill(iconRect)
+                    cg.setBlendMode(.sourceIn)
+                    fgColor.setFill()
+                    cg.fill(layerRect)
                     cg.endTransparencyLayer()
                     cg.restoreGState()
                 } else {

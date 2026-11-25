@@ -7316,6 +7316,17 @@ import Cocoa
             mPanel.selectTab(1, persist: true); mPanel.panelWillOpen(); pump()
 
             check(dash.activeAccountLabel.stringValue == "主力工作号" && dash.activeEmailLabel.stringValue == "zhangsan@example.invalid", "Unmasked overview shows raw email")
+            func hasRealSymbolImage(_ btn: NSButton) -> Bool {
+                guard let img = btn.image else { return false }
+                return img.isTemplate && img.size.width > 2 && img.size.height > 2
+            }
+            check(
+                hasRealSymbolImage(dash.privacyEyeButton)
+                    && hasRealSymbolImage(accPage.privacyEyeButton)
+                    && hasRealSymbolImage(mPanel.quotaPrivacyEyeButton)
+                    && hasRealSymbolImage(mPanel.accountsPrivacyEyeButton),
+                "All privacy eye buttons must hold a real template SF Symbol image rather than AppKit 1x1 placeholder on initial render"
+            )
             check(!dash.privacyEyeButton.isHidden && (dash.privacyEyeButton.accessibilityValue() as? Int) == 0, "Unmasked overview eye button shows unmasked state")
             check(!dash.privacyEyeButton.isBordered && !accPage.privacyEyeButton.isBordered && !mPanel.quotaPrivacyEyeButton.isBordered && !mPanel.accountsPrivacyEyeButton.isBordered, "All privacy eye buttons must remain borderless")
             check(dash.privacyEyeButton.hidesQuietHoverBackground && accPage.privacyEyeButton.hidesQuietHoverBackground && mPanel.quotaPrivacyEyeButton.hidesQuietHoverBackground && mPanel.accountsPrivacyEyeButton.hidesQuietHoverBackground, "All privacy eye buttons must suppress hover background box")
@@ -7323,20 +7334,32 @@ import Cocoa
             mPanel.quotaPrivacyEyeButton.hovered = true
             mPanel.panelDidClose()
             check(!mPanel.quotaPrivacyEyeButton.hovered && mPanel.quotaPrivacyEyeButton.hoverProgress == 0, "MenuPanel close must reset privacy eye hover state")
-            check(
-                dash.privacyEyeButton.superview === dash.refreshQuotaButton.superview
-                    && dash.privacyEyeButton.superview?.identifier?.rawValue == "account-actions",
-                "Overview Hero privacyEyeButton must anchor in trailing account-actions beside refresh button for 0px cursor jump"
-            )
+            if let titleRow = dash.privacyEyeButton.superview as? NSStackView {
+                let views = titleRow.arrangedSubviews
+                check(
+                    dash.privacyEyeButton.superview !== dash.refreshQuotaButton.superview
+                        && views.last !== dash.privacyEyeButton
+                        && (views.firstIndex(where: { $0 === dash.privacyEyeButton }) ?? -1) == ((views.firstIndex(where: { $0 === dash.heroRemoteHostBadge }) ?? -2) + 1),
+                    "Overview Hero privacyEyeButton must sit inline right after account badges before spacer"
+                )
+            } else {
+                check(false, "Overview Hero privacyEyeButton must live inside titleRow NSStackView")
+            }
             check(
                 accPage.privacyEyeButton.superview !== accPage.manageAccountsButton.superview
                     && (accPage.privacyEyeButton.superview?.subviews.contains(where: { $0.identifier?.rawValue == "page-title" }) == true),
                 "AccountsPage privacyEyeButton must sit inline next to the page title"
             )
-            check(
-                mPanel.quotaPrivacyEyeButton.superview?.identifier?.rawValue == "account-actions",
-                "MenuPanel quotaPrivacyEyeButton must anchor in trailing account-actions slot for 0px cursor jump"
-            )
+            if let quotaNameRow = mPanel.quotaPrivacyEyeButton.superview as? NSStackView {
+                let views = quotaNameRow.arrangedSubviews
+                check(
+                    views.last !== mPanel.quotaPrivacyEyeButton
+                        && (views.firstIndex(where: { $0 === mPanel.quotaPrivacyEyeButton }) ?? -1) == ((views.firstIndex(where: { $0 === mPanel.quotaStatusBadge }) ?? -2) + 1),
+                    "MenuPanel quotaPrivacyEyeButton must sit inline right after status badge before spacer"
+                )
+            } else {
+                check(false, "MenuPanel quotaPrivacyEyeButton must live inside an NSStackView row")
+            }
             if let accountsTopRow = mPanel.accountsPrivacyEyeButton.superview as? NSStackView {
                 let views = accountsTopRow.arrangedSubviews
                 check(
@@ -7355,6 +7378,13 @@ import Cocoa
             check(dash.activeAccountLabel.stringValue == "主•••", "Masked overview masks custom nickname")
             check(dash.activeEmailLabel.stringValue == "zh•••n@e•••.invalid", "Masked overview masks active email")
             check((dash.privacyEyeButton.accessibilityValue() as? Int) == 1, "Masked overview eye button updates accessibility state")
+            check(
+                hasRealSymbolImage(dash.privacyEyeButton)
+                    && hasRealSymbolImage(accPage.privacyEyeButton)
+                    && hasRealSymbolImage(mPanel.quotaPrivacyEyeButton)
+                    && hasRealSymbolImage(mPanel.accountsPrivacyEyeButton),
+                "All privacy eye buttons must retain real template SF Symbol images after toggling mask state"
+            )
             check(dash.privacyEyeButton.contentTintColor == nil && accPage.privacyEyeButton.contentTintColor == nil && mPanel.quotaPrivacyEyeButton.contentTintColor == nil && mPanel.accountsPrivacyEyeButton.contentTintColor == nil, "Masked eye buttons must keep quiet neutral deference without high-saturation blue tint")
             if let copyItem = dash.activeEmailLabel.menu?.items.first, let target = copyItem.target, let action = copyItem.action {
                 _ = target.perform(action, with: copyItem)

@@ -261,7 +261,7 @@ final class DashboardPage: NSObject {
         self.app = app
         refreshQuotaButton = QuotaRefreshButton(target: nil, action: #selector(refreshActiveQuota))
         refreshQuotaButton.controlSize = .small
-        privacyEyeButton = makePrivacyEyeButton(target: nil, action: #selector(togglePrivacyMask), symbolSize: 13.5, buttonSize: 24)
+        privacyEyeButton = makePrivacyEyeButton(target: nil, action: #selector(togglePrivacyMask), symbolSize: 13, buttonSize: 22)
         privacyEyeButton.setContentHuggingPriority(.required, for: .horizontal)
         privacyEyeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
         privacyEyeButton.isHidden = true
@@ -347,7 +347,7 @@ final class DashboardPage: NSObject {
         heroLocalScopeBadge.toolTip = nil
         heroRemoteHostBadge.isHidden = true
         heroRemoteHostBadge.toolTip = nil
-        let titleRow = horizontal([activeAccountLabel, tierBadge, heroLocalScopeBadge, heroRemoteHostBadge, titleSpacer], spacing: 6)
+        let titleRow = horizontal([activeAccountLabel, tierBadge, heroLocalScopeBadge, heroRemoteHostBadge, privacyEyeButton, titleSpacer], spacing: 6)
         titleRow.alignment = .centerY
         titleRow.detachesHiddenViews = true
         tierBadge.setContentHuggingPriority(.required, for: .horizontal)
@@ -355,7 +355,7 @@ final class DashboardPage: NSObject {
         let identity = vertical([titleRow, activeEmailLabel, accountStatusLabel], spacing: 4)
         for row in identity.arrangedSubviews { fillWidth(row, in: identity) }
         identity.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let heroActions = horizontal([privacyEyeButton, refreshQuotaButton], spacing: 8)
+        let heroActions = horizontal([refreshQuotaButton], spacing: 6)
         heroActions.alignment = .centerY
         let accountTopRow = identityHeader(identity: identity, actions: heroActions)
         coreQuotaStack.orientation = .vertical
@@ -557,7 +557,7 @@ final class DashboardPage: NSObject {
     }
 
     func refreshPrivacyMaskState() {
-        applyPrivacyEyeButtonState(privacyEyeButton, masked: app.privacyMaskAccounts, symbolSize: 13.5, animated: true)
+        applyPrivacyEyeButtonState(privacyEyeButton, masked: app.privacyMaskAccounts, symbolSize: 13, animated: true)
         applyPrivacyFadeTransition(to: [activeAccountLabel, activeEmailLabel, companionRowsStack])
         metricsKey = ""
         companionFingerprint = ""
@@ -1361,7 +1361,7 @@ final class DashboardPage: NSObject {
 
         let masked = app.privacyMaskAccounts
         if !email.isEmpty {
-            applyPrivacyEyeButtonState(privacyEyeButton, masked: masked, symbolSize: 13.5)
+            applyPrivacyEyeButtonState(privacyEyeButton, masked: masked, symbolSize: 13)
             privacyEyeButton.isHidden = false
             self.activeAccountLabel.stringValue = AccountIdentity.displayName(name: name, email: email, masked: masked)
             self.activeEmailLabel.stringValue = AccountIdentity.displayEmail(email, masked: masked)
@@ -2075,7 +2075,7 @@ final class DashboardPage: NSObject {
                 syncCompanionSection(localEmail: "")
             } else {
                 let masked = app.privacyMaskAccounts
-                applyPrivacyEyeButtonState(self.privacyEyeButton, masked: masked, symbolSize: 13.5)
+                applyPrivacyEyeButtonState(self.privacyEyeButton, masked: masked, symbolSize: 13)
                 self.privacyEyeButton.isHidden = false
                 self.activeAccountLabel.stringValue = AccountIdentity.displayName(name: name, email: email, masked: masked)
                 syncCompanionSection(localEmail: email)

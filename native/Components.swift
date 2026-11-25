@@ -89,14 +89,16 @@ func makePrivacyEyeButton(target: AnyObject?, action: Selector, symbolSize: CGFl
 func applyPrivacyEyeButtonState(_ btn: NSButton, masked: Bool, symbolSize: CGFloat = 13.5, includeShortcutHint: Bool = true, animated: Bool = false) {
     let previousVal = btn.accessibilityValue() as? Int
     let nextVal = masked ? 1 : 0
-    let stateChanged = previousVal != nil && previousVal != nextVal
-    if stateChanged || btn.image == nil {
+    let initialized = previousVal != nil
+    let stateChanged = initialized && previousVal != nextVal
+    let hasRealSymbol = (btn.image?.size.width ?? 0) > 2 && (btn.image?.size.height ?? 0) > 2
+    if !initialized || stateChanged || !hasRealSymbol {
         let symbolName = masked ? "eye.slash" : "eye"
         let img = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: symbolSize, weight: .medium))
         img?.isTemplate = true
         if let designBtn = btn as? DesignButton {
-            designBtn.setImage(img, animated: animated && stateChanged)
+            designBtn.setImage(img, animated: animated && stateChanged && hasRealSymbol)
         } else {
             btn.image = img
         }
