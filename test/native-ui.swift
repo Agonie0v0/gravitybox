@@ -7246,7 +7246,7 @@ import Cocoa
         do {
             defer { AccountIdentity.isPrivacyMaskEnabled = false }
             check(AccountIdentity.maskEmail("") == "", "maskEmail empty")
-            check(AccountIdentity.maskEmail("a@example.test") == "•@e•••.test", "maskEmail 1-char local")
+            check(AccountIdentity.maskEmail("a@example.test") == "•••@e•••.test", "maskEmail 1-char local")
             check(AccountIdentity.maskEmail("ab@example.invalid") == "a•••@e•••.invalid", "maskEmail 2-char local")
             let multiLevelCorpEmail = "foo@" + "corp.company.example.invalid"
             let aliceCorpEmail = "alice@" + "corp.example.invalid"
@@ -7254,8 +7254,8 @@ import Cocoa
             check(AccountIdentity.maskEmail("zhangsan@example.invalid") == "zh•••n@e•••.invalid", "maskEmail >=4-char local keeps 2 head + 1 tail")
             check(AccountIdentity.maskEmail("localonly") == "lo•••y", "maskEmail without @")
 
-            check(AccountIdentity.maskDisplayName("A") == "•", "maskDisplayName 1-char")
-            check(AccountIdentity.maskDisplayName("甲") == "•", "maskDisplayName 1-char CJK")
+            check(AccountIdentity.maskDisplayName("A") == "••••", "maskDisplayName 1-char uses 4 bullets")
+            check(AccountIdentity.maskDisplayName("甲") == "••••", "maskDisplayName 1-char CJK uses 4 bullets")
             check(AccountIdentity.maskDisplayName("甲乙") == "甲•••", "maskDisplayName 2-char CJK uses 3 bullets")
             check(AccountIdentity.maskDisplayName("丙丁") == "丙•••", "maskDisplayName 2-char CJK alt uses 3 bullets")
             check(AccountIdentity.maskDisplayName("甲乙丙") == "甲•••", "maskDisplayName 3-char CJK uses 3 bullets")

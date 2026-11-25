@@ -30,7 +30,7 @@ struct AccountIdentity {
         guard !trimmed.isEmpty else { return "" }
         let chars = Array(trimmed)
         switch chars.count {
-        case 1: return "•"
+        case 1: return "•••"
         case 2, 3: return "\(chars[0])•••"
         default: return "\(chars[0])\(chars[1])•••\(chars[chars.count - 1])"
         }
@@ -68,7 +68,7 @@ struct AccountIdentity {
         }
         let chars = Array(trimmed)
         switch chars.count {
-        case 1: return "•"
+        case 1: return "••••"
         default: return "\(chars[0])•••"
         }
     }
