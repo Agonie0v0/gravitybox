@@ -686,7 +686,13 @@ export function AddAccountModal({
             }}
           >
             {busy && <Loader2 size={14} className="gb-spin" style={{ color: 'var(--blue)', flexShrink: 0 }} />}
-            <span>{errorMsg || statusMsg}</span>
+            <span>
+              {maskEmailsInText(
+                errorMsg || statusMsg,
+                [rawCurrentEmail, ...accounts.map((a) => a.email)],
+                Boolean(config.privacyMaskAccounts),
+              )}
+            </span>
           </div>
         )}
 

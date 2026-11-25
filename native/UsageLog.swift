@@ -636,7 +636,7 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
     }
     private var exporting = false
     @objc func exportRows() {
-        guard !exporting, !loading, total > 0, let activeApp = app else { return }
+        guard !exporting, !loading, total > 0, app != nil else { return }
         exporting = true
         status.textColor = Design.secondary
         refreshButton.isEnabled = false

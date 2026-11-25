@@ -311,8 +311,9 @@ extension Assistant {
                     ? L10n.t("assistant_account.unknown_account")
                     : AccountIdentity.displayEmail(rawEmail, masked: masked)
                 let label = (acc["name"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                let displayName = (!label.isEmpty && label.caseInsensitiveCompare(rawEmail) != .orderedSame)
-                    ? "\(label) · \(accEmail)"
+                let shownLabel = masked ? AccountIdentity.maskDisplayName(label) : label
+                let displayName = (!shownLabel.isEmpty && label.caseInsensitiveCompare(rawEmail) != .orderedSame)
+                    ? "\(shownLabel) · \(accEmail)"
                     : accEmail
                 let accTier = AccountIdentity.normalizeTier(acc["subscription_tier"] as? String)
                 let title = [displayName, accTier, QuotaPresentation.menuQuotaText(acc)].filter { !$0.isEmpty }.joined(separator: " · ")

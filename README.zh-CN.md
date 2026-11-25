@@ -58,7 +58,7 @@
 | **双周期配额与账单** | 将 **5 小时** 滚动限额、**每周** 限额与独立高阶池（如 `Gemini 4 Argon`）拆开展示；汇总页自动合并同一模型的各思考档位变体（`-low` 至 `-max`），并按时序官方单价核算等效 API 费用。 |
 | **SSH 远程窗口与统一账本** | 无需调用外部 `ssh` 进程即可适配 Antigravity `2.33.0+` SSH 远程窗口（双语界面、实时 HUD、按主机只读配额），并将本机与 SSH 会话用量统一合账且支持「环境 × 账号」正交筛选。 |
 | **HTTP / HTTPS 网络代理** | 支持 **关闭**、**自动跟随系统代理**（macOS / Windows 系统设置）或 **手动指定** `http://` / `https://` 代理地址，自动为 Antigravity 注入代理环境变量、让 GravityBox 后台外联复用同一代理，并检测 Shell 覆盖冲突。 |
-| **多账号与 CLI 同步** | 支持保存当前会话、JSON 批量导入与确认后备份导出（macOS 锁定 `0600`）、低配额智能推荐、同源 `agy` CLI 凭据非侵入同步，以及四阶段原子安全切换与异常自动回滚。 |
+| **多账号、隐私遮挡与 CLI 同步** | 支持保存当前会话、JSON 批量导入与确认后备份导出（macOS 锁定 `0600`）、一键账号隐私遮挡（`⇧⌘M` / `Ctrl+Shift+M`）、删号静默清理恢复快照、低配额智能推荐、同源 `agy` CLI 凭据非侵入同步，以及四阶段原子安全切换与异常自动回滚。 |
 | **可撤回缓存瘦身** | 仅清理无状态运行缓存与可选超期后台日志（清理前归档账单），统一移入 macOS 废纸篓或 Windows 回收站（`IFileOperation`）并支持一键原位还原，登录凭据与聊天正文受白名单隔离保护。 |
 
 ---
@@ -245,9 +245,12 @@ HUD 挂载于每个 Antigravity 对话输入框下方（含 `2.34.0+` 的 BTW �
 </table>
 </details>
 
-### v1.2.1 核心机制说明
+### v1.2.2 核心机制说明
 
-- **Windows x64 社区共建跨平台支持（`#27`、`#30`、`#32`，致谢 `@Agonie0v0` 贡献实现）**：引入同仓隔离的跨平台后端抽象（`src/platform/`）、原生 Rust Win32 助手（`windows/win-helper`，提供凭据管理器、SID 鉴权 Named Pipe、非破坏性 `IFileOperation` 回收站迁移与严格优雅退出边界）、Tauri 2 Windows 桌面控制台与托盘浮窗（`windows/app`），以及独立非阻塞 `windows-latest` CI 与自包含 ZIP / NSIS 安装包构建流（`tools/package-win.mjs`），所有 Windows 专属文件与 macOS `sourceDigest` 彻底隔离。
+- **账号信息隐私遮挡（PR `#34`，致谢 `@Agonie0v0` 发起并贡献 Windows 实现，macOS / Windows 双端统一）**：在 **总览**、**账号** 与菜单栏 / 托盘浮窗的身份或标题旁提供纯图标小眼睛一键切换与眨眼/淡入动效（遵守系统减少动态效果设置），支持全局快捷键（macOS `⇧⌘M` 与「显示」菜单项，Windows `Ctrl+Shift+M`）；同步脱敏昵称（`首字 + •••`）与邮箱，覆盖账号卡片、推荐横幅、SSH 伴随行、用量筛选下拉框、请求明细、切号/删号确认弹窗、辅助功能标签、弹窗内联报错与全局 Toast 提示；总览页右键仍可复制完整原邮箱，重命名输入框保留原昵称防误覆写。
+- **macOS Intel (`x86_64`) 本地源码构建与更新架构保护（Issue `#29`、PR `#31`，致谢 `@lvyandev`）**：按宿主架构统一解析 Swift 编译目标、`lipo` 单架构一致性校验（主程序与内置 Node）、`mac-arm64` / `mac-x64` 无头测试浏览器下载及关于页右键复制的环境架构标签；应用内更新仅接受当前编译架构安装包防止跨架构误装（GitHub Releases 仅自动分发 `arm64` 成品，Intel 端由本机源码验证打包）。
+- **删号静默清理关联恢复快照与 Windows 关闭/跨卷加固**：删除账号时后台自动清空 `account-switch-journal-stable.json` 中命中该账号的切号凭据与文件快照（覆盖索引引用、`go-keyring-base64:` 钥匙串载荷及 `state.vscdb` 双层 Base64 Protobuf `userStatus` 行，中断待恢复事务跳过保护），停止写入 `accounts-removed/` 并清理对应历史旧留档；Windows 端为全部 4 处 `closeAntigravitySafely` 透传 `detachedOnly`、完善 `user_cancelled` / `uipi_access_denied` 提示优先级，并为 `EXDEV` 跨卷回退补齐 `rmSync` 重试参数。
+- **Windows x64 社区共建跨平台支持（`v1.2.1` — 响应 Issue `#17` 致谢 `@dysonkai`；PR `#27`、`#30`、`#32` 致谢 `@Agonie0v0` 贡献实现）**：引入同仓隔离的跨平台后端抽象（`src/platform/`）、原生 Rust Win32 助手（`windows/win-helper`，提供凭据管理器、SID 鉴权 Named Pipe、非破坏性 `IFileOperation` 回收站迁移与严格优雅退出边界）、Tauri 2 Windows 桌面控制台与托盘浮窗（`windows/app`），以及独立非阻塞 `windows-latest` CI 与自包含 ZIP / NSIS 安装包构建流（`tools/package-win.mjs`），所有 Windows 专属文件与 macOS `sourceDigest` 彻底隔离。
 - **进程隔离、HUD 精度与视图保护加固（`#28`、`#33`，致谢 `@lvyandev` 与 `@MongoRolls`）**：在切号、回滚与存储维护期间隔离 `chrome_crashpad_handler` 与已脱离主进程树的后台守护进程（`language_server` / `sidecar`，`#28`）；细化权限四档翻译并新增代码查看、Diff、CSV 视口、LSP 引用与 Notebook 代码/输出区防误译保护（`#33`）；通过 `executor_metadata` 增量扫描保留对话回退/截断后的历史编排器角色；对齐 Windows 凭据 2560 字节边界、Named Pipe 完整性校验、NTFS 锁退避及请求明细全量分页导出。
 - **启动时自动打开 Antigravity**：因新版 Antigravity 默认不再开启调试端口（且本工具坚持不修改官方安装包），原「跟随 Antigravity 启停」已替换为 **设置 → 启动时自动打开 Antigravity**。开启后，打开 GravityBox 会自动静默驻留菜单栏 / 系统托盘并拉起带 `--remote-debugging-port=0` 调试端口的 Antigravity。
 - **SSH 远程窗口零外部 SSH 适配与多主机视图**：通过本机 CDP 通道直接适配 Antigravity `2.33.0+` SSH 远程窗口，不拉起任何外部 `ssh` 进程——提供完整双语热适配、实时对话状态栏 HUD、严格隔离本机账号的 `本机 / SSH: <host>` 只读双周期配额查看、切号/安全重启/维护时的活跃 SSH 保护提醒，以及 **总览** 伴生 SSH 主机列表与 **菜单栏 / 托盘浮窗** 可展开范围切换器。
@@ -295,6 +298,7 @@ GRAVITYBOX_GOOGLE_CLIENT_SECRET="your-client-secret"
 | **不改动官方包** | 仅通过本机回环（`127.0.0.1`）CDP 隔离世界运行，不解包、不改写、不重签名官方 Antigravity 安装包或可执行文件。 |
 | **用户内容隔离** | 输入框草稿、对话正文、代码块、Diff、CSV 视口、LSP 引用、Notebook 代码/输出区、终端输出、文件名与项目名由 DOM 选择器与白名单严格隔离。 |
 | **本机隔离存储与 IPC 鉴权** | **macOS**：`~/Library/Application Support/GravityBox`（`0700`/`0600`）、Keychain 与 Unix Domain Socket IPC。<br/>**Windows**：`%APPDATA%\GravityBox`、Windows Credential Manager（2560 字节守卫与内存清零）、带 256-bit `authToken` 及同用户 SID/完整性校验的随机 Named Pipe、最小权限 Tauri CSP/URL 白名单、`IFileOperation` 回收站路径守卫及 UIPI 优雅退出边界。 |
+| **隐私遮挡与删号清理** | 支持一键脱敏界面昵称、邮箱、确认框、报错/Toast 与辅助功能标签；删除账号时自动清理关联切号恢复凭据/快照及历史 `accounts-removed/` 留档，且不再写入新留档副本。 |
 
 ---
 
@@ -375,8 +379,8 @@ Antigravity 运行时会持续持有本地 SQLite（`state.vscdb`）与认证文
 提交代码或反馈请先阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)、[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)、[SECURITY.md](./SECURITY.md) 与 [CHANGELOG.md](./CHANGELOG.md)，欢迎在 [GitHub Issues](https://github.com/Enzoo404/gravitybox/issues) 提交讨论。
 
 **社区致谢**：
-- **代码贡献**：`@Agonie0v0`（`#26` `sqlite-worker` 稳定性修复；`#27`、`#30`、`#32` Windows x64 跨平台同仓三阶段实现）
-- **问题反馈与特性建议**：`@Rentrer`（`#15`）、`@Allenbayern`（`#19`、`#20`）、`@willingning-coder`（`#21`）、`@YangFuting`（`#24`）、`@lvyandev`（`#28`）、`@MongoRolls`（`#33`）
+- **代码贡献**：`@Agonie0v0`（`#26` `sqlite-worker` 稳定性修复；`#27`、`#30`、`#32` Windows x64 跨平台同仓三阶段实现；`#34` 账号信息隐私遮挡）、`@lvyandev`（`#31` macOS Intel `x86_64` 源码构建、门禁与更新架构保护）
+- **问题反馈与特性建议**：`@Rentrer`（`#15`）、`@dysonkai`（`#17`）、`@Allenbayern`（`#19`、`#20`）、`@willingning-coder`（`#21`）、`@YangFuting`（`#24`）、`@lvyandev`（`#28`、`#29`）、`@MongoRolls`（`#33`）
 
 <div align="center">
   <a href="https://star-history.com/#Enzoo404/gravitybox&Date">

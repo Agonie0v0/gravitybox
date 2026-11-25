@@ -36,6 +36,8 @@
 /assets/screenshots/promo-*.png
 /assets/screenshots/cover-*.png
 /assets/screenshots/hud-promo-*.png
+/assets/screenshots/douyin-*.png
+/assets/screenshots/posters-*/
 
 # Local assistant instructions
 /AGENTS.md

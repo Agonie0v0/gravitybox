@@ -11,7 +11,7 @@ import { atomicJson, atomicText, sanitizeError } from './files.js';
 import { withProcessLease } from './process-lock.js';
 import { AccountsManager, SystemKeychainAdapter, buildGoOauthPayload, decodeKeychainOauthPayload, syncAccountToKeychain, type KeychainAdapter, type Account } from './accounts.js';
 import { ProtobufWriter as Writer } from './protobuf.js';
-import { removeTopicRow, replaceTopicRow } from './account-state.js';
+import { decodeTopicRow, removeTopicRow, replaceTopicRow } from './account-state.js';
 export { removeTopicRow, replaceTopicRow } from './account-state.js';
 import { bt } from './i18n.js';
 import {
@@ -382,9 +382,25 @@ function tryParseJsonRecord(raw: string): Record<string, any> | null {
   }
 }
 
+const TOPIC_SENTINELS = ['userStatusSentinelKey', 'oauthTokenInfoSentinelKey', 'enterpriseGcpProjectId'] as const;
+
 function valueContainsEmail(raw: unknown, emailLower: string): boolean {
   if (typeof raw !== 'string' || !raw || raw.startsWith('[REDACTED')) return false;
   if (raw.toLowerCase().includes(emailLower)) return true;
+
+  // 1) macOS go-keyring-base64:<b64> 与 Windows 裸 JSON 钥匙串载荷
+  const decodedKeychain = decodeKeychainOauthPayload(raw);
+  if (decodedKeychain && decodedKeychain.toLowerCase().includes(emailLower)) return true;
+
+  // 2) state.vscdb 双层 Base64 + Protobuf Topic 行（如 userStatusSentinelKey）
+  for (const sentinel of TOPIC_SENTINELS) {
+    try {
+      const payload = decodeTopicRow(raw, sentinel);
+      if (payload && payload.toString('utf8').toLowerCase().includes(emailLower)) return true;
+    } catch {}
+  }
+
+  // 3) 通用 JSON { data } 包装或单层/嵌套 Base64 兜底
   let candidate = raw.trim();
   if (candidate.startsWith('{')) {
     const parsed = tryParseJsonRecord(candidate);
@@ -396,6 +412,14 @@ function valueContainsEmail(raw: unknown, emailLower: string): boolean {
     try {
       const decoded = Buffer.from(candidate, 'base64').toString('utf8');
       if (decoded.toLowerCase().includes(emailLower)) return true;
+      // 防御未来非已知 sentinel 的嵌套 Base64 字段
+      const innerMatches = decoded.match(/[A-Za-z0-9+/]{16,}={0,2}/g) ?? [];
+      for (const token of innerMatches) {
+        if (token.length > 16384) continue;
+        try {
+          if (Buffer.from(token, 'base64').toString('utf8').toLowerCase().includes(emailLower)) return true;
+        } catch {}
+      }
     } catch {}
   }
   return false;

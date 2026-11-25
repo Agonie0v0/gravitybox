@@ -58,7 +58,7 @@
 | **Dual-Window Quotas & Usage** | Separates **5-Hour** rolling limits from **Weekly** caps and standalone high-tier pools (e.g. `Gemini 4 Argon`), aggregates thinking variants (`-low` to `-max`) in summaries, and tracks historical spend via dated official API rates. |
 | **SSH Remote & Multi-Env Ledger** | Adapts Antigravity `2.33.0+` SSH remote windows over local CDP with zero external `ssh` calls—providing bilingual UI, live HUD, read-only per-host quotas, and a unified Local + SSH usage ledger with `Environment × Account` filtering. |
 | **HTTP / HTTPS Network Proxy** | Supports **Off**, automatic **System Proxy** (macOS / Windows settings), or **Manual** `http://` / `https://` endpoints—injecting proxy variables into Antigravity, routing GravityBox outbound requests through the same proxy, and detecting shell overrides. |
-| **Multi-Account & CLI Sync** | Supports zero-config session capture, batch JSON import/export (`0600` on macOS), standby recommendations, non-invasive `agy` CLI token sync, and atomic 4-phase manual switching with rollback. |
+| **Multi-Account, Privacy & CLI Sync** | Supports zero-config session capture, batch JSON import/export (`0600` on macOS), one-click account privacy masking (`⇧⌘M` / `Ctrl+Shift+M`), silent recovery snapshot cleanup on account deletion, standby recommendations, non-invasive `agy` CLI token sync, and atomic 4-phase manual switching with rollback. |
 | **Reversible Storage Trim** | Moves runtime caches and optional aged task logs (archiving ledgers before cleanup) to macOS Trash or Windows Recycle Bin (`IFileOperation`) with one-click undo, while locking credentials, workspaces, and active chats behind a strict allowlist. |
 
 ---
@@ -245,9 +245,12 @@ Hover over or click any capsule to inspect its breakdown (`Esc` or click outside
 </table>
 </details>
 
-### Key Behaviors in v1.2.1
+### Key Behaviors in v1.2.2
 
-- **Co-Located Windows x64 Cross-Platform Support (`#27`, `#30`, `#32` — thanks to `@Agonie0v0`)**: Adds `src/platform/` backend abstractions, the static Rust Win32 helper (`windows/win-helper`), the Tauri 2 desktop UI & tray (`windows/app`), and independent non-blocking `windows-latest` CI / ZIP + NSIS packaging (`tools/package-win.mjs`). All Windows-specific files are excluded from the macOS release `sourceDigest`.
+- **Account Privacy Masking (PR `#34` — thanks to `@Agonie0v0` for proposing and contributing the Windows implementation; unified across macOS & Windows)**: Adds an inline pure-glyph eye toggle with subtle blink/fade motion (respecting Reduce Motion) next to account/section headers in **Overview**, **Accounts**, and the menu bar / tray panel, plus global shortcuts (`⇧⌘M` and the **View** menu on macOS; `Ctrl+Shift+M` on Windows). Masks nicknames (`first char + •••`) and emails across account cards, advisor banners, SSH companions, usage filters, request logs, switch/delete confirmations, accessibility labels, inline modal errors, and toasts—while keeping right-click raw email copy on macOS Overview and raw nicknames inside Rename inputs.
+- **macOS Intel (`x86_64`) Source Build & Architecture-Safe Updater (Issue `#29`, PR `#31` — thanks to `@lvyandev`)**: Derives Swift target triples, Mach-O single-architecture `lipo` assertions (main app + embedded Node), pinned headless test browser downloads (`mac-arm64` / `mac-x64`), and copyable About environment architecture labels from host architecture; in-app updates only accept packages matching the running build architecture. *(GitHub Releases distributes Apple Silicon `arm64` DMGs; Intel users build locally from source.)*
+- **Silent Recovery Snapshot Cleanup on Account Deletion & Windows Edge-Case Hardening**: Deleting an account automatically purges matching recovery credentials and snapshots in `account-switch-journal-stable.json` (covering index refs, `go-keyring-base64:` keychain payloads, and double-Base64 Protobuf `userStatus` rows while protecting interrupted transactions) and stops writing `accounts-removed/` archives while cleaning legacy entries for that account. On Windows, all 4 `closeAntigravitySafely` calls pass `detachedOnly` cleanly, handle `user_cancelled` / `uipi_access_denied` outcomes, and add `rmSync` retry parameters for `EXDEV` cross-volume fallbacks.
+- **Co-Located Windows x64 Cross-Platform Support (`v1.2.1` — Issue `#17` thanks to `@dysonkai`; PR `#27`, `#30`, `#32` thanks to `@Agonie0v0`)**: Adds `src/platform/` backend abstractions, the static Rust Win32 helper (`windows/win-helper`), the Tauri 2 desktop UI & tray (`windows/app`), and independent non-blocking `windows-latest` CI / ZIP + NSIS packaging (`tools/package-win.mjs`). All Windows-specific files are excluded from the macOS release `sourceDigest`.
 - **Process Isolation, View Guards & Ledger Accuracy (`#28`, `#33` — thanks to `@lvyandev` & `@MongoRolls`)**: Isolates `chrome_crashpad_handler` and detached background daemons (`language_server` / `sidecar`) during account switching and maintenance (`#28`); refines permission-preset translations and protects code, diff, CSV, LSP reference, and notebook code/output regions (`#33`); preserves historical Orchestrator roles across truncation via incremental `executor_metadata` scanning; aligns Windows 2560-byte credential limits, Named Pipe integrity checks, NTFS lock backoff, and full-page Request Log exports.
 - **Auto-Open Antigravity on Launch**: Because newer Antigravity builds disable the debugging port by default and GravityBox never patches the official bundle, enabling **Settings → Auto-Open Antigravity on Launch** keeps GravityBox in the menu bar / system tray and launches Antigravity with `--remote-debugging-port=0`.
 - **Zero-SSH Remote Windows & Multi-Host UI**: Adapts Antigravity `2.33.0+` SSH remote windows over local CDP without spawning external `ssh` processes—delivering bilingual UI, live HUD, isolated read-only `Local / SSH: <host>` dual-window quota views, active-SSH safety reminders, companion SSH host lists in **Overview**, and a scope selector in the menu bar / tray panel.
@@ -295,6 +298,7 @@ GRAVITYBOX_GOOGLE_CLIENT_SECRET="your-client-secret"
 | **Untouched Official App** | Runs via local loopback (`127.0.0.1`) CDP isolated worlds; never unpacks or alters the official Antigravity bundle or executable. |
 | **Protected User Content** | Composers, drafts, chat history, code blocks, diffs, CSV viewports, LSP references, notebook code/outputs, terminal logs, and workspace names are excluded by DOM allowlists/guards. |
 | **Scoped Local Storage & IPC** | **macOS**: `~/Library/Application Support/GravityBox` (`0700`/`0600`), Keychain, and Unix Domain Socket IPC.<br/>**Windows**: `%APPDATA%\GravityBox`, Credential Manager (2560-byte guard & buffer zeroization), randomized Named Pipe with 256-bit `authToken` + same-user SID / integrity verification, strict Tauri CSP / URL allowlist, `IFileOperation` Recycle Bin guards, and UIPI-compliant graceful close. |
+| **UI Masking & Delete Cleanup** | One-click privacy masking hides nicknames, emails, alerts/toasts, confirmations, and accessibility labels across surfaces. Deleting an account purges matching switch recovery credentials/snapshots and legacy `accounts-removed/` archives while never writing new deletion copies. |
 
 ---
 
@@ -375,8 +379,8 @@ Quit GravityBox (Antigravity requires no cleanup because its files are never alt
 See [CONTRIBUTING.md](./CONTRIBUTING.md), [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md), [SECURITY.md](./SECURITY.md), and [CHANGELOG.md](./CHANGELOG.md). Feedback and bug reports are welcome via [GitHub Issues](https://github.com/Enzoo404/gravitybox/issues).
 
 **Community Acknowledgements**:
-- **Code Contributions**: `@Agonie0v0` (`#26` `sqlite-worker` stability fix; `#27`, `#30`, `#32` Windows x64 cross-platform implementation)
-- **Bug Reports & Feature Proposals**: `@Rentrer` (`#15`), `@Allenbayern` (`#19`, `#20`), `@willingning-coder` (`#21`), `@YangFuting` (`#24`), `@lvyandev` (`#28`), `@MongoRolls` (`#33`)
+- **Code Contributions**: `@Agonie0v0` (`#26` `sqlite-worker` stability fix; `#27`, `#30`, `#32` Windows x64 cross-platform implementation; `#34` account privacy masking), `@lvyandev` (`#31` macOS Intel `x86_64` source build, test harness & architecture-safe updater)
+- **Bug Reports & Feature Proposals**: `@Rentrer` (`#15`), `@dysonkai` (`#17`), `@Allenbayern` (`#19`, `#20`), `@willingning-coder` (`#21`), `@YangFuting` (`#24`), `@lvyandev` (`#28`, `#29`), `@MongoRolls` (`#33`)
 
 <div align="center">
   <a href="https://star-history.com/#Enzoo404/gravitybox&Date">

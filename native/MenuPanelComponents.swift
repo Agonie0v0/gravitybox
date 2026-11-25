@@ -1271,8 +1271,9 @@ final class MenuExpandableAccountCardView: NSBox {
         stateButton.toolTip = nil
         stateButton.setAccessibilityLabel(isCurrent ? roleCurrentTitle : switchToTitle)
         stateButton.setAccessibilityRole(.button)
+        let resolvedEmail = shownEmail.isEmpty ? email : shownEmail
         nameLabel.stringValue = display
-        emailLabel.stringValue = shownEmail.isEmpty ? email : shownEmail
+        emailLabel.stringValue = resolvedEmail
         emailLabel.toolTip = nil
 
         tierBadge.title = tier
@@ -1332,7 +1333,7 @@ final class MenuExpandableAccountCardView: NSBox {
             detailContainer.alphaValue = 1.0
         }
         let roleText = isCurrent ? roleCurrentTitle : L10n.t("menu_panel.account_card.backup_account", fallback: "备用账号")
-        headerButton.setAccessibilityLabel(L10n.t("menu_panel.account_card.a11y", ["name": display, "email": email, "role": roleText, "summary": summary], fallback: "\(display)，\(email)，\(roleText)，\(summary)"))
+        headerButton.setAccessibilityLabel(L10n.t("menu_panel.account_card.a11y", ["name": display, "email": resolvedEmail, "role": roleText, "summary": summary], fallback: "\(display)，\(resolvedEmail)，\(roleText)，\(summary)"))
 
         let now = Date()
         let sourceEnvId = (account["quotaSourceEnvironmentId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

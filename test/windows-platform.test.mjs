@@ -1317,4 +1317,8 @@ test('v1.2.2 Windows 细节修复回归: EXDEV rmSync 重试参数、detachedOnl
   assert.equal((maintModalText.match(/closeAntigravitySafely\(15_000,\s*'maintenance',\s*detachedOnly\)/g) ?? []).length, 2, 'MaintenanceModal 清理与还原均必须透传 detachedOnly');
   assert.equal((maintModalText.match(/closeOutcome\.reason\s*===\s*'user_cancelled'/g) ?? []).length, 2, 'MaintenanceModal 清理与还原均必须处理 user_cancelled');
   assert.equal((maintModalText.match(/closeOutcome\.reason\s*===\s*'uipi_access_denied'/g) ?? []).length, 2, 'MaintenanceModal 清理与还原均必须处理 uipi_access_denied');
+
+  // 3. AddAccountModal 内联错误与状态文案必须经过 maskEmailsInText 脱敏
+  const addModalText = await readFile(new URL('../windows/app/src/sheets/AddAccountModal.tsx', import.meta.url), 'utf8');
+  assert.match(addModalText, /maskEmailsInText\(\s*errorMsg\s*\|\|\s*statusMsg/, 'AddAccountModal 内联报错与状态栏必须脱敏');
 });

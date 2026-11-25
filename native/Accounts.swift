@@ -665,7 +665,13 @@ final class AccountsPage: NSObject {
         nameAndEmail.setContentHuggingPriority(.defaultLow, for: .horizontal)
         fillWidth(titleRow, in: nameAndEmail); fillWidth(subRow, in: nameAndEmail)
 
-        let accountTitle = name.isEmpty ? email : "\(name) · \(email)"
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let accountTitle: String
+        if !trimmedName.isEmpty && trimmedName.caseInsensitiveCompare(email) != .orderedSame && !shownEmail.isEmpty {
+            accountTitle = "\(displayName) · \(shownEmail)"
+        } else {
+            accountTitle = shownEmail.isEmpty ? displayName : shownEmail
+        }
 
         let swBtn = button(L10n.t("accounts.switch_btn"), target: self, action: #selector(switchCardAccountById(_:)))
         swBtn.identifier = NSUserInterfaceItemIdentifier(id)
@@ -884,7 +890,13 @@ final class AccountsPage: NSObject {
             card.hostTagBadge.isHidden = true
         }
 
-        let accountTitle = name.isEmpty ? email : "\(name) · \(email)"
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let accountTitle: String
+        if !trimmedName.isEmpty && trimmedName.caseInsensitiveCompare(email) != .orderedSame && !shownEmail.isEmpty {
+            accountTitle = "\(displayName) · \(shownEmail)"
+        } else {
+            accountTitle = shownEmail.isEmpty ? displayName : shownEmail
+        }
         let canSwitch = !isActive && item["disabled"] as? Bool != true && item["validation_blocked"] as? Bool != true
         card.switchButton.identifier = NSUserInterfaceItemIdentifier(id)
         card.switchButton.toolTip = nil

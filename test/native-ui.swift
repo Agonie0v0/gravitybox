@@ -7395,6 +7395,22 @@ import Cocoa
             let accTextsMasked = allTextValues(accPage.cardsStack)
             check(accTextsMasked.contains("主•••") && accTextsMasked.contains("zh•••n@e•••.invalid") && accTextsMasked.contains("al•••e@c•••.invalid") && accTextsMasked.contains("al•••e"), "AccountsPage must mask custom nicknames, emails, and unnamed local parts")
             check(!accTextsMasked.contains("主力工作号") && !accTextsMasked.contains("zhangsan@example.invalid") && !accTextsMasked.contains(aliceCorpEmail), "AccountsPage must not leak raw nicknames or emails when masked")
+            func allButtons(_ v: NSView) -> [NSButton] { (v as? NSButton).map { [$0] } ?? v.subviews.flatMap { allButtons($0) } }
+            let accButtons = allButtons(accPage.cardsStack)
+            check(accButtons.count >= 4, "AccountsPage must render card action buttons for privacy check")
+            for btn in accButtons {
+                let a11y = btn.accessibilityLabel() ?? ""
+                check(!a11y.contains("主力工作号") && !a11y.contains("zhangsan@example.invalid") && !a11y.contains(aliceCorpEmail), "AccountsPage button accessibilityLabel must stay masked: \(a11y)")
+            }
+            mPanel.selectTab(2, persist: false); pump()
+            check(mPanel.accountsCardsStack.arrangedSubviews.count >= 2, "MenuPanel must render account cards before accessibility check")
+            for btn in allButtons(mPanel.accountsCardsStack) {
+                let a11y = btn.accessibilityLabel() ?? ""
+                check(!a11y.contains("主力工作号") && !a11y.contains("zhangsan@example.invalid") && !a11y.contains(aliceCorpEmail), "MenuPanel account card accessibilityLabel must stay masked: \(a11y)")
+            }
+            let switchMenuTitles = maskHost.buildAccountSwitchMenu().items.map(\.title)
+            check(switchMenuTitles.contains { $0.contains("主••• · zh•••n@e•••.invalid") }, "buildAccountSwitchMenu must mask both nickname and email")
+            check(!switchMenuTitles.contains { $0.contains("主力工作号") || $0.contains("zhangsan@example.invalid") || $0.contains(aliceCorpEmail) }, "buildAccountSwitchMenu must not leak raw nickname or email")
             let popupTitles = (uPage.accountPopup.menu?.items ?? []).map(\.title)
             check(popupTitles.contains("主••• (zh•••n@e•••.invalid)") && popupTitles.contains("al•••e@c•••.invalid") && !popupTitles.contains(where: { $0.contains("主力工作号") }), "Usage accountPopup must mask both nickname and email")
             let evCard = UsageEventCard(frame: NSRect(x: 0, y: 0, width: 520, height: 64))

@@ -9,19 +9,19 @@
 ## [1.2.2] - 2026-11-25
 
 ### Added
-- **账号信息隐私遮挡（`#34`，致谢 `@Agonie0v0` 发起并贡献 Windows 实现，macOS / Windows 双端统一）**：在总览页、账号页与菜单栏/托盘浮窗的身份或标题旁提供统一纯图标小眼睛一键切换，并支持全局快捷键（macOS `⇧⌘M` 与「显示」菜单项，Windows `Ctrl+Shift+M`）；同步脱敏账号昵称（`首字 + •••`）与邮箱（保留前缀尾字符便于多账号区分），全面覆盖账号卡片、推荐横幅、SSH 伴随行、用量筛选下拉框、切号确认弹窗及全局错误/Toast 提示；总览页右键复制邮箱仍保留完整原始邮箱，重命名输入框保留原昵称防误覆写。
-- **macOS Intel (`x86_64`) 宿主架构构建与更新保护（`#31`，致谢 `@lvyandev` 贡献）**：原生构建与打包脚本按宿主架构自动选择 `arm64` / `x86_64` 目标并校验内置 Node 与主程序 Mach-O 架构一致；应用内更新仅接受当前编译架构安装包防止跨架构误装，关于页自动展示当前编译架构（Intel `x86_64` 为社区按宿主本地构建支持，官方自动 Release 仅分发 Apple Silicon `arm64` 成品）。
+- **账号信息隐私遮挡（PR `#34`，致谢 `@Agonie0v0` 发起并贡献 Windows 实现，macOS / Windows 双端统一）**：在总览页、账号页与菜单栏/托盘浮窗的身份或标题旁提供统一纯图标小眼睛一键切换与轻盈眨眼/淡入动效（遵守系统减少动态效果设置），并支持全局快捷键（macOS `⇧⌘M` 与「显示」菜单项，Windows `Ctrl+Shift+M`）；同步脱敏账号昵称（`首字 + •••`）与邮箱（保留区分尾字符便于多账号辨识），全面覆盖账号卡片、推荐横幅、SSH 伴随行、用量筛选下拉框、请求明细、切号/删号确认弹窗、辅助功能标签、弹窗内联错误栏及全局错误/Toast 提示；总览页右键复制邮箱仍保留完整原始邮箱，重命名输入框保留原昵称防误覆写。
+- **macOS Intel (`x86_64`) 宿主架构构建与更新保护（Issue `#29`、PR `#31`，致谢 `@lvyandev` 提议并贡献实现）**：原生构建与打包脚本按宿主架构自动选择 `arm64` / `x86_64` 目标并校验内置 Node 与主程序 Mach-O 架构一致；支持按架构拉取固定版本无头测试浏览器；应用内更新仅接受当前编译架构安装包防止跨架构误装，关于页右键复制的版本与环境信息自动附带当前编译架构（Intel `x86_64` 为社区按宿主本地构建支持，官方自动 Release 仅分发 Apple Silicon `arm64` 成品）。
 
 ### Changed
-- **删号时静默清理关联恢复快照**：删除账号时在后台自动清空 `account-switch-journal-stable.json` 中命中该账号的切号凭据与文件快照（处于中断待恢复态的切号事务自动跳过保护），同时不再向 `accounts-removed/` 写入删号留档并顺手清理该账号的历史旧留档；用量总账与缓存清理快照保持隔离不动，交互上零新增弹窗或选项。
+- **删号时静默清理关联恢复快照**：删除账号时在后台自动清空 `account-switch-journal-stable.json` 中命中该账号的切号凭据与文件快照（覆盖索引引用、macOS `go-keyring-base64:` 钥匙串载荷及 `state.vscdb` 双层 Base64 Protobuf `userStatus` 行，处于中断待恢复态的切号事务自动跳过保护），同时不再向 `accounts-removed/` 写入删号留档并顺手清理该账号的历史旧留档；用量总账与缓存清理快照保持隔离不动，交互上零新增弹窗或选项。
 
 ### Fixed
-- **Windows 安全关闭确认与跨分区文件重试加固**：为全部 4 处 `closeAntigravitySafely` 调用透传 `detachedOnly` 避免重复二次确认，补齐 `user_cancelled` 中性提示与 `uipi_access_denied` 提权提示优先级；为 Windows `EXDEV` 跨卷回退补齐 `rmSync` 重试参数。
+- **Windows 安全关闭确认、跨分区文件重试与 CI 分支触发加固**：为全部 4 处 `closeAntigravitySafely` 调用透传 `detachedOnly` 避免重复二次确认，补齐 `user_cancelled` 中性提示与 `uipi_access_denied` 提权提示优先级；为 Windows `EXDEV` 跨卷回退补齐 `rmSync` 重试参数；将 `ci-windows.yml` 触发范围扩展至特性与版本分支，并消除 `UsageLog.swift` 未使用变量编译警告。
 
 ## [1.2.1] - 2026-11-24
 
 ### Added
-- **Windows x64 社区共建跨平台支持（`#27`、`#30`、`#32`，致谢 `@Agonie0v0` 贡献实现）**：引入同仓隔离的跨平台后端抽象（`src/platform/`）、原生 Rust Win32 助手（`windows/win-helper`，提供 Credential Manager 凭据存取、Named Pipe 同用户 SID / 完整性校验、非破坏性回收站迁移、严格优雅退出边界与进程/端口检查）、Tauri 2 Windows 桌面客户端与系统托盘浮窗（`windows/app`），以及独立非阻塞 `windows-latest` CI 与自包含 ZIP / NSIS 安装包构建流（`tools/package-win.mjs` / `tools/gravitybox-win.nsi`）。macOS 原生主线持续由作者主导并完成实机验证，Windows 预构建自包含安装/便携包已由 `@Agonie0v0` 完成真机验收，随 `v1.2.1` 同步分发（普通用户无需自行构建）。
+- **Windows x64 社区共建跨平台支持（响应 Issue `#17` 致谢 `@dysonkai`；PR `#27`、`#30`、`#32` 致谢 `@Agonie0v0` 贡献实现）**：引入同仓隔离的跨平台后端抽象（`src/platform/`）、原生 Rust Win32 助手（`windows/win-helper`，提供 Credential Manager 凭据存取、Named Pipe 同用户 SID / 完整性校验、非破坏性回收站迁移、严格优雅退出边界与进程/端口检查）、Tauri 2 Windows 桌面客户端与系统托盘浮窗（`windows/app`），以及独立非阻塞 `windows-latest` CI 与自包含 ZIP / NSIS 安装包构建流（`tools/package-win.mjs` / `tools/gravitybox-win.nsi`）。macOS 原生主线持续由作者主导并完成实机验证，Windows 预构建自包含安装/便携包已由 `@Agonie0v0` 完成真机验收，随 `v1.2.1` 同步分发（普通用户无需自行构建）。
 
 ### Fixed
 - **进程隔离与安全边界（`#28`，致谢 `@lvyandev`）**：在账号切换、回滚与存储维护期间隔离 `chrome_crashpad_handler` 与已脱离主进程树的后台守护进程（`language_server` / `sidecar`），修复非英语区域 `ps` 数值解析、孤立子进程清理以及 Windows UIPI 越权关闭提示。

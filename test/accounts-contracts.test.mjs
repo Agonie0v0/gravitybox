@@ -1178,6 +1178,68 @@ test('删号同步静默清理命中的切号恢复快照，并保护未完成�
   assert.equal(clearedRaw.includes('victim-keychain-secret'), false);
   assert.equal(clearedRaw.includes('victim-cli-secret'), false);
   assert.equal((await service.recoveryInfo()).available, false);
+
+  // 5) 真实 state.vscdb 双层 Base64 + Protobuf userStatus 行（不依赖 accounts.json id 命中）
+  const { replaceTopicRow } = await import('../dist/account-state.js');
+  const { encodeKeychainOauthPayload } = await import('../dist/account-keychain.js');
+  const { ProtobufWriter } = await import('../dist/protobuf.js');
+  const realUserStatus = replaceTopicRow(
+    undefined,
+    'userStatusSentinelKey',
+    Buffer.concat([ProtobufWriter.encodeString(3, 'Victim'), ProtobufWriter.encodeString(7, 'victim@example.invalid')]),
+  );
+  const userStatusOnlyJournal = {
+    version: 1,
+    status: 'complete',
+    at: new Date().toISOString(),
+    before: {
+      'antigravityUnifiedStateSync.userStatus': realUserStatus,
+    },
+    after: {},
+    files: [],
+    cliSnapshots: [],
+    keychainBefore: null,
+    keychainAfter: '[REDACTED]',
+  };
+  await writeFile(journalPath, JSON.stringify(userStatusOnlyJournal, null, 2));
+  assert.deepEqual(
+    await service.purgeRecoveryForDeletedAccount({ id: 'acc-recreated', email: 'other@example.invalid' }),
+    { cleared: false, reason: 'unmatched' },
+  );
+  assert.deepEqual(
+    await service.purgeRecoveryForDeletedAccount({ id: 'acc-recreated', email: 'victim@example.invalid' }),
+    { cleared: true, reason: 'cleared' },
+  );
+  assert.equal(JSON.parse(await readFile(journalPath, 'utf8')).status, 'cleared');
+
+  // 6) 真实 macOS go-keyring-base64:<b64> keychainBefore（不依赖 accounts.json id 命中）
+  const macKeychainPayload = encodeKeychainOauthPayload(
+    {
+      email: 'victim@example.invalid',
+      token: { access_token: 'ya29.victim', refresh_token: '1//victim-rt', expiry_timestamp: 1700000000 },
+    },
+    'go-keyring-base64',
+  );
+  const keychainOnlyJournal = {
+    version: 1,
+    status: 'complete',
+    at: new Date().toISOString(),
+    before: {},
+    after: {},
+    files: [],
+    cliSnapshots: [],
+    keychainBefore: macKeychainPayload,
+    keychainAfter: '[REDACTED]',
+  };
+  await writeFile(journalPath, JSON.stringify(keychainOnlyJournal, null, 2));
+  assert.deepEqual(
+    await service.purgeRecoveryForDeletedAccount({ id: 'acc-recreated', email: 'victim@example.invalid' }),
+    { cleared: true, reason: 'cleared' },
+  );
+  const clearedKeychainRaw = await readFile(journalPath, 'utf8');
+  assert.equal(JSON.parse(clearedKeychainRaw).status, 'cleared');
+  assert.equal(clearedKeychainRaw.includes('victim'), false);
+  assert.equal(clearedKeychainRaw.includes('1//victim-rt'), false);
 });
 });
 

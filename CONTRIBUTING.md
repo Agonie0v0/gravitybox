@@ -61,7 +61,7 @@ npm run verify
 
 1. **隐私安全底线**：
    - 严禁加入任何未经用户明确授权的外部遥测、埋点或数据回传代码。
-   - 本机账号库凭据与原子写入临时文件必须严格锁定当前用户私有权限（macOS `0600`），macOS Keychain 与 Windows Credential Manager 读写严格限定于官方登录态同步，切号归档与账号移除快照必须对敏感 Token 作不可逆脱敏。
+   - 本机账号库凭据与原子写入临时文件必须严格锁定当前用户私有权限（macOS `0600`），macOS Keychain 与 Windows Credential Manager 读写严格限定于官方登录态同步，切号历史归档必须对敏感 Token 作不可逆脱敏，删号时不再写入 `accounts-removed/` 留档并须同步清理关联切号恢复快照。
 2. **数据零硬删除（Non-destructive Safety）**：
    - 缓存维护与账号切号事务严禁执行物理硬删除操作，必须走四阶段原子恢复引擎与隔离废纸篓 / 回收站快照（macOS 废纸篓 / Windows COM `IFileOperation` 回收站迁移，禁止直接物理删档）。
 3. **版权与上游隔离**：
