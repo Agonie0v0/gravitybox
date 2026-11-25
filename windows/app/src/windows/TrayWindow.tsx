@@ -730,53 +730,61 @@ export function TrayWindow() {
                   );
                   return (
                     <div className="gb-tray-card" style={{ padding: '11px 12px' }}>
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-                          <span
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                            <span
+                              key={`tray-name-${masked ? 'm' : 'p'}`}
+                              className="gb-privacy-text-fade"
+                              style={{
+                                fontSize: 15,
+                                fontWeight: 700,
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {activeIdentity.name}
+                            </span>
+                            <TierBadge
+                              tier={normalizeTier(
+                                activeAccount?.subscription_tier ?? dashboard?.accounts?.activeTier,
+                                locale,
+                              )}
+                            />
+                          </div>
+                          <div
+                            key={`tray-email-${masked ? 'm' : 'p'}`}
+                            className="gb-privacy-text-fade"
                             style={{
-                              fontSize: 15,
-                              fontWeight: 700,
+                              fontSize: 11.5,
+                              color: 'var(--text-secondary)',
+                              marginTop: 2,
                               overflow: 'hidden',
                               textOverflow: 'ellipsis',
                               whiteSpace: 'nowrap',
                             }}
                           >
-                            {activeIdentity.name}
-                          </span>
-                          <TierBadge
-                            tier={normalizeTier(
-                              activeAccount?.subscription_tier ?? dashboard?.accounts?.activeTier,
-                              locale,
-                            )}
-                          />
-                          <button
-                            type="button"
-                            className="gb-btn gb-privacy-eye-btn gb-icon-btn"
-                            style={{
-                              width: 22,
-                              height: 22,
-                              flexShrink: 0,
-                            }}
-                            aria-label={privacyLabel}
-                            aria-pressed={masked}
-                            title={privacyLabel}
-                            onClick={() => void updateConfig({ privacyMaskAccounts: !masked })}
-                          >
-                            {masked ? <EyeOff size={12.5} /> : <Eye size={12.5} />}
-                          </button>
+                            {activeIdentity.email}
+                          </div>
                         </div>
-                        <div
+                        <button
+                          type="button"
+                          className="gb-btn gb-privacy-eye-btn gb-icon-btn"
                           style={{
-                            fontSize: 11.5,
-                            color: 'var(--text-secondary)',
-                            marginTop: 2,
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
+                            width: 24,
+                            height: 24,
+                            flexShrink: 0,
                           }}
+                          aria-label={privacyLabel}
+                          aria-pressed={masked}
+                          title={privacyLabel}
+                          onClick={() => void updateConfig({ privacyMaskAccounts: !masked })}
                         >
-                          {activeIdentity.email}
-                        </div>
+                          <span key={masked ? 'off' : 'on'} className="gb-privacy-eye-glyph">
+                            {masked ? <EyeOff size={13} /> : <Eye size={13} />}
+                          </span>
+                        </button>
                       </div>
                     </div>
                   );
@@ -854,7 +862,9 @@ export function TrayWindow() {
                   title={privacyLabel}
                   onClick={() => void updateConfig({ privacyMaskAccounts: !masked })}
                 >
-                  {masked ? <EyeOff size={12.5} /> : <Eye size={12.5} />}
+                  <span key={masked ? 'off' : 'on'} className="gb-privacy-eye-glyph">
+                    {masked ? <EyeOff size={12.5} /> : <Eye size={12.5} />}
+                  </span>
                 </button>
               </div>
               <span className="tabular" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>

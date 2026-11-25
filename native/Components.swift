@@ -1,4 +1,5 @@
 import Cocoa
+import QuartzCore
 
 private final class CopyTextMenuItem: NSMenuItem {
     weak var label: NSTextField?
@@ -74,6 +75,7 @@ func makePrivacyEyeButton(target: AnyObject?, action: Selector, symbolSize: CGFl
     btn.isBordered = false
     btn.isQuietAccessory = true
     btn.hidesQuietHoverBackground = true
+    btn.preferredIconButtonSize = buttonSize
     btn.imagePosition = .imageOnly
     btn.controlSize = .small
     btn.translatesAutoresizingMaskIntoConstraints = false
@@ -84,12 +86,21 @@ func makePrivacyEyeButton(target: AnyObject?, action: Selector, symbolSize: CGFl
     applyPrivacyEyeButtonState(btn, masked: AccountIdentity.isPrivacyMaskEnabled, symbolSize: symbolSize)
     return btn
 }
-func applyPrivacyEyeButtonState(_ btn: NSButton, masked: Bool, symbolSize: CGFloat = 13.5, includeShortcutHint: Bool = true) {
-    let symbolName = masked ? "eye.slash" : "eye"
-    let img = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
-        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: symbolSize, weight: .medium))
-    img?.isTemplate = true
-    btn.image = img
+func applyPrivacyEyeButtonState(_ btn: NSButton, masked: Bool, symbolSize: CGFloat = 13.5, includeShortcutHint: Bool = true, animated: Bool = false) {
+    let previousVal = btn.accessibilityValue() as? Int
+    let nextVal = masked ? 1 : 0
+    let stateChanged = previousVal != nil && previousVal != nextVal
+    if stateChanged || btn.image == nil {
+        let symbolName = masked ? "eye.slash" : "eye"
+        let img = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: symbolSize, weight: .medium))
+        img?.isTemplate = true
+        if let designBtn = btn as? DesignButton {
+            designBtn.setImage(img, animated: animated && stateChanged)
+        } else {
+            btn.image = img
+        }
+    }
     btn.contentTintColor = nil
     btn.needsDisplay = true
     let actionTitle = masked
@@ -98,7 +109,17 @@ func applyPrivacyEyeButtonState(_ btn: NSButton, masked: Bool, symbolSize: CGFlo
     btn.toolTip = nil
     btn.setAccessibilityLabel(actionTitle)
     btn.setAccessibilityHelp(includeShortcutHint ? "\(actionTitle) (⇧⌘M)" : actionTitle)
-    btn.setAccessibilityValue(masked ? 1 : 0)
+    btn.setAccessibilityValue(nextVal)
+}
+func applyPrivacyFadeTransition(to views: [NSView], duration: CFTimeInterval = 0.14) {
+    for view in views where !view.isHidden && Design.shouldAnimate(in: view) {
+        view.wantsLayer = true
+        let transition = CATransition()
+        transition.type = .fade
+        transition.duration = duration
+        transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        view.layer?.add(transition, forKey: "gb-privacy-fade")
+    }
 }
 class DesignCardBox: NSBox {
     var enablesHoverHighlight: Bool = false {

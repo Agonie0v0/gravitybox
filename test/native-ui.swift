@@ -7324,20 +7324,19 @@ import Cocoa
             mPanel.panelDidClose()
             check(!mPanel.quotaPrivacyEyeButton.hovered && mPanel.quotaPrivacyEyeButton.hoverProgress == 0, "MenuPanel close must reset privacy eye hover state")
             check(
+                dash.privacyEyeButton.superview === dash.refreshQuotaButton.superview
+                    && dash.privacyEyeButton.superview?.identifier?.rawValue == "account-actions",
+                "Overview Hero privacyEyeButton must anchor in trailing account-actions beside refresh button for 0px cursor jump"
+            )
+            check(
                 accPage.privacyEyeButton.superview !== accPage.manageAccountsButton.superview
                     && (accPage.privacyEyeButton.superview?.subviews.contains(where: { $0.identifier?.rawValue == "page-title" }) == true),
                 "AccountsPage privacyEyeButton must sit inline next to the page title"
             )
-            if let quotaNameRow = mPanel.quotaPrivacyEyeButton.superview as? NSStackView {
-                let views = quotaNameRow.arrangedSubviews
-                check(
-                    views.last !== mPanel.quotaPrivacyEyeButton
-                        && (views.firstIndex(where: { $0 === mPanel.quotaPrivacyEyeButton }) ?? -1) == ((views.firstIndex(where: { $0 === mPanel.quotaStatusBadge }) ?? -2) + 1),
-                    "MenuPanel quotaPrivacyEyeButton must sit inline after status badge before spacer"
-                )
-            } else {
-                check(false, "MenuPanel quotaPrivacyEyeButton must live inside an NSStackView row")
-            }
+            check(
+                mPanel.quotaPrivacyEyeButton.superview?.identifier?.rawValue == "account-actions",
+                "MenuPanel quotaPrivacyEyeButton must anchor in trailing account-actions slot for 0px cursor jump"
+            )
             if let accountsTopRow = mPanel.accountsPrivacyEyeButton.superview as? NSStackView {
                 let views = accountsTopRow.arrangedSubviews
                 check(

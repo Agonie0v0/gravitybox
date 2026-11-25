@@ -338,7 +338,9 @@ export function AccountsPage() {
             title={privacyLabel}
             onClick={() => void updateConfig({ privacyMaskAccounts: !masked })}
           >
-            {masked ? <EyeOff size={14} /> : <Eye size={14} />}
+            <span key={masked ? 'off' : 'on'} className="gb-privacy-eye-glyph">
+              {masked ? <EyeOff size={14} /> : <Eye size={14} />}
+            </span>
           </button>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

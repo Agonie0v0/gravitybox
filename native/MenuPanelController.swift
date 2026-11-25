@@ -169,7 +169,7 @@ final class MenuPanelController: NSViewController {
         self.requestsTile = MenuMetricTileView(key: "requests", title: L10n.t("menu_panel.tile.requests", fallback: "请求数"))
         self.costTile = MenuMetricTileView(key: "cost", title: L10n.t("menu_panel.tile.cost", fallback: "API 费用估算"))
         self.cacheTile = MenuMetricTileView(key: "cache", title: L10n.t("menu_panel.tile.cache", fallback: "缓存命中率"))
-        self.quotaPrivacyEyeButton = makePrivacyEyeButton(target: nil, action: #selector(togglePrivacyMask), symbolSize: 12.5, buttonSize: 22)
+        self.quotaPrivacyEyeButton = makePrivacyEyeButton(target: nil, action: #selector(togglePrivacyMask), symbolSize: 13, buttonSize: 24)
         self.accountsPrivacyEyeButton = makePrivacyEyeButton(target: nil, action: #selector(togglePrivacyMask), symbolSize: 12.5, buttonSize: 22)
 
         let warnTint = accessibleWarningColor()
@@ -559,13 +559,17 @@ final class MenuPanelController: NSViewController {
 
         let nameRowSpacer = flexibleSpace()
         nameRowSpacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-        let nameRow = horizontal([quotaAccountNameLabel, quotaTierBadge, quotaStatusBadge, quotaPrivacyEyeButton, nameRowSpacer], spacing: 6)
+        let nameRow = horizontal([quotaAccountNameLabel, quotaTierBadge, quotaStatusBadge, nameRowSpacer], spacing: 6)
         nameRow.alignment = .centerY
         nameRow.detachesHiddenViews = true
         let identityStack = vertical([nameRow, quotaEmailLabel], spacing: 4)
         fillWidth(nameRow, in: identityStack)
         fillWidth(quotaEmailLabel, in: identityStack)
-        let identityCard = group([identityStack], inset: 12)
+        let quotaEyeActions = horizontal([quotaPrivacyEyeButton], spacing: 0)
+        quotaEyeActions.alignment = .centerY
+        quotaEyeActions.detachesHiddenViews = true
+        let identityHeaderRow = identityHeader(identity: identityStack, actions: quotaEyeActions)
+        let identityCard = group([identityHeaderRow], inset: 12)
         identityCard.cornerRadius = Design.Radius.medium
         identityCard.fillColor = Design.popoverCardBackground
         identityCard.borderColor = Design.popoverCardBorder
@@ -1695,7 +1699,7 @@ final class MenuPanelController: NSViewController {
             let hostDisplay = host.cleanHostLabel
             let masked = app.privacyMaskAccounts
             quotaPrivacyEyeButton.isHidden = email.isEmpty
-            applyPrivacyEyeButtonState(quotaPrivacyEyeButton, masked: masked, symbolSize: 12.5)
+            applyPrivacyEyeButtonState(quotaPrivacyEyeButton, masked: masked, symbolSize: 13)
             quotaAccountNameLabel.stringValue = email.isEmpty
                 ? hostDisplay
                 : AccountIdentity.displayName(name: host.name, email: email, masked: masked)
@@ -1785,7 +1789,7 @@ final class MenuPanelController: NSViewController {
             let masked = app.privacyMaskAccounts
             let liveUnsaved = !app.statusValue.liveAccountEmail.isEmpty
             quotaPrivacyEyeButton.isHidden = !liveUnsaved
-            applyPrivacyEyeButtonState(quotaPrivacyEyeButton, masked: masked, symbolSize: 12.5)
+            applyPrivacyEyeButtonState(quotaPrivacyEyeButton, masked: masked, symbolSize: 13)
             let shownLiveEmail = AccountIdentity.displayEmail(app.statusValue.liveAccountEmail, masked: masked)
             quotaAccountNameLabel.stringValue = !app.reachable ? L10n.t("menu_panel.usage.waiting_service", fallback: "正在等待本机服务…") : (liveUnsaved ? L10n.t("menu_panel.quota.unsaved_live", fallback: "运行中账号尚未保存") : L10n.t("menu_panel.quota.no_saved", fallback: "尚未保存账号"))
             quotaEmailLabel.stringValue = liveUnsaved ? L10n.t("menu_panel.quota.detected_unsaved", ["email": shownLiveEmail], fallback: "检测到 \(shownLiveEmail)，请前往账号页保存") : L10n.t("menu_panel.quota.empty_hint", fallback: "点击下方按钮前往账号页，保存当前账号或从 JSON 导入")
@@ -1815,7 +1819,7 @@ final class MenuPanelController: NSViewController {
         let email = account["email"] as? String ?? ""
         let masked = app.privacyMaskAccounts
         quotaPrivacyEyeButton.isHidden = email.isEmpty
-        applyPrivacyEyeButtonState(quotaPrivacyEyeButton, masked: masked, symbolSize: 12.5)
+        applyPrivacyEyeButtonState(quotaPrivacyEyeButton, masked: masked, symbolSize: 13)
         quotaHeaderEmail = email
         let display = AccountIdentity.displayName(name: account["name"] as? String, email: email, masked: masked)
         let tier = AccountIdentity.normalizeTier(account["subscription_tier"] as? String)
@@ -1970,9 +1974,10 @@ final class MenuPanelController: NSViewController {
 
     func refreshPrivacyMaskState() {
         let masked = app.privacyMaskAccounts
-        applyPrivacyEyeButtonState(quotaPrivacyEyeButton, masked: masked, symbolSize: 12.5)
-        applyPrivacyEyeButtonState(accountsPrivacyEyeButton, masked: masked, symbolSize: 12.5)
+        applyPrivacyEyeButtonState(quotaPrivacyEyeButton, masked: masked, symbolSize: 13, animated: true)
+        applyPrivacyEyeButtonState(accountsPrivacyEyeButton, masked: masked, symbolSize: 12.5, animated: true)
         guard isViewLoaded else { return }
+        applyPrivacyFadeTransition(to: [quotaAccountNameLabel, quotaEmailLabel, accountsCardsStack])
         renderedQuotaTabKey = ""
         renderedRemoteJumpFingerprint = ""
         lastMeasuredContentFingerprint = ""

@@ -337,6 +337,8 @@ export function OverviewPage() {
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
               <span
+                key={`name-${masked ? 'm' : 'p'}`}
+                className="gb-privacy-text-fade"
                 style={{
                   fontSize: 16,
                   fontWeight: 700,
@@ -348,25 +350,10 @@ export function OverviewPage() {
                 {activeName}
               </span>
               <TierBadge tier={activeTier} />
-              {rawActiveEmail && (
-                <button
-                  type="button"
-                  className="gb-btn gb-privacy-eye-btn gb-icon-btn"
-                  style={{
-                    width: 22,
-                    height: 22,
-                  }}
-                  aria-label={privacyLabel}
-                  aria-pressed={masked}
-                  title={privacyLabel}
-                  onClick={() => void updateConfig({ privacyMaskAccounts: !masked })}
-                >
-                  {masked ? <EyeOff size={13} /> : <Eye size={13} />}
-                </button>
-              )}
             </div>
             <div
-              className="selectable"
+              key={`email-${masked ? 'm' : 'p'}`}
+              className="selectable gb-privacy-text-fade"
               style={{
                 fontSize: 12,
                 color: 'var(--text-secondary)',
@@ -379,15 +366,35 @@ export function OverviewPage() {
               {activeEmail || t('overview.account.add_hint')}
             </div>
           </div>
-          <button
-            type="button"
-            className="gb-btn gb-btn-sm"
-            disabled={!reachable || quotaRefreshing}
-            onClick={() => void refreshAllQuotas()}
-          >
-            <RotateCw size={12} className={quotaRefreshing ? 'gb-spin' : undefined} />
-            <span>{t('common.refresh_quota')}</span>
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+            {rawActiveEmail && (
+              <button
+                type="button"
+                className="gb-btn gb-privacy-eye-btn gb-icon-btn"
+                style={{
+                  width: 24,
+                  height: 24,
+                }}
+                aria-label={privacyLabel}
+                aria-pressed={masked}
+                title={privacyLabel}
+                onClick={() => void updateConfig({ privacyMaskAccounts: !masked })}
+              >
+                <span key={masked ? 'off' : 'on'} className="gb-privacy-eye-glyph">
+                  {masked ? <EyeOff size={13.5} /> : <Eye size={13.5} />}
+                </span>
+              </button>
+            )}
+            <button
+              type="button"
+              className="gb-btn gb-btn-sm"
+              disabled={!reachable || quotaRefreshing}
+              onClick={() => void refreshAllQuotas()}
+            >
+              <RotateCw size={12} className={quotaRefreshing ? 'gb-spin' : undefined} />
+              <span>{t('common.refresh_quota')}</span>
+            </button>
+          </div>
         </div>
 
         <div className="gb-divider" />

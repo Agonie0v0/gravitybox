@@ -13,8 +13,11 @@ class DesignButton: NSButton {
     private var hoverTracking: NSTrackingArea?
     private let hoverMotion = DesignMotion()
     private let pressMotion = DesignMotion()
+    private let iconTransitionMotion = DesignMotion()
     private(set) var hoverProgress: CGFloat = 0
     private(set) var pressProgress: CGFloat = 0
+    private var outgoingTransitionImage: NSImage?
+    private var iconTransitionProgress: CGFloat = 1.0
     private var lastHighlighted = false
     var isQuietAccessory: Bool = false {
         didSet {
@@ -27,6 +30,12 @@ class DesignButton: NSButton {
         didSet {
             guard oldValue != hidesQuietHoverBackground else { return }
             needsDisplay = true
+        }
+    }
+    var preferredIconButtonSize: CGFloat? {
+        didSet {
+            guard oldValue != preferredIconButtonSize else { return }
+            invalidateIntrinsicContentSize()
         }
     }
 
@@ -72,6 +81,7 @@ class DesignButton: NSButton {
     deinit {
         hoverMotion.cancel()
         pressMotion.cancel()
+        iconTransitionMotion.cancel()
     }
     override var wantsDefaultClipping: Bool { true }
     override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsets() }
@@ -90,6 +100,9 @@ class DesignButton: NSButton {
         if window == nil {
             hoverMotion.cancel()
             pressMotion.cancel()
+            iconTransitionMotion.cancel()
+            outgoingTransitionImage = nil
+            iconTransitionProgress = 1.0
             if hoverProgress != 0 { hoverProgress = 0 }
             if pressProgress != 0 { pressProgress = 0 }
         } else {
@@ -112,6 +125,9 @@ class DesignButton: NSButton {
         hovered = false
         hoverMotion.cancel()
         pressMotion.cancel()
+        iconTransitionMotion.cancel()
+        outgoingTransitionImage = nil
+        iconTransitionProgress = 1.0
         lastHighlighted = false
         let changed = hoverProgress != 0 || pressProgress != 0
         hoverProgress = 0
@@ -119,10 +135,38 @@ class DesignButton: NSButton {
         if changed { needsDisplay = true }
     }
 
+    func setImage(_ newImage: NSImage?, animated: Bool) {
+        let previous = self.image
+        if !animated || previous == nil || previous === newImage || !Design.shouldAnimate(in: self) {
+            iconTransitionMotion.cancel()
+            outgoingTransitionImage = nil
+            iconTransitionProgress = 1.0
+            self.image = newImage
+            needsDisplay = true
+            return
+        }
+        outgoingTransitionImage = previous
+        iconTransitionProgress = 0.0
+        self.image = newImage
+        iconTransitionMotion.animate(in: self, from: 0.0, to: 1.0, curve: .slide, threshold: 0.01, apply: { [weak self] val in
+            guard let self else { return }
+            self.iconTransitionProgress = val
+            self.needsDisplay = true
+        }, completion: { [weak self] in
+            guard let self else { return }
+            self.outgoingTransitionImage = nil
+            self.iconTransitionProgress = 1.0
+            self.needsDisplay = true
+        })
+    }
+
     override var intrinsicContentSize: NSSize {
         let isSmall = controlSize == .small
         let btnHeight: CGFloat = isSmall ? 24 : 28
         if title.isEmpty, image != nil {
+            if let side = preferredIconButtonSize {
+                return NSSize(width: side, height: side)
+            }
             return NSSize(width: isQuietAccessory ? 26 : 30, height: isQuietAccessory ? 26 : btnHeight)
         }
         let defaultFont = NSFont.systemFont(ofSize: isSmall ? 11.5 : 12, weight: .medium)
@@ -343,17 +387,45 @@ class DesignButton: NSButton {
                 cg.rotate(by: signedRotation)
                 cg.translateBy(x: -iconRect.midX, y: -iconRect.midY)
             }
-            if img.isTemplate, let cg = gctx?.cgContext {
-                cg.saveGState()
-                cg.beginTransparencyLayer(in: iconRect, auxiliaryInfo: nil)
-                img.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1.0, respectFlipped: true, hints: [.interpolation: NSNumber(value: NSImageInterpolation.high.rawValue)])
-                cg.setBlendMode(.sourceAtop)
-                fgColor.setFill()
-                cg.fill(iconRect)
-                cg.endTransparencyLayer()
-                cg.restoreGState()
+            func drawGlyph(_ glyph: NSImage, scale glyphScale: CGFloat, alpha glyphAlpha: CGFloat) {
+                let tintedColor = fgColor.withAlphaComponent(fgColor.alphaComponent * glyphAlpha)
+                let ctx = gctx?.cgContext
+                if abs(glyphScale - 1.0) > 0.001, let cg = ctx {
+                    cg.saveGState()
+                    cg.translateBy(x: iconRect.midX, y: iconRect.midY)
+                    cg.scaleBy(x: glyphScale, y: glyphScale)
+                    cg.translateBy(x: -iconRect.midX, y: -iconRect.midY)
+                }
+                if glyph.isTemplate, let cg = ctx {
+                    cg.saveGState()
+                    cg.beginTransparencyLayer(in: iconRect, auxiliaryInfo: nil)
+                    glyph.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1.0, respectFlipped: true, hints: [.interpolation: NSNumber(value: NSImageInterpolation.high.rawValue)])
+                    cg.setBlendMode(.sourceAtop)
+                    tintedColor.setFill()
+                    cg.fill(iconRect)
+                    cg.endTransparencyLayer()
+                    cg.restoreGState()
+                } else {
+                    glyph.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: glyphAlpha, respectFlipped: true, hints: [.interpolation: NSNumber(value: NSImageInterpolation.high.rawValue)])
+                }
+                if abs(glyphScale - 1.0) > 0.001, let cg = ctx {
+                    cg.restoreGState()
+                }
+            }
+            if let outgoing = outgoingTransitionImage, iconTransitionProgress < 0.999 {
+                let p = max(0, min(1, iconTransitionProgress))
+                let outAlpha = max(0, 1.0 - p * 1.65)
+                let outScale = 1.0 - 0.22 * p
+                let inAlpha = min(1, max(0, (p - 0.14) / 0.86))
+                let inScale = 0.78 + 0.22 * p
+                if outAlpha > 0.01 {
+                    drawGlyph(outgoing, scale: outScale, alpha: outAlpha)
+                }
+                if inAlpha > 0.01 {
+                    drawGlyph(img, scale: inScale, alpha: inAlpha)
+                }
             } else {
-                img.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1.0, respectFlipped: true, hints: [.interpolation: NSNumber(value: NSImageInterpolation.high.rawValue)])
+                drawGlyph(img, scale: 1.0, alpha: 1.0)
             }
             if let cg = rotatedCG {
                 cg.restoreGState()

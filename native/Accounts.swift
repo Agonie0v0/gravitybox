@@ -479,7 +479,7 @@ final class AccountsPage: NSObject {
         }
 
         privacyEyeButton.target = self
-        applyPrivacyEyeButtonState(privacyEyeButton, masked: app.privacyMaskAccounts)
+        applyPrivacyEyeButtonState(privacyEyeButton, masked: app.privacyMaskAccounts, symbolSize: 14)
         toggleCollapseAllButton.target = self
         manageAccountsButton.target = self
         refreshQuotaBtn.target = self
@@ -2015,7 +2015,8 @@ final class AccountsPage: NSObject {
     }
 
     func refreshPrivacyMaskState() {
-        applyPrivacyEyeButtonState(privacyEyeButton, masked: app.privacyMaskAccounts, symbolSize: 14)
+        applyPrivacyEyeButtonState(privacyEyeButton, masked: app.privacyMaskAccounts, symbolSize: 14, animated: true)
+        applyPrivacyFadeTransition(to: [cardsStack, remoteCardsStack, recommendationLabel])
         renderedFingerprint = ""
         let remoteHosts = app.canonicalRemoteHosts()
         renderedFingerprint = computeRenderedFingerprint(remoteHosts: remoteHosts)
