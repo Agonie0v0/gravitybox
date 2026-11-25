@@ -1,4 +1,5 @@
 import test, { before, after } from 'node:test';
+import { nativeTargetTriple } from '../tools/native-target.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -16,7 +17,7 @@ before(async () => {
   buildDir = await mkdtemp(join(tmpdir(), 'gb-native-repair-build-'));
   binary = join(buildDir, 'probe');
   await run('/usr/bin/swiftc', [
-    '-parse-as-library', '-target', 'arm64-apple-macosx14.0',
+    '-parse-as-library', '-target', nativeTargetTriple(),
     '-framework', 'Cocoa', '-framework', 'Security',
     'native/L10n.swift', 'native/Backend.swift', 'native/Configuration.swift', 'test/native-repair.swift', '-o', binary,
   ]);

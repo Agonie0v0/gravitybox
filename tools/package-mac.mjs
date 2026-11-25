@@ -7,7 +7,22 @@ import { createHash } from 'node:crypto';
 import { sourceDigest, includeDictionaryPath, assertReleaseArtifacts, listCompiledScripts, writeSha256Sidecar, verifySha256Sidecar } from './release-integrity.mjs';
 import { buildInfoPayload, describeValidationScope, resolvePackagingScope } from './release-scope.mjs';
 import { scanDirectoryForPrivacy } from './check-privacy.mjs';
+import { isSupportedMacArch, releaseArchSuffix, releaseDmgName } from './native-target.mjs';
 const run = promisify(execFile), root = fileURLToPath(new URL('../', import.meta.url));
+
+/** 返回 Mach-O 文件的实际架构列表（lipo 输出的空格分隔架构名）。 */
+async function machOArchs(file) {
+  const { stdout } = await run('/usr/bin/lipo', ['-archs', file]);
+  return stdout.trim().split(/\s+/).filter(Boolean);
+}
+
+/** 断言可执行文件是单一目标架构，避免把 Intel 运行时与 arm64 主程序混装进同一个包。 */
+async function assertMachOArch(file, expected, label) {
+  const archs = await machOArchs(file);
+  if (archs.length !== 1 || archs[0] !== expected) {
+    throw new Error(`${label} 架构为 ${archs.join('+') || '未知'}，与目标 ${expected} 不一致；请使用与主程序同架构的 Node 运行环境`);
+  }
+}
 
 /** Filters Finder metadata and asset attribution manifests out of packaged app resources. */
 export function includePackagedAssetPath(relativePath) {
@@ -78,10 +93,12 @@ async function main() {
   const supportedVersions = [...SUPPORTED_BUNDLES.keys()];
   const scope = resolvePackagingScope({ verification, argv: process.argv.slice(2), supportedVersions });
   process.stdout.write(`[package-mac] ${describeValidationScope(scope)}\n`);
-  if (!process.versions.node.startsWith('22.') || process.arch !== 'arm64') throw new Error('请使用 Apple Silicon 的 Node 22 构建自包含包');
+  if (!process.versions.node.startsWith('22.') || !isSupportedMacArch()) throw new Error('请使用 macOS (arm64 / x64) 的 Node 22 构建自包含包');
+  const archSuffix = releaseArchSuffix();
   const output = join(root, '成品'), stage = join(root, 'build', 'dmg-stage'), app = join(stage, 'GravityBox.app'), resources = join(app, 'Contents/Resources');
   await rm(stage, { recursive: true, force: true }); await mkdir(join(app, 'Contents/MacOS'), { recursive: true }); await mkdir(join(resources, 'runtime'), { recursive: true }); await mkdir(output, { recursive: true }); await writeFile(join(stage, '.metadata_never_index'), '');
   await copyFile(process.execPath, join(resources, 'runtime/node'));
+  await assertMachOArch(join(resources, 'runtime/node'), archSuffix, '内置 Node 运行环境');
   await run('/usr/bin/strip', ['-x', join(resources, 'runtime/node')]);
   await run('/usr/bin/codesign', ['--force', '--sign', '-', join(resources, 'runtime/node')]);
   await copyFile(join(root, 'licenses/NODE-LICENSE'), join(resources, 'runtime/LICENSE'));
@@ -118,6 +135,7 @@ async function main() {
   const nativeBinary = join(root, '.cache/GravityBox-native-verified');
   if (!verification.nativeBinarySha256 || createHash('sha256').update(await readFile(nativeBinary)).digest('hex') !== verification.nativeBinarySha256) throw new Error('发行编译产物未通过校验，请先运行完整验证');
   await copyFile(nativeBinary, join(app, 'Contents/MacOS/GravityBox'));
+  await assertMachOArch(join(app, 'Contents/MacOS/GravityBox'), archSuffix, 'GravityBox 主程序');
   await writeFile(join(resources, 'build-info.json'), JSON.stringify(buildInfoPayload({ version, build, verification, scope, node: process.versions.node }), null, 2));
   const bundlePrivacy = await scanDirectoryForPrivacy(join(app, 'Contents'), {
     excludePrefixes: ['MacOS/', 'Resources/runtime/'],
@@ -128,7 +146,7 @@ async function main() {
   }
   await run('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', '--timestamp=none', app]); await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', app]);
   await run('/bin/ln', ['-s', '/Applications', join(stage, 'Applications')]);
-  const dmg = join(output, `GravityBox-${version}-arm64.dmg`); await run('/usr/bin/hdiutil', ['create', '-ov', '-volname', 'GravityBox', '-fs', 'HFS+', '-srcfolder', stage, '-format', 'ULFO', dmg], { maxBuffer: 2e6 }); await run('/usr/bin/hdiutil', ['verify', dmg], { maxBuffer: 2e6 });
+  const dmg = join(output, releaseDmgName(version)); await run('/usr/bin/hdiutil', ['create', '-ov', '-volname', 'GravityBox', '-fs', 'HFS+', '-srcfolder', stage, '-format', 'ULFO', dmg], { maxBuffer: 2e6 }); await run('/usr/bin/hdiutil', ['verify', dmg], { maxBuffer: 2e6 });
   // hdiutil 校验通过后生成并复核 sidecar（与 `shasum -a 256` 完全一致，覆盖旧文件）；复核失败立即中止，避免发布不可校验的包。
   const sidecar = await writeSha256Sidecar(dmg); const sidecarCheck = await verifySha256Sidecar(dmg); if (sidecarCheck.hash !== sidecar.hash) throw new Error('DMG sha256 校验文件写入后复核不一致，已中止发布');
   // Keep one staging app for final installed-app acceptance, not a duplicate release app.

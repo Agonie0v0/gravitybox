@@ -14,7 +14,7 @@ GravityBox 的基础词典与版本分层词典结构（`dict/`，按功能与�
 
 ## 3. 运行环境与跨平台依赖许可 (Runtime & Dependencies)
 
-- **macOS 发行包**：内置构建时复制的 Apple Silicon (`arm64`) Node 22 运行环境，随包分发其官方 LICENSE（包含 Node.js、V8、libuv 等第三方组件许可，位于安装包内 `Contents/Resources/runtime/LICENSE` 与本仓库 `licenses/NODE-LICENSE`）。Node 来源：[Node.js 官方网站](https://nodejs.org/)。
+- **macOS 安装包**：内置与主程序架构相同的 Node 22 运行环境（官方预构建为 `arm64`，Intel 本地构建为 `x86_64`），随包分发其官方 LICENSE（包含 Node.js、V8、libuv 等第三方组件许可，位于安装包内 `Contents/Resources/runtime/LICENSE` 与本仓库 `licenses/NODE-LICENSE`）。Node 来源：[Node.js 官方网站](https://nodejs.org/)。
 - **Windows x64 社区构建**：自包含产物随包分发 `win-x64` Node 22 运行环境及对应许可；桌面端基于 Tauri 2、React 19、Lucide Icons 与 Rust 生态（`windows-sys`、`tokio`、`serde` 等开源许可组件）构建，Windows 客户端交互由 WebView2 运行时承载。
 
 ## 4. 商标与品牌免责声明 (Trademark Disclaimer)

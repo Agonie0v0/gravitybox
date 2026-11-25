@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { NATIVE_TEST_TIMEOUT_MS, nativeTargetTriple } from '../tools/native-target.mjs';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -10,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 const run = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
 
-test('Swift L10n 运行时加载、系统语言解析、扩展语言回退及通知触发', { timeout: process.env.CI ? 180000 : 60000 }, async () => {
+test('Swift L10n 运行时加载、系统语言解析、扩展语言回退及通知触发', { timeout: NATIVE_TEST_TIMEOUT_MS }, async () => {
   const temp = await mkdtemp(join(tmpdir(), 'gb-swift-i18n-'));
   try {
     const driverPath = join(temp, 'L10nDriver.swift');
@@ -86,7 +87,7 @@ struct L10nDriver {
 `);
     await run('/usr/bin/swiftc', [
       '-parse-as-library',
-      '-target', 'arm64-apple-macosx14.0',
+      '-target', nativeTargetTriple(),
       '-framework', 'Foundation',
       join(root, 'native/L10n.swift'),
       driverPath,

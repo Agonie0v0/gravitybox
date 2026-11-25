@@ -74,6 +74,8 @@
 
 ## Quick Start
 
+> Prebuilt macOS packages on GitHub Releases are currently Apple Silicon (`arm64`) only. Intel (`x86_64`) users can [verify and package a local build from source](#architecture--build).
+
 ### macOS (Primary · Apple Silicon)
 
 1. **Install**: Download `GravityBox-<version>-arm64.dmg` from [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest), drag **GravityBox.app** into **Applications**, and clear Gatekeeper quarantine once (or click **Open Anyway** in **System Settings → Privacy & Security**; open-source builds are not Apple-notarized):
@@ -261,9 +263,10 @@ Hover over or click any capsule to inspect its breakdown (`Esc` or click outside
 
 ## Installation & Upgrades
 
-- **macOS (Primary)**: Requires macOS 14 (Sonoma) or macOS 15+ (Sequoia), Apple Silicon (`arm64`), and official stable `/Applications/Antigravity.app` (Insiders is neither supported nor altered). Zero external runtime dependencies.
+- **macOS (Primary)**: Requires macOS 14 (Sonoma) or later and official stable `/Applications/Antigravity.app` (Insiders is neither supported nor altered). Zero external runtime dependencies.
   - Optional checksum check: `shasum -a 256 -c GravityBox-<version>-arm64.dmg.sha256`
   - Upgrade by quitting GravityBox and dragging the new app over `/Applications/GravityBox.app` (or enabling **Auto-Check Updates** in **About**, off by default).
+  - GitHub Releases provides the Apple Silicon (`arm64`) DMG. On Intel (`x86_64`), run `npm run verify` and `npm run package:mac` from source, then install the resulting local DMG. To upgrade on Intel, rebuild from the newer source.
 - **Windows x64 (Community Edition)**: Requires Windows 10/11 x64, system WebView2 runtime, and official stable Antigravity. Prebuilt self-contained artifacts (`GravityBox-<version>-win-x64-setup.exe` and portable `GravityBox-<version>-win-x64.zip` with `.sha256` sidecars) are real-machine verified by `@Agonie0v0` and distributed alongside `v1.2.1` on [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest)—**end users do not need to build from source**.
   - Optional PowerShell checksum check: `Get-FileHash GravityBox-<version>-win-x64.zip -Algorithm SHA256`
 - **Persistent User Data**:
@@ -304,7 +307,7 @@ flowchart LR
   Core -->|"Read-Only SQLite + Trash / Recycle Bin"| Local["Local App Data & Credentials<br/>macOS App Support / Keychain · Win %APPDATA% / CredMan"]
 ```
 
-- **macOS Build**: Requires Xcode Command Line Tools and Node.js `>=22.15.0 <23`.
+- **macOS Build**: Requires Xcode Command Line Tools and Node.js `>=22.15.0 <23` matching the build architecture (`arm64` or `x64`). Run `node tools/setup-test-browser.mjs` to prepare the pinned headless browser, or provide `CHROME_BIN`.
 - **Windows Build**: Requires Windows 10/11 x64, Node.js `>=22.15.0 <23`, Rust (`cargo` / `rustc`), MSVC & WebView2 build tools (plus NSIS for `-setup.exe`). Maintainers/CI also produce prebuilt Windows artifacts via the manual `Package Windows (Artifact Only)` workflow.
 
 ```bash
@@ -315,7 +318,7 @@ npm ci
 npm test                # Build TS, verify pricing parity, and run unit/integration suites
 npm run check:swift     # Typecheck Swift 6 AppKit UI and test harness (macOS)
 npm run verify          # Full gate: TS, tests, headless browser CDP E2E, Swift -O (macOS), dict gates
-npm run package:mac     # Build arm64 .app and distributable .dmg (macOS)
+npm run package:mac     # Build .app and .dmg for the local macOS architecture (arm64 / x86_64)
 npm run test:win        # Run backend fast tests + Win32 helper & Tauri Rust tests (Windows)
 npm run package:win     # Build self-contained Windows .zip (pass --installer for NSIS .exe)
 ```

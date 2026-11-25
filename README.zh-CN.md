@@ -74,6 +74,8 @@
 
 ## 快速上手
 
+> GitHub Releases 的 macOS 预构建包目前仅面向 Apple Silicon（`arm64`）。Intel（`x86_64`）用户可[从源码在本机验证并打包](#架构与源码构建)。
+
 ### macOS（原生主线 · Apple Silicon）
 
 1. **下载与安装**：前往 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 获取最新 `GravityBox-<version>-arm64.dmg`，将 **GravityBox.app** 拖入 **Applications**。因开源版本未经过 Apple 付费公证，首次运行前在终端执行一次放行命令即可（也可在「系统设置 → 隐私与安全性」点击仍要打开）：
@@ -261,9 +263,10 @@ HUD 挂载于每个 Antigravity 对话输入框下方（含 `2.34.0+` 的 BTW �
 
 ## 安装与升级
 
-- **macOS（原生主线）**：macOS 14 (Sonoma) 或 macOS 15+ (Sequoia)、Apple Silicon (`arm64`)、官方正式版 `/Applications/Antigravity.app`（不支持也不干扰 Insiders 预览版），内置运行环境、零外部依赖。
+- **macOS（原生主线）**：macOS 14 (Sonoma) 或更高版本、官方正式版 `/Applications/Antigravity.app`（不支持也不干扰 Insiders 预览版），内置运行环境、零外部依赖。
   - SHA-256 校验（可选）：`shasum -a 256 -c GravityBox-<version>-arm64.dmg.sha256`
   - 无损升级：退出旧版 GravityBox 后将新版拖入 `/Applications` 替换，或在 **关于** 页检查更新（默认关闭后台检查）。
+  - GitHub Releases 提供 Apple Silicon（`arm64`）DMG。Intel（`x86_64`）在源码目录运行 `npm run verify` 与 `npm run package:mac`，再安装本地产出的 DMG；升级时用新版源码重新构建。
 - **Windows x64（社区共建端）**：Windows 10/11 x64（需系统 WebView2 运行时）及官方正式版 Antigravity；由维护者/CI 统一构建开箱即用的自包含安装版（`GravityBox-<version>-win-x64-setup.exe`）与便携版（`GravityBox-<version>-win-x64.zip`，均附 `.sha256` 校验文件），已由 `@Agonie0v0` 完成真机验收，随 `v1.2.1` 直接发布至 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest)，**普通用户无需自行编译打包**。
   - PowerShell 校验（可选）：`Get-FileHash GravityBox-<version>-win-x64.zip -Algorithm SHA256`
 - **本地数据与缓存路径**：
@@ -304,7 +307,7 @@ flowchart LR
   Core -->|"只读快照 + 废纸篓 / 回收站还原"| Local["本机数据与凭据<br/>macOS App Support / Keychain · Win %APPDATA% / 凭据管理器"]
 ```
 
-- **macOS 构建依赖**：Xcode Command Line Tools 与 Node.js `>=22.15.0 <23`。
+- **macOS 构建依赖**：Xcode Command Line Tools 与匹配构建架构（`arm64` 或 `x64`）的 Node.js `>=22.15.0 <23`。运行 `node tools/setup-test-browser.mjs` 准备固定版本的无头浏览器，也可指定 `CHROME_BIN`。
 - **Windows 构建依赖**：Windows 10/11 x64、Node.js `>=22.15.0 <23`、Rust（`cargo` / `rustc`）、MSVC 与 WebView2 构建工具（构建 `.exe` 安装包另需 NSIS）。维护者与 CI 亦可通过手动运行 `Package Windows (Artifact Only)` 工作流直接产出预构建 Windows 测试包。
 
 ```bash
@@ -315,7 +318,7 @@ npm ci
 npm test                # 编译 TS、校验价格资产并运行单元/集成测试
 npm run check:swift     # Swift 6 AppKit 编译与布局检查（macOS）
 npm run verify          # 全量发布门禁（TS + 单测 + 无头浏览器 E2E + Swift -O + 词典门禁）
-npm run package:mac     # 构建 Apple Silicon .app 与 .dmg 安装包（macOS）
+npm run package:mac     # 按本机 macOS 架构（arm64 / x86_64）构建 .app 与 .dmg
 npm run test:win        # 运行后端快测 + Win32 助手与 Tauri Rust 测试（Windows）
 npm run package:win     # 构建 Windows 自包含 .zip（附加 --installer 生成 NSIS .exe）
 ```

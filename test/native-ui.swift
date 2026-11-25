@@ -105,6 +105,71 @@ import Cocoa
         for sub in v.subviews { values.append(contentsOf: visibleTextValues(sub)) }
         return values
     }
+
+    static func checkUpdateAssetDiscovery(in state: URL) throws {
+        let host = Assistant(state: state)
+        host.configuration = try ConfigurationStore(state: state)
+        let manager = host.updateManager
+        let version = "9.9.9"
+        #if arch(x86_64)
+        let matchingArch = "x86_64", foreignArch = "arm64"
+        #else
+        let matchingArch = "arm64", foreignArch = "x86_64"
+        #endif
+        let matchingName = "GravityBox-\(version)-\(matchingArch).dmg"
+        func assets(for name: String) -> [[String: String]] {
+            [name, name + ".sha256"].map { ["name": $0, "browser_download_url": "https://example.invalid/\($0)"] }
+        }
+        let matching = assets(for: matchingName)
+        let foreign = assets(for: "GravityBox-\(version)-\(foreignArch).dmg")
+        let universal = assets(for: "GravityBox-\(version)-universal.dmg")
+
+        func checkRelease(_ assets: [[String: String]], description: String) throws {
+            let payload = try JSONSerialization.data(withJSONObject: ["tag_name": "v\(version)", "assets": assets])
+            var finished = false
+            manager.onStateChanged = { [weak manager] in
+                if let manager, case .checking = manager.state { return }
+                finished = true
+            }
+            manager.checkTransport = { request, completion in
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)
+                completion(payload, response, nil)
+            }
+            defer { manager.onStateChanged = nil; manager.checkTransport = nil }
+            manager.checkForUpdates()
+            waitUntil(step: 0.01, description: description) { finished }
+        }
+
+        try checkRelease(foreign + universal + matching, description: "matching update pair")
+        if case .updateAvailable(let release) = manager.state {
+            check(release.dmgURL?.lastPathComponent == matchingName, "Must select this build's DMG")
+            check(release.sha256URL?.lastPathComponent == matchingName + ".sha256", "Must pair it with its own checksum")
+        } else {
+            check(false, "A matching pair with HTTPS URLs must be offered")
+        }
+
+        var invalidDMG = matching, invalidChecksum = matching
+        invalidDMG[0]["browser_download_url"] = "https:///missing-host"
+        invalidChecksum[1]["browser_download_url"] = "http://example.invalid/checksum"
+        let unavailable = [
+            ("missing checksum", [matching[0]] + foreign),
+            ("missing DMG", [matching[1]]),
+            ("invalid DMG URL", invalidDMG),
+            ("non-HTTPS checksum URL", invalidChecksum),
+            ("foreign architecture", foreign),
+            ("universal package", universal),
+        ]
+        for (description, assets) in unavailable {
+            try checkRelease(assets, description: description)
+            if case .upToDate = manager.state {
+                check(manager.availableRelease == nil && manager.downloadedDMGURL == nil, "\(description) must clear the update prompt")
+            } else {
+                check(false, "\(description) must be treated as no update")
+            }
+        }
+        print("Update asset discovery passed (\(matchingArch), \(1 + unavailable.count) cases)")
+    }
+
     static func main() throws {
         let application = NSApplication.shared
         let interactive = CommandLine.arguments.contains("--interactive")
@@ -113,6 +178,7 @@ import Cocoa
         let state = URL(fileURLWithPath:CommandLine.arguments[1]), output = URL(fileURLWithPath:CommandLine.arguments[2])
         try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
         L10n.shared.setLanguage("zh-Hans", notify: false)
+        try checkUpdateAssetDiscovery(in: state.appendingPathComponent("update-asset-discovery"))
         let assistant = Assistant(state:state)
         assistant.configuration = try ConfigurationStore(state:state)
         assistant.configuration.value.navigationVersion = 5
@@ -1263,6 +1329,7 @@ import Cocoa
             check(updaterScript.contains("HUP TERM INT QUIT PIPE") && updaterScript.contains("kill -9 12345") && updaterScript.contains("--install-update"), "Detached updater must wait for its parent then invoke the transactional helper")
             check(!updaterScript.contains("rm -rf") && !updaterScript.contains("ditto"), "Detached launcher must never delete or copy over the live app")
             check(AppUpdateManager.extractGravityBoxDMGVersion(from: "GravityBox-1.0.4-arm64.dmg") == "1.0.4", "Must extract version from standard arm64 DMG filename")
+            check(AppUpdateManager.extractGravityBoxDMGVersion(from: "GravityBox-1.0.4-x86_64.dmg") == "1.0.4", "Must extract version from Intel x86_64 DMG filename")
             check(AppUpdateManager.extractGravityBoxDMGVersion(from: "GravityBox-v1.0.3-universal.dmg.sha256") == "1.0.3", "Must extract version from v-prefixed DMG sha256 sidecar")
             check(AppUpdateManager.extractGravityBoxDMGVersion(from: "OtherApp-1.0.4-arm64.dmg") == nil, "Must ignore unrelated DMG filenames")
 
@@ -1377,7 +1444,8 @@ import Cocoa
         check(aboutPage.versionSpecLabel.stringValue.contains("Antigravity") && !aboutPage.versionSpecLabel.stringValue.contains("Build "), "About page versionSpecLabel must display Antigravity version without Build number")
         let aboutTexts = allTextValues(aboutPage.view)
         check(aboutTexts.contains("自动检查更新") && aboutTexts.contains("运行信息") && aboutTexts.contains("目标应用") && aboutTexts.contains("GravityBox 数据目录"), "Simplified About page must render 自动检查更新, 运行信息, 目标应用 and GravityBox 数据目录")
-        check(!aboutTexts.contains("系统环境") && !aboutTexts.contains("构建与环境") && !aboutTexts.contains("本地数据与隐私原则") && !aboutTexts.contains("macOS · arm64") && !aboutTexts.contains { $0.contains("查看历史发行版本") }, "Simplified About page must omit redundant OS, build, privacy, arm64 pill and Releases subtitle rows")
+        let aboutArchPill = "macOS · \(AppUpdateManager.releaseArchSuffix)"
+        check(!aboutTexts.contains("系统环境") && !aboutTexts.contains("构建与环境") && !aboutTexts.contains("本地数据与隐私原则") && !aboutTexts.contains(aboutArchPill) && !aboutTexts.contains { $0.contains("查看历史发行版本") }, "Simplified About page must omit redundant OS, build, privacy, arch pill and Releases subtitle rows")
         check(aboutPage.revealDataBtn.title == "在访达中显示", "About page revealDataBtn title must be 在访达中显示")
         check(aboutPage.githubReleasesBtn.title == "GitHub ↗", "About page githubReleasesBtn title must be GitHub ↗")
 
@@ -1723,7 +1791,8 @@ import Cocoa
         let wrongName = updateRoot.appendingPathComponent("wrong-name.sha256")
         try Data((String(repeating: "0", count: 64) + "  Other.dmg\n").utf8).write(to: wrongName)
         let mismatch = updateRoot.appendingPathComponent("mismatch.sha256")
-        try Data((String(repeating: "0", count: 64) + "  GravityBox-9.9.9-arm64.dmg\n").utf8).write(to: mismatch)
+        let targetDMGName = "GravityBox-9.9.9-\(AppUpdateManager.releaseArchSuffix).dmg"
+        try Data((String(repeating: "0", count: 64) + "  \(targetDMGName)\n").utf8).write(to: mismatch)
         let sources: [URL?] = [nil, updateRoot.appendingPathComponent("missing.sha256"), malformed, wrongName, mismatch]
         for source in sources {
             let release = AppReleaseInfo(version: "9.9.9", tagName: "v9.9.9", title: "fixture", changelog: "", publishedDate: "", htmlURL: URL(string: "https://example.invalid")!, dmgURL: fakeDMG, sha256URL: source)
@@ -1737,7 +1806,7 @@ import Cocoa
             }
             check(finished && !accepted && assistant.updateManager.downloadedDMGURL == nil, "Invalid or missing checksum must never produce an installable package")
         }
-        let cachedDMG = state.appendingPathComponent("updates/v9.9.9/GravityBox-9.9.9-arm64.dmg")
+        let cachedDMG = state.appendingPathComponent("updates/v9.9.9/\(targetDMGName)")
         try FileManager.default.createDirectory(at: cachedDMG.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("previously verified synthetic package".utf8).write(to: cachedDMG)
         let cachedHash = try UpdatePackageIntegrity.fileHash(cachedDMG)

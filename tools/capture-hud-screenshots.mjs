@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { CDP } from '../dist/cdp.js';
-import { TEST_CHROME_PATH, TEST_CHROME_VERSION } from './setup-test-browser.mjs';
+import { TEST_CHROME_PATH } from './setup-test-browser.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
@@ -18,7 +18,6 @@ function resolveChromeBinary() {
     process.env.CHROME_PATH,
     process.env.PUPPETEER_EXECUTABLE_PATH,
     TEST_CHROME_PATH,
-    join(root, '..', 'gravitybox', '.cache', `test-chrome-${TEST_CHROME_VERSION}-mac-arm64`, 'chrome-headless-shell'),
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   ].filter(Boolean);
   for (const candidate of candidates) {
