@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileSha256, writeSha256Sidecar, sourceDigest } from '../tools/release-integrity.mjs';
-import { validateVersion, releaseAssetNames, assertNewRelease, findReleaseByTag, validateDraft, requireAcceptance, githubClient, releaseContext, writeReleaseManifest, verifyAcceptedFiles, publishAcceptedDraft } from '../tools/release-control.mjs';
+import { validateVersion, releaseAssetNames, optionalReleaseAssetNames, assertNewRelease, findReleaseByTag, validateDraft, requireAcceptance, githubClient, releaseContext, writeReleaseManifest, verifyAcceptedFiles, publishAcceptedDraft } from '../tools/release-control.mjs';
 
 const version = '1.0.1', tag = 'v1.0.1', commit = 'a'.repeat(40);
 const pkg = { version }, lock = { version, packages: { '': { version } } };
@@ -62,9 +62,36 @@ async function fixture(fn) {
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
-test('草稿必须完整且只含该版本安装包、校验文件和清单', () => fixture(async ({ release }) => {
+test('草稿必须完整且只含该版本安装包、校验文件和清单（支持可选 Windows 标准发行包）', () => fixture(async ({ directory, context, hash, release }) => {
   assert.equal(validateDraft(release, tag), release);
-  for (const bad of [{ ...release, draft: false }, { ...release, prerelease: true }, { ...release, tag_name: 'v1.0.0' }, { ...release, assets: release.assets.slice(1) }, { ...release, assets: [...release.assets, release.assets[0]] }, { ...release, assets: release.assets.map(a => ({ ...a, state: 'new' })) }]) assert.throws(() => validateDraft(bad, tag));
+  const winNames = optionalReleaseAssetNames(version);
+  const winAssets = [];
+  for (const [i, name] of winNames.entries()) {
+    if (name.endsWith('.sha256')) continue;
+    await writeFile(join(directory, name), `synthetic windows asset ${name}`);
+    const winSidecar = await writeSha256Sidecar(join(directory, name));
+    winAssets.push(
+      { id: 100 + i * 2, name, state: 'uploaded', size: (await readFile(join(directory, name))).length, digest: `sha256:${winSidecar.hash}`, updated_at: '2026-11-07T00:00:00Z' },
+      { id: 101 + i * 2, name: `${name}.sha256`, state: 'uploaded', size: (await readFile(winSidecar.sidecarPath)).length, digest: `sha256:${await fileSha256(winSidecar.sidecarPath)}`, updated_at: '2026-11-07T00:00:00Z' },
+    );
+  }
+  const combined = { ...release, assets: [...release.assets, ...winAssets] };
+  assert.equal(validateDraft(combined, tag), combined);
+  assert.equal(await verifyAcceptedFiles(directory, context, hash), hash);
+  const badSidecarOnly = { ...release, assets: [...release.assets, winAssets[1]] };
+  for (const bad of [
+    { ...release, draft: false },
+    { ...release, prerelease: true },
+    { ...release, tag_name: 'v1.0.0' },
+    { ...release, assets: release.assets.slice(1) },
+    { ...release, assets: [...release.assets, release.assets[0]] },
+    { ...release, assets: release.assets.map(a => ({ ...a, state: 'new' })) },
+    { ...release, assets: [...release.assets, { id: 999, name: 'unexpected.txt', state: 'uploaded', size: 12, digest: `sha256:${'0'.repeat(64)}` }] },
+    { ...release, assets: [...release.assets, { id: 998, name: 'GravityBox-1.0.0-win-x64.zip', state: 'uploaded', size: 12, digest: `sha256:${'0'.repeat(64)}` }] },
+    badSidecarOnly,
+  ]) assert.throws(() => validateDraft(bad, tag));
+  await writeFile(join(directory, `${winNames[0]}.sha256`), `${'0'.repeat(64)}  ${winNames[0]}\n`);
+  await assert.rejects(verifyAcceptedFiles(directory, context, hash), /sha256 校验失败/);
 }));
 
 test('验收文件绑定 DMG、sidecar、清单、标签、提交和人工验收哈希', () => fixture(async ({ directory, context, hash, manifest }) => {
@@ -77,14 +104,25 @@ test('验收文件绑定 DMG、sidecar、清单、标签、提交和人工验收
   await assert.rejects(verifyAcceptedFiles(directory, context, hash), /SHA-256 不一致/);
 }));
 
-test('通过验收后仅修改草稿的发布状态，不上传或重新构建文件', () => fixture(async ({ directory, context, hash, release }) => {
+test('通过验收后仅修改草稿的发布状态，不上传或重新构建文件（兼容含可选 Windows 包草稿）', () => fixture(async ({ directory, context, hash, release }) => {
+  const winZip = optionalReleaseAssetNames(version)[0];
+  await writeFile(join(directory, winZip), 'synthetic windows zip');
+  const winSidecar = await writeSha256Sidecar(join(directory, winZip));
+  const combinedRelease = {
+    ...release,
+    assets: [
+      ...release.assets,
+      { id: 201, name: winZip, state: 'uploaded', size: 21, digest: `sha256:${winSidecar.hash}`, updated_at: '2026-11-07T00:00:00Z' },
+      { id: 202, name: `${winZip}.sha256`, state: 'uploaded', size: (await readFile(winSidecar.sidecarPath)).length, digest: `sha256:${await fileSha256(winSidecar.sidecarPath)}`, updated_at: '2026-11-07T00:00:00Z' },
+    ],
+  };
   const calls = [];
   const api = async (path, options) => {
     calls.push({ path, options });
     if (path.startsWith('commits/')) return { sha: commit };
-    if (path.startsWith('releases?')) return [release];
-    if (options?.method === 'PATCH') return { ...release, draft: false, html_url: 'https://github.com/owner/repo/releases/tag/v1.0.1' };
-    return release;
+    if (path.startsWith('releases?')) return [combinedRelease];
+    if (options?.method === 'PATCH') return { ...combinedRelease, draft: false, html_url: 'https://github.com/owner/repo/releases/tag/v1.0.1' };
+    return combinedRelease;
   };
   const result = await publishAcceptedDraft({ api, directory, context, expectedHash: hash });
   assert.equal(result.sha256, hash);
