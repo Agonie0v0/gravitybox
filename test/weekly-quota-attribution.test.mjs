@@ -1360,3 +1360,317 @@ test('dist/main.js IPC 集成：weekly_quota_usage / dashboard_summary / account
     assert.equal(stderr, '');
   });
 });
+
+test('ULTRA 冷启动 0.2%~0.5% 细粒度快速校准并回溯安装前历史消耗', async () => {
+  await withNoNetworkFetch(async () => {
+    const cycleStart = 1_795_000_000;
+    const resetSec = cycleStart + WEEK_SEC;
+
+    // 首个快照前已消耗 9.9%（remaining=0.901），随后 5 分钟短窗口仅再掉落 0.4%（0.901 -> 0.897）
+    const stored = {
+      email: 'ultra-cold-backfill@example.invalid',
+      tier: 'ULTRA',
+      pools: {
+        gemini: {
+          poolKey: 'gemini',
+          displayName: 'Gemini',
+          tier: 'ULTRA',
+          cycles: [{
+            cycleStartSec: cycleStart,
+            resetTimeSec: resetSec,
+            resetTimeIso: new Date(resetSec * 1000).toISOString(),
+            tier: 'ULTRA',
+            points: [
+              { at: cycleStart + 3600, lastSeenAt: cycleStart + 3600, remaining: 0.901, source: 'cloud' },
+              { at: cycleStart + 3900, lastSeenAt: cycleStart + 3900, remaining: 0.897, source: 'cloud' },
+            ],
+          }],
+        },
+      },
+    };
+
+    const events = [
+      // 首个快照前周期初本地已累计高额用量 ($20.0)
+      makeEvent({
+        accountId: 'acc-ultra-1',
+        accountEmail: 'ultra-cold-backfill@example.invalid',
+        timestampSec: cycleStart + 1200,
+        inputTokens: 10_000,
+        outputTokens: 2_000,
+        estimatedUsd: 10.0,
+      }),
+      makeEvent({
+        accountId: 'acc-ultra-1',
+        accountEmail: 'ultra-cold-backfill@example.invalid',
+        timestampSec: cycleStart + 2400,
+        inputTokens: 10_000,
+        outputTokens: 2_000,
+        estimatedUsd: 10.0,
+      }),
+      // 短窗口内本地调用 $2.00 触发 0.4% 掉额 -> usdPer1Pct = 2.0 / 0.4 = 5.0
+      makeEvent({
+        accountId: 'acc-ultra-1',
+        accountEmail: 'ultra-cold-backfill@example.invalid',
+        timestampSec: cycleStart + 3750,
+        inputTokens: 2_000,
+        outputTokens: 500,
+        estimatedUsd: 2.0,
+      }),
+    ];
+
+    const res = computeAccountWeeklyAttribution({
+      accountId: 'acc-ultra-1',
+      email: 'ultra-cold-backfill@example.invalid',
+      tier: 'ULTRA',
+      storedAccount: stored,
+      events,
+      nowSec: cycleStart + 4000,
+    });
+
+    assert.equal(res.pools.length, 1);
+    const pool = res.pools[0];
+    assert.equal(pool.totalUsedPct, 10.3);
+    assert.equal(pool.calibrationSamples, 1);
+    assert.equal(pool.usdPer1Pct, 5);
+    assert.equal(pool.hasPreSnapshotEstimate, true);
+    assert.equal(pool.ambiguousDropPct, 0);
+    assert.notEqual(pool.localEstimatedUsedPct, null);
+    assert.notEqual(pool.otherEstimatedUsedPct, null);
+    assert.equal(pool.localEstimatedUsedPct, 4.4);
+    assert.equal(pool.otherEstimatedUsedPct, 5.9);
+    assert.equal(pool.confidence, 'low');
+  });
+});
+
+test('冷启动微幅抖动（< 0.2%）未形成校准样本时保持 calibrating，绝不误报给其他端', async () => {
+  await withNoNetworkFetch(async () => {
+    const cycleStart = 1_795_000_000;
+    const resetSec = cycleStart + WEEK_SEC;
+
+    // 首个快照前已有 9.9% 消耗（remaining=0.901），后续短窗口仅掉落 0.1%（0.901 -> 0.900 < 0.2%）
+    const stored = {
+      email: 'cold-micro-jitter@example.invalid',
+      tier: 'ULTRA',
+      pools: {
+        gemini: {
+          poolKey: 'gemini',
+          displayName: 'Gemini',
+          tier: 'ULTRA',
+          cycles: [{
+            cycleStartSec: cycleStart,
+            resetTimeSec: resetSec,
+            resetTimeIso: new Date(resetSec * 1000).toISOString(),
+            tier: 'ULTRA',
+            points: [
+              { at: cycleStart + 3600, lastSeenAt: cycleStart + 3600, remaining: 0.901, source: 'cloud' },
+              { at: cycleStart + 3900, lastSeenAt: cycleStart + 3900, remaining: 0.900, source: 'cloud' },
+            ],
+          }],
+        },
+      },
+    };
+
+    const events = [
+      makeEvent({
+        accountId: 'acc-jitter',
+        accountEmail: 'cold-micro-jitter@example.invalid',
+        timestampSec: cycleStart + 1500,
+        inputTokens: 10_000,
+        outputTokens: 2_000,
+        estimatedUsd: 20.0,
+      }),
+      makeEvent({
+        accountId: 'acc-jitter',
+        accountEmail: 'cold-micro-jitter@example.invalid',
+        timestampSec: cycleStart + 3750,
+        inputTokens: 1_000,
+        outputTokens: 200,
+        estimatedUsd: 0.5,
+      }),
+    ];
+
+    const res = computeAccountWeeklyAttribution({
+      accountId: 'acc-jitter',
+      email: 'cold-micro-jitter@example.invalid',
+      tier: 'ULTRA',
+      storedAccount: stored,
+      events,
+      nowSec: cycleStart + 4000,
+    });
+
+    const pool = res.pools[0];
+    assert.equal(pool.totalUsedPct, 10);
+    assert.equal(pool.calibrationSamples, 0);
+    assert.equal(pool.usdPer1Pct, null);
+    assert.equal(pool.hasPreSnapshotEstimate, false);
+    assert.equal(pool.confidence, 'calibrating');
+    assert.equal(pool.localEstimatedUsedPct, null);
+    assert.equal(pool.otherEstimatedUsedPct, null);
+    assert.equal(pool.ambiguousDropPct, 9.9);
+  });
+});
+
+test('未定价模型 Token 速率兜底（tokensPer1Pct）：冷启动回溯、长区间估算、数学守恒与置信度降级', async () => {
+  await withNoNetworkFetch(async () => {
+    const cycleStart = 1_795_000_000;
+    const resetSec = cycleStart + WEEK_SEC;
+
+    // 场景 A：全未定价模型，先通过两个短区间建立 tokensPer1Pct = 1000 tokens/1%，再估算冷启动前与长混杂区间
+    const stored = {
+      email: 'token-fallback@example.invalid',
+      tier: 'PRO',
+      pools: {
+        gemini: {
+          poolKey: 'gemini',
+          displayName: 'Gemini',
+          tier: 'PRO',
+          cycles: [{
+            cycleStartSec: cycleStart,
+            resetTimeSec: resetSec,
+            resetTimeIso: new Date(resetSec * 1000).toISOString(),
+            tier: 'PRO',
+            points: [
+              // 冷启动前掉落 4%
+              { at: cycleStart + 3600, lastSeenAt: cycleStart + 3600, remaining: 0.96, source: 'cloud' },
+              // 短区间 1（300s）掉落 2%
+              { at: cycleStart + 3900, lastSeenAt: cycleStart + 3900, remaining: 0.94, source: 'cloud' },
+              // 短区间 2（300s）掉落 2%
+              { at: cycleStart + 4200, lastSeenAt: cycleStart + 4200, remaining: 0.92, source: 'cloud' },
+              // 长混杂区间（3600s > 15min）掉落 10%
+              { at: cycleStart + 7800, lastSeenAt: cycleStart + 7800, remaining: 0.82, source: 'cloud' },
+            ],
+          }],
+        },
+      },
+    };
+
+    const events = [
+      // 冷启动前：2000 tokens -> 2% 本地 / 2% 他端
+      makeEvent({
+        accountId: 'acc-tok',
+        accountEmail: 'token-fallback@example.invalid',
+        model: 'custom-unpriced-gemini-exp',
+        timestampSec: cycleStart + 1000,
+        inputTokens: 1600,
+        outputTokens: 400,
+        estimatedUsd: null,
+        priced: false,
+      }),
+      // 短区间 1：2000 tokens / 2% = 1000 tokens/1%
+      makeEvent({
+        accountId: 'acc-tok',
+        accountEmail: 'token-fallback@example.invalid',
+        model: 'custom-unpriced-gemini-exp',
+        timestampSec: cycleStart + 3750,
+        inputTokens: 1600,
+        outputTokens: 400,
+        estimatedUsd: null,
+        priced: false,
+      }),
+      // 短区间 2：2000 tokens / 2% = 1000 tokens/1%
+      makeEvent({
+        accountId: 'acc-tok',
+        accountEmail: 'token-fallback@example.invalid',
+        model: 'custom-unpriced-gemini-exp',
+        timestampSec: cycleStart + 4050,
+        inputTokens: 1600,
+        outputTokens: 400,
+        estimatedUsd: null,
+        priced: false,
+      }),
+      // 长混杂区间：3000 tokens -> 3% 本地 / 7% 他端
+      makeEvent({
+        accountId: 'acc-tok',
+        accountEmail: 'token-fallback@example.invalid',
+        model: 'custom-unpriced-gemini-exp',
+        timestampSec: cycleStart + 5000,
+        inputTokens: 2400,
+        outputTokens: 600,
+        estimatedUsd: null,
+        priced: false,
+      }),
+    ];
+
+    const res = computeAccountWeeklyAttribution({
+      accountId: 'acc-tok',
+      email: 'token-fallback@example.invalid',
+      tier: 'PRO',
+      storedAccount: stored,
+      events,
+      nowSec: cycleStart + 8000,
+    });
+
+    const pool = res.pools[0];
+    assert.equal(pool.totalUsedPct, 18);
+    assert.equal(pool.usdPer1Pct, null);
+    assert.equal(pool.calibrationSamples, 2);
+    assert.equal(pool.unpricedRequests, 4);
+    assert.equal(pool.hasPreSnapshotEstimate, true);
+    assert.equal(pool.ambiguousDropPct, 0);
+    assert.equal(pool.localEstimatedUsedPct, 9);
+    assert.equal(pool.otherEstimatedUsedPct, 9);
+    assert.notEqual(pool.confidence, 'high');
+    assert.equal(pool.confidence, 'low');
+    assert.ok(pool.localEstimatedUsedPct >= 0 && pool.localEstimatedUsedPct <= pool.totalUsedPct);
+    assert.ok(Math.abs(pool.localEstimatedUsedPct + pool.otherEstimatedUsedPct - pool.totalUsedPct) <= 0.11);
+
+    // 场景 B：仅存在 USD 样本（无 token 样本），未归因的未定价冷启动前掉额不计入 otherEstimatedUsedPct
+    const partialStored = {
+      email: 'ambiguous-isolation@example.invalid',
+      tier: 'PRO',
+      pools: {
+        gemini: {
+          poolKey: 'gemini',
+          displayName: 'Gemini',
+          tier: 'PRO',
+          cycles: [{
+            cycleStartSec: cycleStart,
+            resetTimeSec: resetSec,
+            resetTimeIso: new Date(resetSec * 1000).toISOString(),
+            tier: 'PRO',
+            points: [
+              // 冷启动前掉落 5%（内含 1 条未定价事件且无 token 速率 -> ambiguousDrop = 5%）
+              { at: cycleStart + 3600, lastSeenAt: cycleStart + 3600, remaining: 0.95, source: 'cloud' },
+              // 短区间（300s）掉落 2%，已定价 $1.0 但 tokens < 100（不产生 token 样本）
+              { at: cycleStart + 3900, lastSeenAt: cycleStart + 3900, remaining: 0.93, source: 'cloud' },
+            ],
+          }],
+        },
+      },
+    };
+    const partialRes = computeAccountWeeklyAttribution({
+      accountId: 'acc-partial',
+      email: 'ambiguous-isolation@example.invalid',
+      tier: 'PRO',
+      storedAccount: partialStored,
+      events: [
+        makeEvent({
+          accountId: 'acc-partial',
+          accountEmail: 'ambiguous-isolation@example.invalid',
+          model: 'custom-unpriced-gemini-exp',
+          timestampSec: cycleStart + 1000,
+          inputTokens: 400,
+          outputTokens: 100,
+          estimatedUsd: null,
+          priced: false,
+        }),
+        makeEvent({
+          accountId: 'acc-partial',
+          accountEmail: 'ambiguous-isolation@example.invalid',
+          model: 'gemini-3.8-flash',
+          timestampSec: cycleStart + 3750,
+          inputTokens: 40,
+          outputTokens: 10,
+          estimatedUsd: 1.0,
+        }),
+      ],
+      nowSec: cycleStart + 4000,
+    });
+    const partialPool = partialRes.pools[0];
+    assert.equal(partialPool.totalUsedPct, 7);
+    assert.equal(partialPool.localEstimatedUsedPct, 2);
+    assert.equal(partialPool.otherEstimatedUsedPct, 0);
+    assert.equal(partialPool.ambiguousDropPct, 5);
+    assert.equal(partialPool.confidence, 'low');
+  });
+});

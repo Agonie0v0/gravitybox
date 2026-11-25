@@ -129,7 +129,8 @@ const CARRY_LOOKBACK_SEC = 6 * 3600;
 const SHORT_GAP_SEC = 15 * 60;
 const SILENT_THRESHOLD_SEC = 180;
 const MIN_CALIBRATION_USD = 0.01;
-const MIN_CALIBRATION_DROP = 0.005;
+const MIN_CALIBRATION_DROP = 0.002;
+const MIN_CALIBRATION_TOKENS = 100;
 const SPIKE_CLIP_MULTIPLIER = 1.8;
 const MAX_QUERY_LOOKBACK_SEC = 60 * 86400;
 
@@ -826,8 +827,18 @@ export function mapModelToWeeklyPool(input: {
 }
 
 interface CalibrationSample {
-  usdPer1Pct: number;
+  value: number;
   weight: number;
+}
+
+interface EventStats {
+  tokens: number;
+  requests: number;
+  pricedUsd: number;
+  unpricedCount: number;
+  unpricedTokens: number;
+  sshTokens: number;
+  sshRequests: number;
 }
 
 interface DropIntervalPartition {
@@ -863,18 +874,12 @@ interface CycleAttributionComputed {
   ambiguousDropPct: number;
 }
 
-function summarizeEvents(events: ReadonlyArray<WeeklyAttributionEvent>): {
-  tokens: number;
-  requests: number;
-  pricedUsd: number;
-  unpricedCount: number;
-  sshTokens: number;
-  sshRequests: number;
-} {
+function summarizeEvents(events: ReadonlyArray<WeeklyAttributionEvent>): EventStats {
   let tokens = 0;
   let requests = 0;
   let pricedUsd = 0;
   let unpricedCount = 0;
+  let unpricedTokens = 0;
   let sshTokens = 0;
   let sshRequests = 0;
   for (const ev of events) {
@@ -885,13 +890,14 @@ function summarizeEvents(events: ReadonlyArray<WeeklyAttributionEvent>): {
       pricedUsd += ev.estimated_usd;
     } else {
       unpricedCount += 1;
+      unpricedTokens += tok;
     }
     if (ev.environment_kind === 'ssh') {
       sshTokens += tok;
       sshRequests += 1;
     }
   }
-  return { tokens, requests, pricedUsd, unpricedCount, sshTokens, sshRequests };
+  return { tokens, requests, pricedUsd, unpricedCount, unpricedTokens, sshTokens, sshRequests };
 }
 
 function partitionCycleIntervals(
@@ -905,6 +911,7 @@ function partitionCycleIntervals(
   preEvents: WeeklyAttributionEvent[];
   drops: DropIntervalPartition[];
   cleanSamples: CalibrationSample[];
+  cleanTokenSamples: CalibrationSample[];
 } {
   if (points.length === 0) {
     return {
@@ -914,6 +921,7 @@ function partitionCycleIntervals(
       preEvents: [],
       drops: [],
       cleanSamples: [],
+      cleanTokenSamples: [],
     };
   }
   const sortedPoints = [...points].sort((a, b) => a.at - b.at);
@@ -937,6 +945,7 @@ function partitionCycleIntervals(
 
   const drops: DropIntervalPartition[] = [];
   const cleanSamples: CalibrationSample[] = [];
+  const cleanTokenSamples: CalibrationSample[] = [];
 
   for (let pIdx = 1; pIdx < sortedPoints.length; pIdx += 1) {
     const prev = sortedPoints[pIdx - 1]!;
@@ -989,7 +998,7 @@ function partitionCycleIntervals(
       silentSec,
     });
 
-    // Clean calibration sample: short active interval with recent local events, all priced, meaningful USD & drop.
+    // Clean calibration sample: short active interval with recent local events, meaningful USD/tokens & drop.
     if (gapSec <= SHORT_GAP_SEC && recentEvents.length > 0) {
       const intervalEvents = carryEvents.length > 0 ? [...carryEvents, ...recentEvents] : recentEvents;
       const stats = summarizeEvents(intervalEvents);
@@ -1000,7 +1009,17 @@ function partitionCycleIntervals(
         drop >= MIN_CALIBRATION_DROP
       ) {
         cleanSamples.push({
-          usdPer1Pct: stats.pricedUsd / (drop * 100),
+          value: stats.pricedUsd / (drop * 100),
+          weight: drop,
+        });
+      }
+      if (
+        stats.requests > 0 &&
+        stats.tokens >= MIN_CALIBRATION_TOKENS &&
+        drop >= MIN_CALIBRATION_DROP
+      ) {
+        cleanTokenSamples.push({
+          value: stats.tokens / (drop * 100),
           weight: drop,
         });
       }
@@ -1014,42 +1033,67 @@ function partitionCycleIntervals(
     preEvents,
     drops,
     cleanSamples,
+    cleanTokenSamples,
   };
 }
 
-function calibrateUsdPer1Pct(samples: ReadonlyArray<CalibrationSample>): {
-  usdPer1Pct: number | null;
-  calibrationSamples: number;
+function calibrateRate(samples: ReadonlyArray<CalibrationSample>): {
+  rate: number | null;
+  samples: number;
 } {
   const valid = samples.filter(
-    s => Number.isFinite(s.usdPer1Pct) && s.usdPer1Pct > 0 && Number.isFinite(s.weight) && s.weight > 0
+    s => Number.isFinite(s.value) && s.value > 0 && Number.isFinite(s.weight) && s.weight > 0
   );
   const count = valid.length;
-  if (count === 0) return { usdPer1Pct: null, calibrationSamples: 0 };
-  const sorted = [...valid].sort((a, b) => a.usdPer1Pct - b.usdPer1Pct);
+  if (count === 0) return { rate: null, samples: 0 };
+  const sorted = [...valid].sort((a, b) => a.value - b.value);
   if (count === 1) {
-    return { usdPer1Pct: sorted[0]!.usdPer1Pct, calibrationSamples: 1 };
+    return { rate: sorted[0]!.value, samples: 1 };
   }
   if (count <= 3) {
     const mid = Math.floor(count / 2);
     const median = count % 2 === 1
-      ? sorted[mid]!.usdPer1Pct
-      : (sorted[mid - 1]!.usdPer1Pct + sorted[mid]!.usdPer1Pct) / 2;
-    return { usdPer1Pct: median, calibrationSamples: count };
+      ? sorted[mid]!.value
+      : (sorted[mid - 1]!.value + sorted[mid]!.value) / 2;
+    return { rate: median, samples: count };
   }
   const totalWeight = sorted.reduce((acc, s) => acc + s.weight, 0);
   if (totalWeight <= 0) {
-    return { usdPer1Pct: sorted[Math.floor(count * 0.7)]!.usdPer1Pct, calibrationSamples: count };
+    return { rate: sorted[Math.floor(count * 0.7)]!.value, samples: count };
   }
   const targetWeight = 0.70 * totalWeight;
   let cumWeight = 0;
   for (const sample of sorted) {
     cumWeight += sample.weight;
     if (cumWeight >= targetWeight) {
-      return { usdPer1Pct: sample.usdPer1Pct, calibrationSamples: count };
+      return { rate: sample.value, samples: count };
     }
   }
-  return { usdPer1Pct: sorted[sorted.length - 1]!.usdPer1Pct, calibrationSamples: count };
+  return { rate: sorted[sorted.length - 1]!.value, samples: count };
+}
+
+function estimateExpectedDrop(
+  stats: EventStats,
+  usdPer1Pct: number | null,
+  tokensPer1Pct: number | null,
+): number | null {
+  if (stats.unpricedCount === 0 && stats.pricedUsd > 0 && usdPer1Pct !== null && usdPer1Pct > 0) {
+    return stats.pricedUsd / usdPer1Pct / 100;
+  }
+  if (stats.pricedUsd > 0 && usdPer1Pct !== null && usdPer1Pct > 0) {
+    const pricedDrop = stats.pricedUsd / usdPer1Pct / 100;
+    if (tokensPer1Pct !== null && tokensPer1Pct > 0) {
+      return pricedDrop + stats.unpricedTokens / tokensPer1Pct / 100;
+    }
+    if (stats.tokens > 0 && stats.unpricedTokens / stats.tokens <= 0.1) {
+      return pricedDrop;
+    }
+    return null;
+  }
+  if (stats.tokens > 0 && tokensPer1Pct !== null && tokensPer1Pct > 0) {
+    return stats.tokens / tokensPer1Pct / 100;
+  }
+  return null;
 }
 
 function computeCycleAttribution(params: {
@@ -1071,9 +1115,11 @@ function computeCycleAttribution(params: {
 
   const partitioned = partitionCycleIntervals(cycle.points, cycleEvents, cycleStartSec);
   const currentSamples = partitioned.cleanSamples;
+  const currentTokenSamples = partitioned.cleanTokenSamples;
 
-  const historySamples: CalibrationSample[] = [];
-  if (currentSamples.length < 3) {
+  const historyUsdSamples: CalibrationSample[] = [];
+  const historyTokenSamples: CalibrationSample[] = [];
+  if (currentSamples.length < 3 || currentTokenSamples.length < 3) {
     const matchingPrior = priorCycles
       .filter(hc => hc.resetTimeSec < cycle.resetTimeSec - SAME_CYCLE_RESET_TOLERANCE_SEC && tiersCompatible(hc.tier, currentTier))
       .slice(-MAX_RECENT_CYCLES);
@@ -1082,15 +1128,29 @@ function computeCycleAttribution(params: {
         ev => ev.timestamp_seconds >= hc.cycleStartSec && ev.timestamp_seconds <= hc.resetTimeSec
       );
       const hcPart = partitionCycleIntervals(hc.points, hcEvents, hc.cycleStartSec);
-      historySamples.push(...hcPart.cleanSamples);
+      if (currentSamples.length < 3) {
+        historyUsdSamples.push(...hcPart.cleanSamples);
+      }
+      if (currentTokenSamples.length < 3) {
+        historyTokenSamples.push(...hcPart.cleanTokenSamples);
+      }
     }
   }
 
-  const effectiveSamples = currentSamples.length >= 3
+  const effectiveUsdSamples = currentSamples.length >= 3
     ? currentSamples
-    : [...currentSamples, ...historySamples];
-  const { usdPer1Pct, calibrationSamples } = calibrateUsdPer1Pct(effectiveSamples);
-  const isCalibrated = calibrationSamples >= 2 && usdPer1Pct !== null && usdPer1Pct > 0;
+    : [...currentSamples, ...historyUsdSamples];
+  const effectiveTokenSamples = currentTokenSamples.length >= 3
+    ? currentTokenSamples
+    : [...currentTokenSamples, ...historyTokenSamples];
+  const { rate: usdPer1Pct, samples: usdCalibrationSamples } = calibrateRate(effectiveUsdSamples);
+  const { rate: tokensPer1Pct, samples: tokenCalibrationSamples } = calibrateRate(effectiveTokenSamples);
+
+  const isUsdCalibrated = usdCalibrationSamples >= 1 && usdPer1Pct !== null && usdPer1Pct > 0;
+  const isTokenCalibrated = tokenCalibrationSamples >= 1 && tokensPer1Pct !== null && tokensPer1Pct > 0;
+  const isCalibrated = isUsdCalibrated || isTokenCalibrated;
+  const canSpikeClip = usdCalibrationSamples >= 2 || tokenCalibrationSamples >= 2;
+  const calibrationSamples = usdCalibrationSamples > 0 ? usdCalibrationSamples : tokenCalibrationSamples;
 
   let attributedLocalDrop = 0;
   let attributedOtherDrop = 0;
@@ -1103,8 +1163,11 @@ function computeCycleAttribution(params: {
       attributedOtherDrop += partitioned.preDrop;
     } else {
       const preStats = summarizeEvents(partitioned.preEvents);
-      if (isCalibrated && preStats.unpricedCount === 0 && usdPer1Pct !== null && usdPer1Pct > 0) {
-        const estPreLocal = Math.min(partitioned.preDrop, preStats.pricedUsd / usdPer1Pct / 100);
+      const expectedPreDrop = isCalibrated
+        ? estimateExpectedDrop(preStats, usdPer1Pct, tokensPer1Pct)
+        : null;
+      if (expectedPreDrop !== null && Number.isFinite(expectedPreDrop) && expectedPreDrop > 0) {
+        const estPreLocal = Math.min(partitioned.preDrop, expectedPreDrop);
         attributedLocalDrop += estPreLocal;
         attributedOtherDrop += Math.max(0, partitioned.preDrop - estPreLocal);
         hasPreSnapshotEstimate = true;
@@ -1120,10 +1183,11 @@ function computeCycleAttribution(params: {
     const isSituation1 = !hasAnyIntervalEvents || (item.recentEvents.length === 0 && item.silentSec > SILENT_THRESHOLD_SEC);
 
     if (isSituation1) {
-      if (item.carryEvents.length > 0 && isCalibrated && usdPer1Pct !== null && usdPer1Pct > 0) {
+      if (item.carryEvents.length > 0 && isCalibrated) {
         const carryStats = summarizeEvents(item.carryEvents);
-        if (carryStats.unpricedCount === 0 && carryStats.pricedUsd > 0) {
-          const carryLocal = Math.min(item.drop, carryStats.pricedUsd / usdPer1Pct / 100);
+        const expectedCarryDrop = estimateExpectedDrop(carryStats, usdPer1Pct, tokensPer1Pct);
+        if (expectedCarryDrop !== null && Number.isFinite(expectedCarryDrop) && expectedCarryDrop > 0) {
+          const carryLocal = Math.min(item.drop, expectedCarryDrop);
           attributedLocalDrop += carryLocal;
           attributedOtherDrop += Math.max(0, item.drop - carryLocal);
         } else {
@@ -1142,8 +1206,10 @@ function computeCycleAttribution(params: {
 
     if (item.gapSec <= SHORT_GAP_SEC) {
       // Situation 2: short active interval
-      if (isCalibrated && stats.unpricedCount === 0 && usdPer1Pct !== null && usdPer1Pct > 0) {
-        const expectedDrop = stats.pricedUsd / usdPer1Pct / 100;
+      const expectedDrop = isCalibrated && canSpikeClip
+        ? estimateExpectedDrop(stats, usdPer1Pct, tokensPer1Pct)
+        : null;
+      if (expectedDrop !== null && Number.isFinite(expectedDrop) && expectedDrop > 0) {
         if (item.drop > expectedDrop * SPIKE_CLIP_MULTIPLIER) {
           const clippedLocal = Math.min(item.drop, expectedDrop);
           attributedLocalDrop += clippedLocal;
@@ -1156,8 +1222,10 @@ function computeCycleAttribution(params: {
       }
     } else {
       // Situation 3: long mixed gap (> 15 min) with local events
-      if (isCalibrated && stats.unpricedCount === 0 && usdPer1Pct !== null && usdPer1Pct > 0) {
-        const expectedDrop = stats.pricedUsd / usdPer1Pct / 100;
+      const expectedDrop = isCalibrated
+        ? estimateExpectedDrop(stats, usdPer1Pct, tokensPer1Pct)
+        : null;
+      if (expectedDrop !== null && Number.isFinite(expectedDrop) && expectedDrop > 0) {
         const estLocal = Math.min(item.drop, expectedDrop);
         attributedLocalDrop += estLocal;
         attributedOtherDrop += Math.max(0, item.drop - estLocal);
@@ -1184,26 +1252,29 @@ function computeCycleAttribution(params: {
     localEstimatedUsedPct = 0;
     otherEstimatedUsedPct = totalUsedPct;
     confidence = totalUsedPct > 0 ? 'high' : 'none';
-  } else if (totalUsedPct <= 0 || (attributedLocalDrop <= 0 && ambiguousDrop > MIN_DROP_THRESHOLD)) {
+  } else if (totalUsedPct <= 0 || (ambiguousDrop > MIN_DROP_THRESHOLD && (attributedLocalDrop <= 0 || !isCalibrated))) {
     localEstimatedUsedPct = null;
     otherEstimatedUsedPct = null;
     confidence = 'calibrating';
   } else {
     localEstimatedUsedPct = round1(clamp(attributedLocalDrop * 100, 0, totalUsedPct));
-    otherEstimatedUsedPct = round1(Math.max(0, totalUsedPct - localEstimatedUsedPct));
+    const maxOtherPct = round1(Math.max(0, totalUsedPct - localEstimatedUsedPct));
+    otherEstimatedUsedPct = ambiguousDrop > MIN_DROP_THRESHOLD
+      ? round1(clamp(attributedOtherDrop * 100, 0, maxOtherPct))
+      : maxOtherPct;
 
     const ambiguousShare = totalUsedPct > 0 ? ambiguousDropPct / totalUsedPct : 0;
     const preDropShare = totalUsedPct > 0 ? (partitioned.preDrop * 100) / totalUsedPct : 0;
     if (
-      calibrationSamples >= 4 &&
+      usdCalibrationSamples >= 4 &&
       ambiguousDropPct <= 0.1 &&
       cycleTotals.unpricedCount === 0 &&
       (!hasPreSnapshotEstimate || preDropShare <= 0.25)
     ) {
       confidence = 'high';
     } else if (
-      (calibrationSamples >= 2 && ambiguousShare <= 0.35) ||
-      (ambiguousDropPct <= 0.1 && cycleTotals.unpricedCount === 0 && currentSamples.length >= 1)
+      (calibrationSamples >= 2 && ambiguousShare <= 0.35 && cycleTotals.unpricedCount === 0) ||
+      (ambiguousDropPct <= 0.1 && cycleTotals.unpricedCount === 0 && currentSamples.length >= 2)
     ) {
       confidence = 'medium';
     } else {

@@ -7,7 +7,6 @@ import {
   formatCompactTokens,
   formatInteger,
   formatShortDateTime,
-  formatUsd,
   normalizeTier,
 } from '../lib/format';
 import { formatPctNumber } from '../lib/quota';
@@ -102,19 +101,30 @@ function PoolBreakdownTile({
         ? Math.max(0, pool.totalUsedPct - pool.localEstimatedUsedPct)
         : null);
 
-  const otherPctDisplay =
-    resolvedOtherPct === null
-      ? '--'
-      : unusedLocally
-      ? `${formatPctNumber(resolvedOtherPct)}%`
-      : `~${formatPctNumber(resolvedOtherPct)}%`;
+  const otherPctDisplay = isCalibrating
+    ? t('weekly_attribution.pool.pending_calibration')
+    : resolvedOtherPct === null
+    ? '--'
+    : unusedLocally
+    ? `${formatPctNumber(resolvedOtherPct)}%`
+    : `~${formatPctNumber(resolvedOtherPct)}%`;
+
+  const shareOfUsedPct =
+    !unusedLocally && !isCalibrating && pool.localEstimatedUsedPct !== null && pool.totalUsedPct > 0
+      ? Math.max(0, Math.min(100, Math.round((pool.localEstimatedUsedPct / pool.totalUsedPct) * 100)))
+      : null;
 
   const totalBarPct = Math.max(0, Math.min(100, pool.totalUsedPct));
   const localBarPct =
-    !unusedLocally && pool.localEstimatedUsedPct !== null
+    !unusedLocally && !isCalibrating && pool.localEstimatedUsedPct !== null
       ? Math.max(0, Math.min(totalBarPct, pool.localEstimatedUsedPct))
       : 0;
-  const otherBarPct = Math.max(0, totalBarPct - localBarPct);
+  const otherBarPct = !isCalibrating
+    ? Math.max(0, Math.min(totalBarPct - localBarPct, resolvedOtherPct ?? 0))
+    : 0;
+  const ambiguousBarPct = isCalibrating
+    ? totalBarPct
+    : Math.max(0, totalBarPct - localBarPct - otherBarPct);
 
   const brandFallback = pool.poolKey.toLowerCase() === 'claude' ? 'Claude/GPT' : pool.displayName || pool.poolKey;
 
@@ -172,7 +182,7 @@ function PoolBreakdownTile({
         </div>
       </div>
 
-      {/* Stacked Attribution Bar (This Client vs Other Clients vs Remaining) */}
+      {/* Stacked Attribution Bar (This Client vs Other Clients vs Ambiguous/Calibrating vs Remaining) */}
       <div
         style={{
           height: 6,
@@ -197,8 +207,19 @@ function PoolBreakdownTile({
             style={{
               width: `${otherBarPct}%`,
               height: '100%',
-              background: isCalibrating ? 'var(--warning)' : 'var(--text-tertiary)',
-              opacity: isCalibrating ? 0.72 : 0.45,
+              background: 'var(--text-tertiary)',
+              opacity: 0.45,
+              transition: 'width 260ms cubic-bezier(0.22, 1, 0.36, 1)',
+            }}
+          />
+        )}
+        {ambiguousBarPct > 0 && (
+          <div
+            style={{
+              width: `${ambiguousBarPct}%`,
+              height: '100%',
+              background: 'var(--warning)',
+              opacity: isCalibrating ? 0.72 : 0.65,
               transition: 'width 260ms cubic-bezier(0.22, 1, 0.36, 1)',
             }}
           />
@@ -247,6 +268,13 @@ function PoolBreakdownTile({
           <div className="tabular" style={{ fontSize: 10.5, color: 'var(--text-secondary)' }}>
             {unusedLocally
               ? t('weekly_attribution.pool.unused_value')
+              : isCalibrating
+              ? t('weekly_attribution.pool.calibrating_snapshots', { snapshots: pool.snapshotCount })
+              : shareOfUsedPct !== null
+              ? t('weekly_attribution.pool.share_of_used_with_samples', {
+                  pct: shareOfUsedPct,
+                  samples: pool.calibrationSamples,
+                })
               : t('weekly_attribution.pool.samples_meta', {
                   samples: pool.calibrationSamples,
                   snapshots: pool.snapshotCount,
@@ -258,11 +286,21 @@ function PoolBreakdownTile({
           <div style={{ fontSize: 10.5, color: 'var(--text-secondary)' }}>
             {unusedLocally ? t('weekly_attribution.pool.others_exact') : t('weekly_attribution.pool.others_est')}
           </div>
-          <div className="tabular" style={{ fontSize: 14, fontWeight: 700, marginTop: 1 }}>
+          <div
+            className="tabular"
+            style={{
+              fontSize: 14,
+              fontWeight: isCalibrating ? 600 : 700,
+              marginTop: 1,
+              color: isCalibrating ? 'var(--text-secondary)' : undefined,
+            }}
+          >
             {otherPctDisplay}
           </div>
           <div className="tabular" style={{ fontSize: 10.5, color: 'var(--text-secondary)' }}>
-            {pool.hasPreSnapshotEstimate
+            {isCalibrating
+              ? '\u00a0'
+              : pool.hasPreSnapshotEstimate
               ? t('weekly_attribution.pool.pre_snapshot_note')
               : pool.ambiguousDropPct > 0
               ? t('weekly_attribution.pool.ambiguous_note', { pct: formatPctNumber(pool.ambiguousDropPct) })
@@ -300,13 +338,9 @@ function PoolBreakdownTile({
             })}
           </strong>
         </span>
-        <span>
-          {t('weekly_attribution.pool.usd_label')}:{' '}
-          <strong style={{ color: 'var(--text)', fontWeight: 600 }}>{formatUsd(pool.localUsd)}</strong>
-        </span>
       </div>
 
-      {pool.unpricedRequests > 0 && (
+      {pool.unpricedRequests > 0 && pool.ambiguousDropPct > 0 && (
         <div className="tabular" style={{ fontSize: 10.5, color: 'var(--warning)' }}>
           {t('weekly_attribution.pool.unpriced_note', {
             count: formatInteger(pool.unpricedRequests, locale),
@@ -417,7 +451,6 @@ function PoolBreakdownTile({
                         {t('weekly_attribution.history.metrics', {
                           tokens: formatCompactTokens(entry.localTokens, locale, true),
                           requests: formatInteger(entry.localRequests, locale),
-                          usd: formatUsd(entry.localUsd),
                         })}
                       </span>
                     </div>

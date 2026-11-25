@@ -3,7 +3,6 @@ import {
   formatCompactTokens,
   formatInteger,
   formatShortDateTime,
-  formatUsd,
   inferredBrands,
   localizeCountdown,
   modelDisplayName,
@@ -570,16 +569,13 @@ export function formatWeeklyAttributionInline(
       pool.otherEstimatedUsedPct ?? Math.max(0, pool.totalUsedPct - pool.localEstimatedUsedPct);
     left = t('weekly_attribution.inline.local_used', {
       pct: formatPctNumber(pool.localEstimatedUsedPct),
-      usd: formatUsd(pool.localUsd),
     });
     right = t('weekly_attribution.inline.others_used', {
       pct: formatPctNumber(otherPct),
     });
   } else {
     state = 'calibrating';
-    left = t('weekly_attribution.inline.local_calibrating', {
-      usd: formatUsd(pool.localUsd),
-    });
+    left = t('weekly_attribution.inline.local_calibrating');
     right = t('weekly_attribution.inline.pool_used', {
       pct: formatPctNumber(pool.totalUsedPct),
     });
@@ -600,7 +596,6 @@ export function formatWeeklyAttributionInline(
     t('weekly_attribution.tooltip.local_usage', {
       tokens: formatCompactTokens(pool.localTokens, locale, true),
       requests: formatInteger(pool.localRequests, locale),
-      usd: formatUsd(pool.localUsd),
       sshPart,
     }),
     t('weekly_attribution.tooltip.confidence', {
