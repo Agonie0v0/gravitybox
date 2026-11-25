@@ -3,6 +3,7 @@ import { BarChart2, Download, FileText, Gauge, RotateCw, Server, Tag, Users } fr
 import { DONUT_PALETTE, DonutChart, type DonutSlice } from '../components/DonutChart';
 import { BrandIcons } from '../components/ModelIcon';
 import { TrendChart, type TrendBarPoint } from '../components/TrendChart';
+import { WeeklyQuotaUsageCard } from '../components/WeeklyQuotaUsageCard';
 import { useApp } from '../context/AppContext';
 import {
   formatAccountOptionLabel,
@@ -22,6 +23,7 @@ import {
 } from '../lib/ssh';
 import { pickSaveJsonPath, saveJsonFile } from '../lib/tauri';
 import type {
+  AccountWeeklyAttribution,
   AvailableAccountUsageOption,
   ModelUsageRaw,
   UsagePeriodKey,
@@ -87,13 +89,17 @@ export function UsagePage() {
     isDark,
     config,
     reachable,
+    status,
     accounts,
+    activeAccountId,
+    weeklyAttributionList,
     usageByPeriod,
     usageLoading,
     usageErrors,
     sshEnvironments,
     remoteSyncing,
     fetchUsage,
+    fetchWeeklyAttribution,
     refreshRemoteEnvironments,
     showToast,
   } = useApp();
@@ -155,6 +161,11 @@ export function UsagePage() {
     }
   }, [period, environmentId, accountId, reachable, fetchUsage, isCustomRangeValid, customRangeParam]);
 
+  useEffect(() => {
+    if (!reachable || accountId === 'unattributed') return;
+    void fetchWeeklyAttribution(accountId);
+  }, [reachable, accountId, fetchWeeklyAttribution]);
+
   const report =
     environmentId === 'all' && accountId === 'all'
       ? usageByPeriod[period]
@@ -204,6 +215,27 @@ export function UsagePage() {
     }
     return Array.from(seen.values());
   }, [accountId, accounts, period, report, t, usageByPeriod]);
+
+  const weeklyAccounts = useMemo<AccountWeeklyAttribution[]>(() => {
+    if (weeklyAttributionList.length > 0) return weeklyAttributionList;
+    return accounts
+      .map((acc) => acc.weeklyAttribution)
+      .filter((item): item is AccountWeeklyAttribution => Boolean(item && Array.isArray(item.pools)));
+  }, [accounts, weeklyAttributionList]);
+
+  const selectedAccountEmail = useMemo(() => {
+    if (!accountId || accountId === 'all' || accountId === 'unattributed') return undefined;
+    return (
+      availableAccountOptions.find((opt) => opt.id === accountId)?.email ??
+      accounts.find((acc) => acc.id === accountId)?.email
+    );
+  }, [accountId, accounts, availableAccountOptions]);
+
+  const activeAccountEmail = useMemo(() => {
+    const fromStatus = (status.activeAccountEmail ?? status.liveAccountEmail ?? '').trim();
+    if (fromStatus) return fromStatus;
+    return accounts.find((acc) => acc.id === activeAccountId)?.email;
+  }, [accounts, activeAccountId, status.activeAccountEmail, status.liveAccountEmail]);
 
   const totalTokens = summary.totalTokens ?? 0;
   const promptTokens = summary.promptTokens ?? 0;
@@ -500,6 +532,9 @@ export function UsagePage() {
                   if (fetchSeqRef.current === seq && res) setScopedReport(res);
                 });
               }
+              if (accountId !== 'unattributed') {
+                void fetchWeeklyAttribution(accountId);
+              }
             }}
           >
             <RotateCw size={12} className={loading ? 'gb-spin' : undefined} />
@@ -685,6 +720,19 @@ export function UsagePage() {
             : t('usage.env.historical_notice', { host: selectedSshHost.hostLabel })}
         </div>
       )}
+
+      {/* Passive Client Weekly Quota Attribution */}
+      <WeeklyQuotaUsageCard
+        accounts={weeklyAccounts}
+        selectedAccountId={accountId}
+        selectedAccountEmail={selectedAccountEmail}
+        activeAccountId={activeAccountId}
+        activeEmail={activeAccountEmail}
+        locale={locale}
+        isDark={isDark}
+        masked={Boolean(config.privacyMaskAccounts)}
+        t={t}
+      />
 
       {/* Full-width Token Usage & Trend Card */}
       <div className="gb-card" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>

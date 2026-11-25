@@ -31,8 +31,10 @@ import {
 } from '../lib/format';
 import {
   formatCollapsedQuotaSummary,
+  indexWeeklyAttributionByPool,
   monitoredModelDisplayName,
   parseQuotaContract,
+  resolveWeeklyAttributionForAccount,
 } from '../lib/quota';
 import {
   normalizeSshEnvironment,
@@ -41,7 +43,7 @@ import {
   sshStateSortOrder,
 } from '../lib/ssh';
 import { backendRequest, getAntigravityRunning, launchAntigravity } from '../lib/tauri';
-import type { AccountRecord, SwitchPreflightReply } from '../lib/types';
+import type { AccountRecord, AccountWeeklyAttribution, SwitchPreflightReply } from '../lib/types';
 import { AccountPolicyModal } from '../sheets/AccountPolicyModal';
 import { AddAccountModal } from '../sheets/AddAccountModal';
 import { RenameAccountModal } from '../sheets/RenameAccountModal';
@@ -56,6 +58,7 @@ export function AccountsPage() {
     reachable,
     accounts,
     activeAccountId,
+    weeklyAttributionList,
     hasPendingSwitch,
     autoSwitchConfig,
     autoSwitchPreview,
@@ -713,6 +716,12 @@ export function AccountsPage() {
                         standaloneGroups={contract.standaloneGroups}
                         locale={locale}
                         isDark={isDark}
+                        weeklyAttributionByPool={indexWeeklyAttributionByPool(
+                          resolveWeeklyAttributionForAccount(acc.weeklyAttribution, weeklyAttributionList, {
+                            accountId: acc.id,
+                            email: acc.email,
+                          }),
+                        )}
                       />
                     ) : (
                       <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
@@ -829,6 +838,16 @@ export function AccountsPage() {
                       locale={locale}
                       isDark={isDark}
                       compact
+                      weeklyAttributionByPool={indexWeeklyAttributionByPool(
+                        resolveWeeklyAttributionForAccount(
+                          host.raw.weeklyAttribution as AccountWeeklyAttribution | null | undefined,
+                          weeklyAttributionList,
+                          {
+                            accountId: host.matchedLocalAccountId,
+                            email: host.email,
+                          },
+                        ),
+                      )}
                     />
                   </>
                 )}

@@ -320,6 +320,64 @@ export interface UsageSummaryReply {
   periods?: Partial<Record<UsagePeriodKey, UsageSummaryReply>>;
 }
 
+export type WeeklyAttributionConfidence = 'high' | 'medium' | 'low' | 'calibrating' | 'none';
+
+export interface WeeklyCycleHistoryEntry {
+  cycleStartSec: number;
+  resetTimeSec: number;
+  totalUsedPct: number | null;
+  localEstimatedUsedPct: number | null;
+  otherEstimatedUsedPct: number | null;
+  localTokens: number;
+  localRequests: number;
+  localUsd: number;
+  sshTokens: number;
+  sshRequests: number;
+  confidence: WeeklyAttributionConfidence;
+  snapshotCount: number;
+}
+
+export interface WeeklyPoolAttribution {
+  poolKey: string;
+  displayName: string;
+  cycleStartSec: number;
+  resetTimeSec: number;
+  resetTimeIso: string;
+  remainingPct: number;
+  totalUsedPct: number;
+  localEstimatedUsedPct: number | null;
+  otherEstimatedUsedPct: number | null;
+  localTokens: number;
+  localRequests: number;
+  localUsd: number;
+  unpricedRequests: number;
+  sshTokens: number;
+  sshRequests: number;
+  confidence: WeeklyAttributionConfidence;
+  calibrationSamples: number;
+  usdPer1Pct: number | null;
+  snapshotCount: number;
+  firstSnapshotAt: number | null;
+  hasPreSnapshotEstimate: boolean;
+  ambiguousDropPct: number;
+  recentCycles: WeeklyCycleHistoryEntry[];
+}
+
+export interface AccountWeeklyAttribution {
+  accountId: string | null;
+  email: string;
+  name?: string | null;
+  tier?: string;
+  generatedAtSec: number;
+  pools: WeeklyPoolAttribution[];
+}
+
+export interface WeeklyQuotaUsageReply {
+  ok?: boolean;
+  generatedAtSec?: number;
+  accounts: AccountWeeklyAttribution[];
+}
+
 export interface AccountRecord {
   id: string;
   email: string;
@@ -351,6 +409,7 @@ export interface AccountRecord {
   quotaWarningCodes?: string[];
   staleGroups?: Array<Record<string, unknown>>;
   stale_groups?: Array<Record<string, unknown>>;
+  weeklyAttribution?: AccountWeeklyAttribution | null;
   [key: string]: unknown;
 }
 
@@ -395,6 +454,7 @@ export interface DashboardSummaryReply {
     quotaRefreshError?: string;
     readyCount?: number;
     autoSwitchEnabled?: boolean;
+    weeklyAttribution?: AccountWeeklyAttribution | null;
   }) | null;
   usage?: {
     todayTokens?: number;
