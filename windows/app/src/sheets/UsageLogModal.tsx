@@ -4,6 +4,7 @@ import { Modal } from '../components/Modal';
 import { BrandIcons } from '../components/ModelIcon';
 import { useApp } from '../context/AppContext';
 import {
+  formatAccountOptionLabel,
   formatCompactTokens,
   formatInteger,
   formatShortDateTime,
@@ -39,7 +40,7 @@ export function UsageLogModal({
   availableAccounts?: AvailableAccountUsageOption[];
   onClose: () => void;
 }) {
-  const { t, locale, isDark, sshEnvironments, showToast } = useApp();
+  const { t, locale, isDark, config, sshEnvironments, showToast } = useApp();
   const [period, setPeriod] = useState<UsagePeriodKey>(initialPeriod);
   const [environmentId, setEnvironmentId] = useState<string>(initialEnvironmentId);
   const [accountId, setAccountId] = useState<string>(initialAccountId);
@@ -329,7 +330,9 @@ export function UsageLogModal({
               <option value="all">{t('usage_log.account.all')}</option>
               {accountOptions.map((opt) => (
                 <option key={opt.id} value={opt.id}>
-                  {opt.id === 'unattributed' ? t('usage.account.unattributed') : opt.label || opt.email || opt.id}
+                  {opt.id === 'unattributed'
+                    ? t('usage.account.unattributed')
+                    : formatAccountOptionLabel(opt, Boolean(config.privacyMaskAccounts))}
                 </option>
               ))}
             </select>

@@ -4,6 +4,8 @@ import {
   ArrowUp,
   ChevronDown,
   ChevronUp,
+  Eye,
+  EyeOff,
   Gauge,
   MoreHorizontal,
   Pencil,
@@ -20,9 +22,11 @@ import { TierBadge } from '../components/TierBadge';
 import { ToggleSwitch } from '../components/ToggleSwitch';
 import { useApp } from '../context/AppContext';
 import {
-  accountDisplayName,
+  displayAccountIdentity,
   formatDetachedDaemonKinds,
   formatShortDateTime,
+  maskAccountName,
+  maskEmail,
   normalizeTier,
 } from '../lib/format';
 import {
@@ -252,9 +256,10 @@ export function AccountsPage() {
       showToast(t('accounts.delete.cannot_active'), true);
       return;
     }
+    const maskedEmail = displayAccountIdentity(acc.name, acc.email, locale, Boolean(config.privacyMaskAccounts)).email;
     const confirmed = await askConfirm({
       title: t('accounts.delete.confirm_title'),
-      body: t('accounts.delete.confirm_body', { email: acc.email }),
+      body: t('accounts.delete.confirm_body', { email: maskedEmail || acc.email }),
       confirmLabel: t('accounts.delete.confirm_action'),
       danger: true,
     });
@@ -278,6 +283,36 @@ export function AccountsPage() {
 
   const monitoredLabel = monitoredModelDisplayName(autoSwitchConfig.monitored_model, locale);
 
+  const masked = Boolean(config.privacyMaskAccounts);
+
+  const previewReason = useMemo(() => {
+    const raw = autoSwitchPreview?.reason || t('accounts.smart_switch.best_current');
+    if (!masked || !autoSwitchPreview?.reason) return raw;
+    let text = raw;
+    const items = [
+      autoSwitchPreview.account,
+      autoSwitchPreview.bestCandidate,
+      autoSwitchPreview.currentAccount,
+      ...accounts,
+    ];
+    for (const item of items) {
+      if (!item) continue;
+      const email = String(item.email ?? '').trim();
+      const name = String(item.name ?? '').trim();
+      if (name && email) {
+        text = text.split(`${name} (${email})`).join(`${maskAccountName(name)} (${maskEmail(email)})`);
+      }
+      if (email) {
+        text = text.split(email).join(maskEmail(email));
+      }
+    }
+    return text;
+  }, [accounts, autoSwitchPreview, masked, t]);
+
+  const privacyLabel = masked
+    ? t('accounts.privacy.show', undefined, locale === 'en' ? 'Show Account Info' : '显示账号信息')
+    : t('accounts.privacy.hide', undefined, locale === 'en' ? 'Hide Account Info' : '隐藏账号信息');
+
   const normalizedSshHosts = useMemo(() => {
     const fallback = t('ssh.remote_fallback');
     return sshEnvironments
@@ -291,6 +326,16 @@ export function AccountsPage() {
       <div className="gb-page-header">
         <h1 className="gb-page-title">{t('accounts.title')}</h1>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button
+            type="button"
+            className="gb-btn gb-btn-sm"
+            aria-label={privacyLabel}
+            title={privacyLabel}
+            onClick={() => void updateConfig({ privacyMaskAccounts: !masked })}
+          >
+            {masked ? <Eye size={13} /> : <EyeOff size={13} />}
+            <span>{privacyLabel}</span>
+          </button>
           {accounts.length > 0 && (
             <button type="button" className="gb-btn gb-btn-sm" onClick={toggleAllCollapse}>
               {allCollapsed ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
@@ -395,7 +440,7 @@ export function AccountsPage() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
               <Gauge size={14} style={{ color: 'var(--blue)', flexShrink: 0 }} />
               <span style={{ flex: 1, fontSize: 12, color: 'var(--text-secondary)' }}>
-                {autoSwitchPreview.reason || t('accounts.smart_switch.best_current')}
+                {previewReason}
               </span>
               {autoSwitchPreview.shouldSwitch && recommendedId && recommendedId !== activeAccountId && (
                 <button
@@ -466,7 +511,9 @@ export function AccountsPage() {
             const isRecommended = acc.id === recommendedId && !isActive;
             const isRefreshing = refreshingAccountIds.has(acc.id);
             const canSwitch = !isActive && !acc.disabled && !acc.validation_blocked;
-            const displayName = accountDisplayName(acc.name, acc.email, locale);
+            const identity = displayAccountIdentity(acc.name, acc.email, locale, masked);
+            const displayName = identity.name;
+            const displayEmail = identity.email;
             const tier = normalizeTier(acc.subscription_tier, locale);
             const contract = parseQuotaContract(acc as Record<string, unknown>, locale);
             const updatedTs = Number(
@@ -539,7 +586,7 @@ export function AccountsPage() {
                       }}
                     >
                       <span className="selectable" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {acc.email}
+                        {displayEmail}
                       </span>
                       {isCollapsed && (
                         <span className="tabular" style={{ color: 'var(--pill-neutral-text)', fontWeight: 500, flexShrink: 0 }}>
@@ -575,7 +622,7 @@ export function AccountsPage() {
                       type="button"
                       className="gb-btn gb-btn-ghost gb-icon-btn"
                       onClick={() => setOpenMenuId((cur) => (cur === acc.id ? null : acc.id))}
-                      aria-label={t('accounts.a11y.actions', { account: acc.email })}
+                      aria-label={t('accounts.a11y.actions', { account: displayEmail || displayName })}
                     >
                       <MoreHorizontal size={15} />
                     </button>
@@ -586,8 +633,8 @@ export function AccountsPage() {
                       onClick={() => toggleSingleCollapse(acc.id)}
                       aria-label={
                         isCollapsed
-                          ? t('accounts.a11y.expand_details', { account: acc.email })
-                          : t('accounts.a11y.collapse_details', { account: acc.email })
+                          ? t('accounts.a11y.expand_details', { account: displayEmail || displayName })
+                          : t('accounts.a11y.collapse_details', { account: displayEmail || displayName })
                       }
                     >
                       {isCollapsed ? <ChevronDown size={15} /> : <ChevronUp size={15} />}
@@ -731,6 +778,7 @@ export function AccountsPage() {
           {normalizedSshHosts.map((host) => {
             const remoteContract = parseQuotaContract(host.raw as Record<string, unknown>, locale, { compact: true });
             const remoteTier = normalizeTier(host.tier, locale);
+            const remoteIdentity = displayAccountIdentity(host.name, host.email, locale, masked);
             return (
               <div
                 key={host.id || host.hostLabel}
@@ -742,7 +790,7 @@ export function AccountsPage() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
                       <span style={{ fontSize: 14, fontWeight: 700 }}>
                         {host.email
-                          ? accountDisplayName(host.name, host.email, locale)
+                          ? remoteIdentity.name
                           : host.hostLabel}
                       </span>
                       {host.tier && <TierBadge tier={remoteTier} />}
@@ -753,7 +801,7 @@ export function AccountsPage() {
                     </div>
                     <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginTop: 2 }}>
                       {[
-                        host.email,
+                        host.email ? remoteIdentity.email : '',
                         host.windowCount > 0 ? t('accounts.ssh.remote_window_count', { count: host.windowCount }) : '',
                         t('accounts.ssh.remote_readonly_hint'),
                       ]

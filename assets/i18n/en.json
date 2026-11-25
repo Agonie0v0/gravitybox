@@ -969,7 +969,11 @@
     "usage.env.historical_fallback_notice": "Historical hosts have no live quota; switched back to local.",
     "menu_panel.usage.scope_all_summary": "All environments usage",
     "menu_panel.usage.scope_local_summary": "Local usage",
-    "menu_panel.usage.scope_remote_summary": "{host} usage"
+    "menu_panel.usage.scope_remote_summary": "{host} usage",
+    "accounts.privacy.hide": "Hide account names & emails",
+    "accounts.privacy.show": "Show account names & emails",
+    "settings.privacy.title": "Hide Account Names & Emails",
+    "settings.privacy.subtitle": "Mask usernames and email addresses across Overview, Accounts, Usage filters, and Tray while keeping cards and quota bars visible"
   },
   "backend": {
     "status.starting": "Connecting to local service…",

@@ -104,6 +104,7 @@ export interface UiConfig {
   themeMode: ThemeMode;
   antigravityProxyMode: ProxyMode;
   antigravityProxyManualUrl: string;
+  privacyMaskAccounts: boolean;
 }
 
 export interface AntigravityInfo {
