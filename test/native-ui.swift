@@ -105,6 +105,71 @@ import Cocoa
         for sub in v.subviews { values.append(contentsOf: visibleTextValues(sub)) }
         return values
     }
+
+    static func checkUpdateAssetDiscovery(in state: URL) throws {
+        let host = Assistant(state: state)
+        host.configuration = try ConfigurationStore(state: state)
+        let manager = host.updateManager
+        let version = "9.9.9"
+        #if arch(x86_64)
+        let matchingArch = "x86_64", foreignArch = "arm64"
+        #else
+        let matchingArch = "arm64", foreignArch = "x86_64"
+        #endif
+        let matchingName = "GravityBox-\(version)-\(matchingArch).dmg"
+        func assets(for name: String) -> [[String: String]] {
+            [name, name + ".sha256"].map { ["name": $0, "browser_download_url": "https://example.invalid/\($0)"] }
+        }
+        let matching = assets(for: matchingName)
+        let foreign = assets(for: "GravityBox-\(version)-\(foreignArch).dmg")
+        let universal = assets(for: "GravityBox-\(version)-universal.dmg")
+
+        func checkRelease(_ assets: [[String: String]], description: String) throws {
+            let payload = try JSONSerialization.data(withJSONObject: ["tag_name": "v\(version)", "assets": assets])
+            var finished = false
+            manager.onStateChanged = { [weak manager] in
+                if let manager, case .checking = manager.state { return }
+                finished = true
+            }
+            manager.checkTransport = { request, completion in
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)
+                completion(payload, response, nil)
+            }
+            defer { manager.onStateChanged = nil; manager.checkTransport = nil }
+            manager.checkForUpdates()
+            waitUntil(step: 0.01, description: description) { finished }
+        }
+
+        try checkRelease(foreign + universal + matching, description: "matching update pair")
+        if case .updateAvailable(let release) = manager.state {
+            check(release.dmgURL?.lastPathComponent == matchingName, "Must select this build's DMG")
+            check(release.sha256URL?.lastPathComponent == matchingName + ".sha256", "Must pair it with its own checksum")
+        } else {
+            check(false, "A matching pair with HTTPS URLs must be offered")
+        }
+
+        var invalidDMG = matching, invalidChecksum = matching
+        invalidDMG[0]["browser_download_url"] = "https:///missing-host"
+        invalidChecksum[1]["browser_download_url"] = "http://example.invalid/checksum"
+        let unavailable = [
+            ("missing checksum", [matching[0]] + foreign),
+            ("missing DMG", [matching[1]]),
+            ("invalid DMG URL", invalidDMG),
+            ("non-HTTPS checksum URL", invalidChecksum),
+            ("foreign architecture", foreign),
+            ("universal package", universal),
+        ]
+        for (description, assets) in unavailable {
+            try checkRelease(assets, description: description)
+            if case .upToDate = manager.state {
+                check(manager.availableRelease == nil && manager.downloadedDMGURL == nil, "\(description) must clear the update prompt")
+            } else {
+                check(false, "\(description) must be treated as no update")
+            }
+        }
+        print("Update asset discovery passed (\(matchingArch), \(1 + unavailable.count) cases)")
+    }
+
     static func main() throws {
         let application = NSApplication.shared
         let interactive = CommandLine.arguments.contains("--interactive")
@@ -113,6 +178,7 @@ import Cocoa
         let state = URL(fileURLWithPath:CommandLine.arguments[1]), output = URL(fileURLWithPath:CommandLine.arguments[2])
         try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
         L10n.shared.setLanguage("zh-Hans", notify: false)
+        try checkUpdateAssetDiscovery(in: state.appendingPathComponent("update-asset-discovery"))
         let assistant = Assistant(state:state)
         assistant.configuration = try ConfigurationStore(state:state)
         assistant.configuration.value.navigationVersion = 5
@@ -229,14 +295,29 @@ import Cocoa
                     "browserBusy": false,
                     "scannedAt": Int(Date().timeIntervalSince1970)
                 ]
-            case "account_switch_preflight": return [
-                "ok": preflightState != "error",
-                "safe": preflightState == "safe" || preflightState == "running_idle",
-                "appRunning": preflightState == "busy" || preflightState == "running_idle",
-                "stableRunning": preflightState == "running_idle",
-                "hasRunningTask": preflightState == "busy",
-                "error": "隔离预检失败"
-            ]
+            case "account_switch_preflight":
+                if preflightState == "detached_daemon" {
+                    return [
+                        "ok": true,
+                        "safe": true,
+                        "appRunning": false,
+                        "stableRunning": false,
+                        "uiRunning": false,
+                        "insidersRunning": false,
+                        "detachedDaemonCount": 1,
+                        "detachedDaemonKinds": ["sidecar"],
+                        "detachedDaemonPids": [84608],
+                        "hasRunningTask": false
+                    ]
+                }
+                return [
+                    "ok": preflightState != "error",
+                    "safe": preflightState == "safe" || preflightState == "running_idle",
+                    "appRunning": preflightState == "busy" || preflightState == "running_idle",
+                    "stableRunning": preflightState == "running_idle",
+                    "hasRunningTask": preflightState == "busy",
+                    "error": "隔离预检失败"
+                ]
             case "account_switch": switches += 1; activeId = payload["id"] as? String ?? activeId; return ["ok":true,"message":"隔离事务完成"]
             case "account_recovery_info": return ["ok":true,"available":false]
             case "language_set":
@@ -1142,6 +1223,18 @@ import Cocoa
             switches >= 2 && !assistant.accountSwitchInFlight && assistant.openedApplications > opensBeforeIdleSwitch
         }
         check(switches == 2 && assistant.openedApplications == opensBeforeIdleSwitch + 1, "Switching while Antigravity was running must automatically relaunch Antigravity")
+        let opensBeforeDetachedSwitch = assistant.openedApplications
+        preflightState = "detached_daemon"
+        Assistant.isAntigravityRunningOverrideForTesting = { false }
+        assistant.switchAccountByIdFromMenu("c")
+        waitUntil(description: "detached_daemon switch to complete without relaunching UI") {
+            switches >= 3 && !assistant.accountSwitchInFlight
+        }
+        Assistant.isAntigravityRunningOverrideForTesting = nil
+        check(
+            switches == 3 && assistant.openedApplications == opensBeforeDetachedSwitch,
+            "Switching when only detached daemons remained must not relaunch Antigravity UI"
+        )
         switches = 1; assistant.activeAccountId = "a"; activeId = "a"
         preflightState = "safe"
         preflightState = "busy"; assistant.switchAccountByIdFromMenu("c"); pump()
@@ -1237,18 +1330,6 @@ import Cocoa
             check(!updaterScript.contains("rm -rf") && !updaterScript.contains("ditto"), "Detached launcher must never delete or copy over the live app")
             check(AppUpdateManager.extractGravityBoxDMGVersion(from: "GravityBox-1.0.4-arm64.dmg") == "1.0.4", "Must extract version from standard arm64 DMG filename")
             check(AppUpdateManager.extractGravityBoxDMGVersion(from: "GravityBox-1.0.4-x86_64.dmg") == "1.0.4", "Must extract version from Intel x86_64 DMG filename")
-            let archChoice = AppUpdateManager.selectReleaseAssetNames(
-                version: "1.0.4",
-                assetNames: ["GravityBox-1.0.4-arm64.dmg", "GravityBox-1.0.4-x86_64.dmg", "GravityBox-1.0.4-x86_64.dmg.sha256"]
-            )
-            check(archChoice.dmg == "GravityBox-1.0.4-\(AppUpdateManager.releaseArchSuffix).dmg", "Must prefer the DMG matching this build's architecture")
-            check(archChoice.sha256 == "GravityBox-1.0.4-\(AppUpdateManager.releaseArchSuffix).dmg.sha256", "Must pair the chosen DMG with its sha256 sidecar")
-            let universalChoice = AppUpdateManager.selectReleaseAssetNames(version: "1.0.4", assetNames: ["GravityBox-1.0.4-arm64.dmg", "GravityBox-1.0.4-universal.dmg"])
-            let expectedUniversal = AppUpdateManager.releaseArchSuffix == "arm64" ? "GravityBox-1.0.4-arm64.dmg" : "GravityBox-1.0.4-universal.dmg"
-            check(universalChoice.dmg == expectedUniversal, "Must accept a universal DMG when the matching arch is absent")
-            let foreignChoice = AppUpdateManager.selectReleaseAssetNames(version: "1.0.4", assetNames: ["GravityBox-1.0.4-arm64.dmg", "GravityBox-1.0.4-arm64.dmg.sha256"])
-            let expectedForeign = AppUpdateManager.releaseArchSuffix == "arm64" ? "GravityBox-1.0.4-arm64.dmg" : nil
-            check(foreignChoice.dmg == expectedForeign && (expectedForeign != nil || foreignChoice.sha256 == nil), "Must never fall back to a foreign-arch DMG")
             check(AppUpdateManager.extractGravityBoxDMGVersion(from: "GravityBox-v1.0.3-universal.dmg.sha256") == "1.0.3", "Must extract version from v-prefixed DMG sha256 sidecar")
             check(AppUpdateManager.extractGravityBoxDMGVersion(from: "OtherApp-1.0.4-arm64.dmg") == nil, "Must ignore unrelated DMG filenames")
 
@@ -1710,7 +1791,8 @@ import Cocoa
         let wrongName = updateRoot.appendingPathComponent("wrong-name.sha256")
         try Data((String(repeating: "0", count: 64) + "  Other.dmg\n").utf8).write(to: wrongName)
         let mismatch = updateRoot.appendingPathComponent("mismatch.sha256")
-        try Data((String(repeating: "0", count: 64) + "  GravityBox-9.9.9-arm64.dmg\n").utf8).write(to: mismatch)
+        let targetDMGName = "GravityBox-9.9.9-\(AppUpdateManager.releaseArchSuffix).dmg"
+        try Data((String(repeating: "0", count: 64) + "  \(targetDMGName)\n").utf8).write(to: mismatch)
         let sources: [URL?] = [nil, updateRoot.appendingPathComponent("missing.sha256"), malformed, wrongName, mismatch]
         for source in sources {
             let release = AppReleaseInfo(version: "9.9.9", tagName: "v9.9.9", title: "fixture", changelog: "", publishedDate: "", htmlURL: URL(string: "https://example.invalid")!, dmgURL: fakeDMG, sha256URL: source)
@@ -1724,7 +1806,7 @@ import Cocoa
             }
             check(finished && !accepted && assistant.updateManager.downloadedDMGURL == nil, "Invalid or missing checksum must never produce an installable package")
         }
-        let cachedDMG = state.appendingPathComponent("updates/v9.9.9/GravityBox-9.9.9-arm64.dmg")
+        let cachedDMG = state.appendingPathComponent("updates/v9.9.9/\(targetDMGName)")
         try FileManager.default.createDirectory(at: cachedDMG.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("previously verified synthetic package".utf8).write(to: cachedDMG)
         let cachedHash = try UpdatePackageIntegrity.fileHash(cachedDMG)
@@ -2066,6 +2148,67 @@ import Cocoa
                 ) == ["renderer"],
                 "Blocking process diagnostics must report sanitized roles excluding language_server tree"
             )
+            let psTreeWithOrphanSidecar = """
+            84608 1 /Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper --import=file:///Users/test/.gemini/antigravity/lib/node_modules/sidecar_sdk/register_loader.js main.mjs
+            64200 1 /Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/chrome_crashpad_handler --monitor-self
+            90002 1 /bin/zsh -c ls /Applications/Antigravity.app/Contents/Resources/bin/language_server
+            """
+            let orphanInspection = Assistant.inspectAntigravityProcesses(
+                psPidPpidArgsOutput: psTreeWithOrphanSidecar,
+                appPaths: appPaths
+            )
+            check(
+                !orphanInspection.hasUiProcesses
+                    && orphanInspection.detachedDaemonKinds == ["sidecar"]
+                    && orphanInspection.detachedDaemons.map(\.pid) == [84608],
+                "Orphan sidecar_sdk helper with PPID=1 must be classified as detached daemon rather than blocking UI"
+            )
+            let currentUid = Int32(getuid())
+            check(
+                Assistant.isEligibleDetachedDaemonForTermination(
+                    uid: currentUid,
+                    currentUid: currentUid,
+                    pid: 84608,
+                    args: "/Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper --import=file:///Users/test/.gemini/antigravity/lib/node_modules/sidecar_sdk/register_loader.js main.mjs",
+                    appPaths: appPaths
+                ) == true
+                    && Assistant.isEligibleDetachedDaemonForTermination(
+                        uid: currentUid + 1,
+                        currentUid: currentUid,
+                        pid: 84608,
+                        args: "/Applications/Antigravity.app/Contents/Resources/bin/language_server --standalone",
+                        appPaths: appPaths
+                    ) == false
+                    && Assistant.isEligibleDetachedDaemonForTermination(
+                        uid: currentUid,
+                        currentUid: currentUid,
+                        pid: 1,
+                        args: "/Applications/Antigravity.app/Contents/Resources/bin/language_server --standalone",
+                        appPaths: appPaths
+                    ) == false
+                    && Assistant.isEligibleDetachedDaemonForTermination(
+                        uid: currentUid,
+                        currentUid: currentUid,
+                        pid: 84609,
+                        args: "/Applications/Antigravity - Insiders.app/Contents/Resources/bin/language_server --standalone",
+                        appPaths: appPaths
+                    ) == false
+                    && Assistant.isEligibleDetachedDaemonForTermination(
+                        uid: currentUid,
+                        currentUid: currentUid,
+                        pid: 84610,
+                        args: "/Applications/Antigravity.app/Contents/MacOS/Antigravity",
+                        appPaths: appPaths
+                    ) == false
+                    && Assistant.isEligibleDetachedDaemonForTermination(
+                        uid: currentUid,
+                        currentUid: currentUid,
+                        pid: 90002,
+                        args: "/bin/zsh -c ls /Applications/Antigravity.app/Contents/Resources/bin/language_server",
+                        appPaths: appPaths
+                    ) == false,
+                "Detached daemon termination guard must enforce current UID, PID > 1, non-Insiders, and non-UI allowlist"
+            )
             check(
                 Assistant.parseDevToolsActivePort("55777\n/devtools/browser/mock-id\n") == 55777 &&
                 Assistant.parseDevToolsActivePort("0\n/devtools/browser/mock-id\n") == nil &&
@@ -2094,6 +2237,39 @@ import Cocoa
                 isolated.suppressLifecycleAutoQuitUntil >= longDeadline,
                 "Shorter lifecycle auto-quit suppression must not shorten an existing longer deadline"
             )
+            // Reparenting race regression: once tracked daemon child (Antigravity Helper --worker) is reparented to PPID=1 after parent exits, poll step must keep treating it as stillExiting instead of .uiStillRunning
+            var trackedDaemons: [Int32: DetachedDaemonKind] = [:]
+            let stepBeforeParentExit = Assistant.inspectAntigravityProcessesDetailed(
+                psPidPpidArgsOutput: psTreeWithSidecarOnly,
+                appPaths: appPaths
+            )
+            let evalInitial = Assistant.evaluateDetachedPollStep(
+                registeredRunning: false,
+                detailed: stepBeforeParentExit,
+                trackedKindsByPid: &trackedDaemons,
+                appPaths: appPaths
+            )
+            if case .stillExiting(let initialRemaining) = evalInitial {
+                check(initialRemaining.count == 3, "Initial detached snapshot must track all 3 detached processes")
+            } else {
+                check(false, "Initial detached tree must evaluate to stillExiting")
+            }
+            let psTreeReparentedChild = "69485 1 /Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper --custom-worker\n"
+            let stepReparented = Assistant.inspectAntigravityProcessesDetailed(
+                psPidPpidArgsOutput: psTreeReparentedChild,
+                appPaths: appPaths
+            )
+            let evalReparented = Assistant.evaluateDetachedPollStep(
+                registeredRunning: false,
+                detailed: stepReparented,
+                trackedKindsByPid: &trackedDaemons,
+                appPaths: appPaths
+            )
+            if case .stillExiting(let remaining) = evalReparented {
+                check(remaining.map(\.pid) == [69485] && remaining.first?.kind == .sidecar, "Reparented detached daemon child must stay classified as stillExiting sidecar")
+            } else {
+                check(false, "Reparented detached daemon child must never trigger uiStillRunning")
+            }
 
             // Package E: AssistantAccountUsage switch menu and cache invalidation
             isolated.cachedAccounts = []

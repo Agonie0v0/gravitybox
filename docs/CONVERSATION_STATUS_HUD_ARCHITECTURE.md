@@ -1,6 +1,6 @@
 # Conversation Status HUD 指标与展示合同
 
-适用分支：main / 1.2.0。更新日期：2026-11-22。
+适用分支：main / 1.2.1（兼容 1.2.0+）。更新日期：2026-11-24。
 
 ## 统计范围
 
@@ -24,7 +24,7 @@ Token 账本仅从步骤用量累计一次。生成记录用于匹配计时和�
 | 工具调用用时 | 已结束工具步骤的有效起止时间，起点优先 started_at；不把活跃、缺失或逆序区间算成已完成耗时 |
 | 首 token 平均（TTFT） | 已完成请求的宿主原始 timeToFirstToken 平均值，缺失时回退有效 viewable_at - created_at；不是推算的思维链首 Token 延迟 |
 | 输出速度（TPS） | 同一批已完成且同时具备用量和完整正耗时的请求：sum(outputTokens) / sum(durationSeconds)，包含等待与思考 |
-| 子智能体状态 | DOM 与数据库明确状态联合展示；仅统计真正处于运行/生成中的步状态（`1=PENDING`、`2=RUNNING`、`8=GENERATING`），排除 `WAITING(9)`、`swarm_wait` 待命步、兄弟并发防抖拖活及前端 `waiting` / `standing_by` / `blocked` / `needs_attention` 等非运行状态；陈旧或有完成时间的残留记录不能单凭活跃枚举当作运行证据 |
+| 子智能体状态 | DOM 与数据库明确状态联合展示；仅统计真正处于运行/生成/排队中的步状态（`1=PENDING`、`2=RUNNING`、`8=GENERATING`、`11=QUEUED`，统一由 `src/hud/cortex-status.ts` 的 `CortexStepStatus` 单一真源维护），排除 `WAITING(9)`、`swarm_wait` 待命步、兄弟并发防抖拖活及前端 `waiting` / `standing_by` / `blocked` / `needs_attention` 等非运行状态；未知枚举降级为 `0=UNSPECIFIED`，陈旧或有完成时间的残留记录不能单凭活跃枚举当作运行证据 |
 | 累计 Token | 未缓存输入 + 缓存读取 + 缓存写入 + 输出 |
 | 缓存命中率 | 缓存读取 /（未缓存输入 + 缓存读取 + 缓存写入） |
 | 思维链 / 回复 | 展示记录中已有拆分，不推算思维链时长、不将 reasoning 再加到总输出 |
@@ -52,7 +52,7 @@ Token 账本仅从步骤用量累计一次。生成记录用于匹配计时和�
 
 只读 SQLite，使用 DB/WAL 变化检查、并发同库单飞、有界 LRU 和超大 BLOB 字段投影（`USAGE_PROJECTION_VERSION = 2`、`USAGE_PROTO_LIMITS` 支持 16MB 读取预算与 16KB 分块投影，HUD 步级元数据通过 `HUD_STEP_METADATA_PROJECTION` 隔离提取）。每条数据库语句结束后释放读取状态；不持有长期快照。跨库统计不是全库同一时刻的原子快照。数据库替换、步骤缩减和父关联补写须使相应缓存失效。
 
-回归包括真实列名的合成 SQLite、请求关联与计时配对、嵌套归属及循环、缺失与零值、缓存更新、整数/两位展示和窄屏布局。合成测试不代替实机验收。2026-11-10 已执行当前会话的只读独立对账及隔离世界临时 UI 预览；该预览未覆盖已安装应用文件，不代表已经部署。
+回归包括真实列名的合成 SQLite、请求关联与计时配对、嵌套归属及循环、缺失与零值、缓存更新、整数/两位展示和窄屏布局。合成测试不代替实机验收。
 
 
 ## 2026-11-11 接管整改合同
@@ -71,3 +71,10 @@ Token 账本仅从步骤用量累计一次。生成记录用于匹配计时和�
 - **底部统一非活跃列表**：底部列表（`#hud-ctx-stages-list`）严格仅展示非活跃模型（`!stage.isActive`），不再重复列出当前活跃模型；取消独立 `Orchestrator 上下文` 分组标题与列表内二次 `history` 分隔标题，全部非活跃模型按平铺统一列表展示。
 - **分区标题收敛**：当全部可见非活跃阶段均尚无实测用量（`hasUsageData !== true`）时，分区标题（`#lbl-ctx-stages`）展示为“待切换模型 / Pending Model”；只要存在至少一个具备实测用量的非活跃模型，统一展示为“曾用模型上下文 / Prior Model Context”。
 - **物理模型去重与角色保留**：按物理 `modelId` 做 1:1 去重（待介入的 Orchestrator 阶段槽位直接吸收同 `modelId` 历史步骤并保留 `planner`/`executor` 角色），列表中每个曾经在 Orchestrator 中担任 `planner` / `executor` 的具名模型在模型名右侧渲染 `.hud-role-badge` 角色胶囊（无具名模型的待介入占位保留“规划阶段 / 执行阶段”）。
+
+## v1.2.0 / v1.2.1 BTW 分栏、SSH 远程窗口与历史角色合同
+
+- **BTW 侧边提问分栏（`2.34.0+`）**：分栏类型扩展为 `HudPaneKind = 'main' | 'subagent' | 'btw'`（`session.isBtwTrajectory`），BTW 侧边提问拥有独立物理 DOM 槽位与 HUD 实例，并在用量核算中自动去重克隆前缀生成记录，避免重复计入主会话账本。
+- **SSH 远程窗口观测与降级态**：面向 Antigravity `2.33.0+` SSH 远程窗口，全程经本机 CDP 通道与同源 RPC 获取远端指标（`sourceKind: 'remote'` 与脱敏 `remoteHostLabel`），严禁拉起外部 `ssh` 进程；`HudDataAvailability` 显式区分 `remote_unbridged`（未建立远端桥接）与 `remote_stale`（远端快照陈旧），不以本机数据冒充远端会话。
+- **统一 `CortexStepStatus` 枚举真源**：前后端及本机/远端路径统一经 `src/hud/cortex-status.ts` 归一化 `CortexStepStatus`（含 `11=QUEUED`、`12=INTERRUPTED`），未知枚举值显式降级为 `UNSPECIFIED(0)`，绝不静默伪装为 `DONE(3)` 或活跃态。
+- **`executor_metadata` 增量扫描与历史编排器角色保留（`v1.2.1`）**：当长对话触发回退、步骤截断或切换回普通模型时，通过增量扫描 `executor_metadata` 保留历史上曾参与 Orchestrator 的模型及其 `planner` / `executor` 角色标识，防止重扫或上下文裁剪后丢失历史角色胶囊。

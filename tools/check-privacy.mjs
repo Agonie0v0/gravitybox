@@ -68,6 +68,11 @@ const SKIPPED_DIRS = new Set([
   'vendor', '质检报告', '成品', 'reports', 'artifacts',
 ]);
 
+const PACKAGE_SKIPPED_DIRS = new Set([
+  '.git', '.agents', 'node_modules', 'target', '.cache',
+  'vendor', '质检报告', '成品', 'reports', 'artifacts',
+]);
+
 const EMAIL_RE = /([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+\.[A-Za-z]{2,})/g;
 const RETINA_ASSET_RE = /^(?:1|2|3)x\.(?:png|jpe?g|webp|gif|svg)$/i;
 const LOCAL_HOME_PATH_PATTERNS = [
@@ -134,12 +139,13 @@ function sha256Hex(text) {
   return createHash('sha256').update(text).digest('hex');
 }
 
-export function isExcludedPrivacyPath(filePath) {
+export function isExcludedPrivacyPath(filePath, { includeBuildOutputs = false } = {}) {
   const rel = filePath.replaceAll('\\', '/').replace(/^\.\//, '');
   if (!rel) return true;
   if (rel === 'AGENTS.md' || rel.startsWith('licenses/')) return true;
+  const skippedDirs = includeBuildOutputs ? PACKAGE_SKIPPED_DIRS : SKIPPED_DIRS;
   const segments = rel.split('/');
-  if (segments.some(seg => SKIPPED_DIRS.has(seg))) return true;
+  if (segments.some(seg => skippedDirs.has(seg))) return true;
   if (BINARY_EXTENSIONS.has(extname(rel).toLowerCase())) return true;
   return false;
 }
@@ -189,7 +195,7 @@ function redactPrivateIp(ip) {
  */
 export function scanContentForPrivacy(content, filePath, options = {}) {
   const rel = filePath.replaceAll('\\', '/').replace(/^\.\//, '');
-  if (isExcludedPrivacyPath(rel) || !content || content.includes('\0')) return [];
+  if (isExcludedPrivacyPath(rel, { includeBuildOutputs: Boolean(options.includeBuildOutputs) }) || !content || content.includes('\0')) return [];
 
   const allowedDomains = options.allowedDomains ?? ALLOWED_EMAIL_DOMAINS;
   const allowedHomeUsers = options.allowedHomeUsers ?? ALLOWED_MACOS_HOME_USERS;
@@ -376,14 +382,14 @@ async function listGitFiles(repoRoot, args) {
   return stdout.split('\0').filter(Boolean);
 }
 
-async function walkDirectory(dir, baseRoot) {
+async function walkDirectory(dir, baseRoot, options = {}) {
   const collected = [];
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const fullPath = join(dir, entry.name);
     const rel = relative(baseRoot, fullPath).replaceAll('\\', '/');
-    if (isExcludedPrivacyPath(rel)) continue;
+    if (isExcludedPrivacyPath(rel, options)) continue;
     if (entry.isDirectory()) {
-      collected.push(...await walkDirectory(fullPath, baseRoot));
+      collected.push(...await walkDirectory(fullPath, baseRoot, options));
     } else if (entry.isFile()) {
       collected.push(rel);
     }
@@ -444,7 +450,7 @@ export async function runPrivacyCheck({ repoRoot = root, staged = false } = {}) 
 export async function scanDirectoryForPrivacy(targetDir, { excludePrefixes = [], options = {} } = {}) {
   const issues = [];
   let scannedCount = 0;
-  const files = await walkDirectory(targetDir, targetDir);
+  const files = await walkDirectory(targetDir, targetDir, { includeBuildOutputs: true });
   for (const rel of files) {
     if (excludePrefixes.some(prefix => rel.startsWith(prefix))) continue;
     let content;
@@ -454,7 +460,7 @@ export async function scanDirectoryForPrivacy(targetDir, { excludePrefixes = [],
       continue;
     }
     scannedCount++;
-    issues.push(...scanContentForPrivacy(content, rel, options));
+    issues.push(...scanContentForPrivacy(content, rel, { ...options, includeBuildOutputs: true }));
   }
   return { scannedCount, issues };
 }

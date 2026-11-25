@@ -380,7 +380,12 @@ extension Assistant {
             let appRunning = payload["appRunning"] as? Bool == true
             let insidersRunning = payload["insidersRunning"] as? Bool == true
             let stableRunning = (payload["stableRunning"] as? Bool) ?? (appRunning && !insidersRunning)
-            let shouldQuitAndRelaunch = !insidersRunning && (stableRunning || Self.isAntigravityRunning())
+            let uiRunning = (payload["uiRunning"] as? Bool) ?? stableRunning
+            let detachedDaemonCount = payload["detachedDaemonCount"] as? Int ?? 0
+            let detachedDaemonKinds = payload["detachedDaemonKinds"] as? [String] ?? []
+            let shouldQuitUi = !insidersRunning && (uiRunning || Self.isAntigravityRunning())
+            let shouldCleanDetachedDaemons = !insidersRunning && !shouldQuitUi && detachedDaemonCount > 0
+            let shouldRelaunchAfterSwitch = shouldQuitUi
             let hasRunningTask = (payload["hasRunningTask"] as? Bool == true) || (payload["safe"] as? Bool == false)
             let display: String
             if !name.isEmpty && name.caseInsensitiveCompare(email) != .orderedSame && !email.isEmpty {
@@ -400,16 +405,35 @@ extension Assistant {
                     guard let self else { return }; self.accountSwitchInFlight = false
                     switch response {
                     case .failure(let error):
-                        if shouldQuitAndRelaunch { self.relaunchAntigravityAfterSwitch() }
+                        if shouldRelaunchAfterSwitch { self.relaunchAntigravityAfterSwitch() }
                         self.showMessage(L10n.t("assistant_account.switch_failed", ["error": error.localizedDescription]), error: true)
                     case .success(let value):
                         self.singleAccountRefreshNotices[id] = nil
                         self.singleAccountRefreshErrors[id] = nil
                         self.showMessage(value["message"] as? String ?? L10n.t("assistant_account.switched_to", ["email": email]))
-                        if shouldQuitAndRelaunch { self.relaunchAntigravityAfterSwitch() }
+                        if shouldRelaunchAfterSwitch { self.relaunchAntigravityAfterSwitch() }
                         self.invalidateUsageReportCache()
                         self.refresh(); self.accountsPage?.fetch(); self.overview?.fetch(); completion?()
                     }
+                }
+            }
+            let handleQuitResult: (QuitAntigravityResult) -> Void = { [weak self] quitResult in
+                guard let self else { return }
+                switch quitResult {
+                case .exited:
+                    performSwitch()
+                case .uiStillRunning:
+                    self.accountSwitchInFlight = false
+                    self.showMessage(L10n.t("assistant_account.quit_first"), error: true)
+                case .detachedDaemonsRemaining(let kinds, let pids):
+                    self.accountSwitchInFlight = false
+                    self.showMessage(
+                        L10n.t("assistant_account.detached_daemons_remaining", [
+                            "kinds": Self.formatDetachedDaemonKinds(kinds),
+                            "pids": Self.formatDetachedDaemonPids(pids)
+                        ]),
+                        error: true
+                    )
                 }
             }
             let execute: (Bool) -> Void = { [weak self] confirmed in
@@ -423,7 +447,7 @@ extension Assistant {
                             self.singleAccountRefreshNotices[id] = nil
                             self.singleAccountRefreshErrors[id] = nil
                             self.showMessage(value["message"] as? String ?? L10n.t("assistant_account.switched_to", ["email": email]))
-                            if shouldQuitAndRelaunch { self.relaunchAntigravityAfterSwitch() }
+                            if shouldRelaunchAfterSwitch { self.relaunchAntigravityAfterSwitch() }
                             self.invalidateUsageReportCache()
                             self.refresh(); self.accountsPage?.fetch(); self.overview?.fetch(); completion?()
                         }
@@ -431,16 +455,10 @@ extension Assistant {
                     return
                 }
                 #endif
-                if shouldQuitAndRelaunch {
-                    self.quitAntigravityAndWait { [weak self] exited in
-                        guard let self else { return }
-                        guard exited else {
-                            self.accountSwitchInFlight = false
-                            self.showMessage(L10n.t("assistant_account.quit_first"), error: true)
-                            return
-                        }
-                        performSwitch()
-                    }
+                if shouldQuitUi {
+                    self.quitAntigravityAndWaitDetailed(completion: handleQuitResult)
+                } else if shouldCleanDetachedDaemons {
+                    self.terminateDetachedDaemonsGracefully(completion: handleQuitResult)
                 } else {
                     performSwitch()
                 }
@@ -466,6 +484,25 @@ extension Assistant {
                         : "提示：该账号当前也正在 SSH 主机（\(sharedHostsSummary)）上使用；切换本机账号不会修改远端登录态，但本机重启期间 SSH 窗口会暂时断连。"
                 )
             }
+            if shouldCleanDetachedDaemons {
+                #if NATIVE_UI_TEST
+                if let confirm = self.confirmSwitchForTesting { confirm(display, execute); return }
+                #endif
+                let daemonAlert = NSAlert()
+                daemonAlert.alertStyle = hasRunningTask ? .warning : .informational
+                daemonAlert.messageText = L10n.t("assistant_account.switch_prompt_title", ["display": display])
+                let bodyKey = hasRunningTask
+                    ? "assistant_account.switch_detached_busy_body"
+                    : "assistant_account.switch_detached_body"
+                daemonAlert.informativeText = L10n.t(bodyKey, [
+                    "kinds": Self.formatDetachedDaemonKinds(detachedDaemonKinds),
+                    "count": detachedDaemonCount
+                ]) + sshWarningSuffix
+                daemonAlert.addButton(withTitle: L10n.t("assistant_account.switch_detached_confirm"))
+                daemonAlert.addButton(withTitle: L10n.t("common.cancel"))
+                self.presentSheetAlert(daemonAlert) { execute($0 == .alertFirstButtonReturn) }
+                return
+            }
             if hasRunningTask {
                 #if NATIVE_UI_TEST
                 if self.confirmSwitchForTesting != nil {
@@ -488,7 +525,7 @@ extension Assistant {
             let alert = NSAlert()
             alert.alertStyle = .informational
             alert.messageText = L10n.t("assistant_account.switch_prompt_title", ["display": display])
-            alert.informativeText = (appRunning
+            alert.informativeText = (shouldQuitUi
                 ? L10n.t("assistant_account.switch_ready_body")
                 : L10n.t("assistant_account.switch_stopped_body")) + sshWarningSuffix
             alert.addButton(withTitle: L10n.t("assistant_account.switch_confirm"))

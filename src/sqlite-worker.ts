@@ -17,6 +17,8 @@ import {
   HUD_EXECUTOR_METADATA_PROJECTION,
 } from './protobuf-projection.js';
 
+const HUD_EXECUTOR_HISTORY_MAX_ROWS = 512;
+
 export interface HudWorkerScanRequest {
   dbPath: string;
   inlineBlobLimitBytes: number;
@@ -29,6 +31,7 @@ export interface HudWorkerScanRequest {
   cachedTrajectoryId?: string;
   prevParentMetaDigest?: string;
   prevExecutorMetaDigest?: string;
+  prevExecutorHistoryMaxIdx?: number;
   prevStepPrefixCutoffIdx?: number;
   prevStepPrefixDigest?: string;
   prevGenDigest?: string;
@@ -60,6 +63,9 @@ export interface HudWorkerScanResult {
   executorMetaUnchanged?: boolean;
   executorMetaDigest?: string;
   executorMetaBlob?: Uint8Array | null;
+  executorMetaHistoryBlobs?: Uint8Array[];
+  executorMetaHistoryMaxIdx?: number;
+  executorMetaHistoryMode?: 'full' | 'append';
   trajectoryId?: string;
   cascadeId?: string;
   trajectoryType?: number;
@@ -649,6 +655,7 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
     let executorMetaUnchanged = false;
     let executorMetaDigest = '';
     let executorMetaBlob: Uint8Array | null = null;
+    let latestExecIdx = -1;
     if (hasExecutorMetaTable) {
       try {
         const execRow = db
@@ -666,6 +673,7 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
           | undefined;
         if (execRow && Number(execRow.dataLen ?? 0) > 0) {
           const execIdx = Number(execRow.idx);
+          latestExecIdx = execIdx;
           const execLen = Number(execRow.dataLen ?? 0);
           const execHasher = createHash('sha256');
           hashRawGenRowMeta(execHasher, execIdx, execLen, execRow.inlineData, execRow.dataHead, execRow.dataTail);
@@ -694,6 +702,70 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
         }
       } catch {
         // 兼容无 executor_metadata 表或损坏行，就地降级
+      }
+    }
+
+    let executorMetaHistoryBlobs: Uint8Array[] | undefined;
+    let executorMetaHistoryMaxIdx: number | undefined;
+    let executorMetaHistoryMode: 'full' | 'append' | undefined;
+    if (hasExecutorMetaTable && executorMetaDigest && !executorMetaUnchanged) {
+      try {
+        const sinceIdx =
+          typeof req.prevExecutorHistoryMaxIdx === 'number' &&
+          Number.isSafeInteger(req.prevExecutorHistoryMaxIdx) &&
+          req.prevExecutorHistoryMaxIdx >= 0
+            ? req.prevExecutorHistoryMaxIdx
+            : -1;
+        const stepsRewound =
+          req.prevStepPrefixCutoffIdx !== undefined &&
+          req.prevStepPrefixCutoffIdx >= 0 &&
+          Boolean(req.prevStepPrefixDigest) &&
+          stepsMode === 'full';
+        const resetHistory = stepsRewound || (sinceIdx >= 0 && latestExecIdx >= 0 && latestExecIdx < sinceIdx);
+        const effectiveSinceIdx = resetHistory ? -1 : sinceIdx;
+        const histRows = db
+          .prepare(
+            `SELECT idx, length(data) AS dataLen, CASE WHEN length(data) <= ${inlineLimit} THEN data ELSE NULL END AS inlineData FROM executor_metadata WHERE data IS NOT NULL AND idx > ? ORDER BY idx DESC LIMIT ${HUD_EXECUTOR_HISTORY_MAX_ROWS}`
+          )
+          .all(effectiveSinceIdx) as Array<{
+          idx: number;
+          dataLen: number;
+          inlineData: Uint8Array | null;
+        }>;
+        histRows.reverse();
+        const blobs: Uint8Array[] = [];
+        let maxHistIdx = effectiveSinceIdx;
+        let histChunkStmt: ReturnType<DatabaseSync['prepare']> | undefined;
+        let histFullStmt: ReturnType<DatabaseSync['prepare']> | undefined;
+        for (const hr of histRows) {
+          const hIdx = Number(hr.idx);
+          const hLen = Number(hr.dataLen ?? 0);
+          if (hIdx > maxHistIdx) maxHistIdx = hIdx;
+          if (hLen <= 0) continue;
+          const inlineBuf = hr.inlineData && hLen <= inlineLimit ? hr.inlineData : null;
+          const projected = projectProtobuf(
+            hLen,
+            inlineBuf
+              ? (offset, length) => inlineBuf.subarray(offset, offset + length)
+              : createSqlBlobChunkReader(
+                  hLen,
+                  hIdx,
+                  () => (histChunkStmt ??= db.prepare('SELECT substr(data, ?, ?) AS chunk FROM executor_metadata WHERE idx = ?')),
+                  () => (histFullStmt ??= db.prepare('SELECT data AS data FROM executor_metadata WHERE idx = ?'))
+                ),
+            HUD_EXECUTOR_METADATA_PROJECTION,
+            HUD_GEN_PROTO_LIMITS
+          );
+          const detached = detachBuf(projected.data);
+          if (detached) blobs.push(detached);
+        }
+        executorMetaHistoryBlobs = blobs;
+        executorMetaHistoryMaxIdx = maxHistIdx;
+        executorMetaHistoryMode = effectiveSinceIdx >= 0 ? 'append' : 'full';
+      } catch {
+        executorMetaHistoryBlobs = undefined;
+        executorMetaHistoryMaxIdx = undefined;
+        executorMetaHistoryMode = undefined;
       }
     }
 
@@ -871,6 +943,9 @@ function executeHudScan(req: HudWorkerScanRequest): { result: HudWorkerScanResul
         executorMetaUnchanged,
         executorMetaDigest,
         executorMetaBlob,
+        executorMetaHistoryBlobs,
+        executorMetaHistoryMaxIdx,
+        executorMetaHistoryMode,
         trajectoryId,
         ...(forkMeta.cascadeId !== undefined ? { cascadeId: forkMeta.cascadeId } : {}),
         ...(forkMeta.trajectoryType !== undefined ? { trajectoryType: forkMeta.trajectoryType } : {}),
@@ -916,7 +991,9 @@ function openSession(path: string) {
     database.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=250;');
     sessionDataVersion = Number(database.prepare('PRAGMA data_version').get()?.data_version);
   } catch (error) {
-    sessionError = (error as Error).message;
+    const msg = (error as Error).message;
+    closeSession();
+    sessionError = msg;
   }
 }
 

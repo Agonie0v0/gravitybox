@@ -386,6 +386,12 @@ export interface ParsedExecutorMetadata {
   plannerModelName?: string;
   maxContextTokens?: number;
   checkpointMaxTokenLimit?: number;
+  /** executor_metadata 全部历史行中真实规划配置（plan!==exec）的 planModelEnum，去重、按首次出现排序 */
+  historicalPlanModelEnums?: number[];
+  /** 同上对应的 plannerModelName（去重） */
+  historicalPlannerModelNames?: string[];
+  /** 全部历史行出现过的 executionModelEnum（去重） */
+  historicalExecutionModelEnums?: number[];
 }
 
 /** 前端隔离世界向 Node.js 派发的事件负载 */

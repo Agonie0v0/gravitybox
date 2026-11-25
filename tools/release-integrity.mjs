@@ -10,9 +10,19 @@ export function includeDictionaryPath(path) {
   return parts[0] !== 'dict' || !parts.slice(1).some(part => part.startsWith('.'));
 }
 
-/** Excludes Finder/Explorer metadata and README screenshot previews from the macOS/core code release digest. */
+const WINDOWS_ONLY_PATHS = new Set([
+  'tools/package-win.mjs',
+  'tools/gravitybox-win.nsi',
+  'tools/dev-win.mjs',
+  'test/windows-platform.test.mjs',
+  '.github/workflows/ci-windows.yml',
+  '.github/workflows/package-windows.yml',
+]);
+
+/** Excludes Finder/Explorer metadata, Windows-only tooling/workflows, and README screenshot previews from the macOS/core code release digest. */
 export function includeSourceDigestPath(relativePath) {
   const normalized = relativePath.replaceAll('\\', '/');
+  if (WINDOWS_ONLY_PATHS.has(normalized)) return false;
   const parts = normalized.split('/');
   if (parts[0] === 'windows') return false;
   if (parts.includes('.DS_Store') || parts.includes('Thumbs.db')) return false;
@@ -34,6 +44,8 @@ export function includeWindowsSourceDigestPath(relativePath) {
 
 /**
  * 源码摘要：macOS 与跨平台核心发布门禁的唯一真源（严格排除 `windows/`，与 Windows 发行指纹解耦）。
+ * 排除不进入安装包的纯仓库文档（`README*.md`、`CHANGELOG.md`、`PROJECT.md`、`SECURITY.md`），
+ * 仅保留实际随包分发的 `LICENSE` 与 `THIRD_PARTY_NOTICES.md`。
  * 注意：tools/ 与 test/ 也计入，修改发布脚本本身同样会让旧 .cache/verified-release.json 失效，
  * 必须重新执行 `npm run verify` 才能再次打包（失败关闭，而不是静默放行）。
  */
@@ -41,24 +53,15 @@ export async function sourceDigest(root) {
   const files = [];
   async function walk(relative) {
     for (const entry of await readdir(join(root, relative), { withFileTypes: true })) {
-      const path = join(relative, entry.name);
+      const path = join(relative, entry.name).replaceAll('\\', '/');
       if (!includeSourceDigestPath(path)) continue;
       if (entry.isDirectory()) await walk(path);
       else if (entry.isFile()) files.push(path);
     }
   }
   for (const directory of ['src','runtime','native','tools','test','dict','ui-strings','assets','licenses']) await walk(directory);
-  files.push('package.json','package-lock.json','tsconfig.json','README.md','THIRD_PARTY_NOTICES.md');
-  for (const doc of [
-    'LICENSE',
-    'SECURITY.md',
-    'README.zh-CN.md',
-    'README_EN.md',
-    'CHANGELOG.md',
-    'PROJECT.md',
-  ]) {
-    if (await exists(join(root, doc))) files.push(doc);
-  }
+  files.push('package.json','package-lock.json','tsconfig.json','THIRD_PARTY_NOTICES.md');
+  if (await exists(join(root, 'LICENSE'))) files.push('LICENSE');
   if (await exists(join(root, '.github/workflows'))) {
     await walk('.github/workflows');
   }

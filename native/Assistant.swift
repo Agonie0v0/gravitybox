@@ -213,7 +213,28 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     var accountListWaiters: [(Result<[String: Any], Error>) -> Void] = []
     private let stateWatchQueue = DispatchQueue(label: "local.gravitybox.state-watch", qos: .utility)
     private var stateWatchWorkItem: DispatchWorkItem?
-    var suppressLifecycleAutoQuitUntil: Date = .distantPast
+    private let suppressLifecycleAutoQuitLock = NSLock()
+    private var _suppressLifecycleAutoQuitUntil: Date = .distantPast
+    var suppressLifecycleAutoQuitUntil: Date {
+        get {
+            suppressLifecycleAutoQuitLock.lock()
+            defer { suppressLifecycleAutoQuitLock.unlock() }
+            return _suppressLifecycleAutoQuitUntil
+        }
+        set {
+            suppressLifecycleAutoQuitLock.lock()
+            defer { suppressLifecycleAutoQuitLock.unlock() }
+            _suppressLifecycleAutoQuitUntil = newValue
+        }
+    }
+
+    func extendLifecycleAutoQuitSuppression(until candidate: Date) {
+        suppressLifecycleAutoQuitLock.lock()
+        defer { suppressLifecycleAutoQuitLock.unlock() }
+        if candidate > _suppressLifecycleAutoQuitUntil {
+            _suppressLifecycleAutoQuitUntil = candidate
+        }
+    }
     static var applicationChannel = "stable"
     static var selectedTarget: DesktopApplicationTarget { DesktopApplicationTarget(channel: applicationChannel) }
     var targetApplication: DesktopApplicationTarget { Self.selectedTarget }

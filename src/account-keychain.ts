@@ -43,8 +43,13 @@ export class WindowsCredentialManagerAdapter implements KeychainAdapter {
     try {
       await credWrite(service, account, password, this.options);
     } catch (error) {
-      if (error instanceof Win32HelperError && error.code === 'HELPER_TIMEOUT') {
-        throw new Error(bt('keychain.err.write_timeout'));
+      if (error instanceof Win32HelperError) {
+        if (error.code === 'HELPER_TIMEOUT') {
+          throw new Error(bt('keychain.err.write_timeout'));
+        }
+        if (error.code === 'INVALID_INPUT' && /2560|size|blob|limit|exceed/i.test(error.message)) {
+          throw new Error(bt('keychain.err.payload_too_large'));
+        }
       }
       throw new Error(bt('keychain.err.write'));
     }
@@ -223,12 +228,37 @@ export function decodeKeychainOauthPayload(raw: string | null | undefined): stri
   return null;
 }
 
+export const WINDOWS_CRED_MAX_BYTES = 2560;
+
 export function encodeKeychainOauthPayload(
   acc: KeychainSyncAccount,
   encoding: KeychainPayloadEncoding = isWindows() ? 'raw' : 'go-keyring-base64',
 ): string {
-  const payload = buildGoOauthPayload(acc);
-  if (encoding === 'raw') return payload;
+  let payload = buildGoOauthPayload(acc);
+  if (encoding === 'raw') {
+    if (Buffer.byteLength(payload, 'utf8') > WINDOWS_CRED_MAX_BYTES) {
+      payload = buildGoOauthPayload({
+        ...acc,
+        token: { ...acc.token, id_token: undefined },
+      });
+    }
+    if (Buffer.byteLength(payload, 'utf8') > WINDOWS_CRED_MAX_BYTES) {
+      payload = buildGoOauthPayload({
+        ...acc,
+        token: {
+          ...acc.token,
+          id_token: undefined,
+          access_token: '',
+          expiry_timestamp: 0,
+          expires_in: 0,
+        },
+      });
+    }
+    if (Buffer.byteLength(payload, 'utf8') > WINDOWS_CRED_MAX_BYTES) {
+      throw new Error(bt('keychain.err.payload_too_large'));
+    }
+    return payload;
+  }
   const b64 = Buffer.from(payload, 'utf8').toString('base64');
   return `go-keyring-base64:${b64}`;
 }

@@ -1,9 +1,9 @@
-import { open, lstat, unlink, mkdir, readFile } from 'node:fs/promises';
+import { open, lstat, mkdir, readFile } from 'node:fs/promises';
 import { renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { bt } from './i18n.js';
-import { atomicRenameWithRetry, isOwnedByCurrentUser, isWindows } from './platform/index.js';
+import { atomicRenameWithRetry, isOwnedByCurrentUser, isWindows, unlinkWithRetry } from './platform/index.js';
 
 export interface AtomicWriteOptions {
   durability?: 'strict' | 'relaxed';
@@ -37,7 +37,7 @@ export async function atomicText(path: string, text: string, signal?: AbortSigna
       const dir = await open(dirname(path), 'r').catch(() => null);
       if (dir) { try { await dir.sync(); } catch { /* filesystems without directory fsync */ } finally { await dir.close(); } }
     }
-  } finally { await unlink(temp).catch(() => {}); }
+  } finally { await unlinkWithRetry(temp).catch(() => {}); }
 }
 
 export async function atomicJson(path: string, value: unknown, signal?: AbortSignal, options?: AtomicWriteOptions): Promise<void> {
@@ -81,10 +81,10 @@ export async function recoverFileSet(journalPath: string, allowedPaths: string[]
   }
   for (const change of changes) {
     if (await readOptional(change.path) === change.after) continue;
-    if (change.after === null) await unlink(change.path);
+    if (change.after === null) await unlinkWithRetry(change.path);
     else await atomicText(change.path, change.after);
   }
-  await unlink(journalPath);
+  await unlinkWithRetry(journalPath);
 }
 
 export async function commitFileSet(journalPath: string, values: { path: string; after: string | null }[]): Promise<void> {
@@ -109,7 +109,7 @@ async function restoreCommit(record:AccountCommit, forward:boolean) {
   }
   for(const [path,value] of [[record.accountPath,forward?record.afterAccount:record.beforeAccount],[record.indexPath,forward?record.afterIndex:record.beforeIndex]] as const) {
     if(await readOptional(path)===value)continue;
-    if(value===null)await unlink(path);else await atomicText(path,value);
+    if(value===null)await unlinkWithRetry(path);else await atomicText(path,value);
   }
 }
 /** Called under the account write lease before reading the index. */
@@ -117,7 +117,7 @@ export async function recoverAccountCommit(indexPath:string):Promise<void> {
   const journalPath=indexPath+'.commit.json',raw=await readOptional(journalPath);if(raw===null)return;
   const record=JSON.parse(raw) as AccountCommit;
   if(record.indexPath!==indexPath||dirname(record.accountPath)!==join(dirname(indexPath),'accounts')||!record.accountPath.endsWith('.json'))throw Error(bt('files.commit_journal_invalid'));
-  await restoreCommit(record,true);await unlink(journalPath);
+  await restoreCommit(record,true);await unlinkWithRetry(journalPath);
 }
 /** Journal before either replacement; errors roll back, crashes are reconciled before reads. */
 export async function commitAccountAndIndex(accountPath:string,accountData:unknown,indexPath:string,indexData:unknown,signal?:AbortSignal):Promise<void> {
@@ -131,9 +131,9 @@ export async function commitAccountAndIndex(accountPath:string,accountData:unkno
   const record:AccountCommit={accountPath,indexPath,beforeAccount:await readOptional(accountPath),beforeIndex:await readOptional(indexPath),afterAccount:JSON.stringify(accountData,null,2)+'\n',afterIndex:JSON.stringify(indexData,null,2)+'\n'};
   signal?.throwIfAborted();await atomicJson(journalPath,record,signal);
   try {
-    signal?.throwIfAborted();await atomicText(accountPath,record.afterAccount);await atomicText(indexPath,record.afterIndex);await unlink(journalPath);
+    signal?.throwIfAborted();await atomicText(accountPath,record.afterAccount);await atomicText(indexPath,record.afterIndex);await unlinkWithRetry(journalPath);
   } catch(error) {
-    try {await restoreCommit(record,false);await unlink(journalPath);}catch{throw Error(bt('files.commit_incomplete'));}
+    try {await restoreCommit(record,false);await unlinkWithRetry(journalPath);}catch{throw Error(bt('files.commit_incomplete'));}
     throw error;
   }
 }

@@ -80,7 +80,7 @@ final class AppUpdateManager {
                 return Self.normalizeVersion(ver)
             }
         }
-        return "1.2.0"
+        return "1.2.1"
     }
 
     var currentBuildDisplay: String {
@@ -267,31 +267,19 @@ final class AppUpdateManager {
             let publishedDate = publishedRaw.count >= 10 ? String(publishedRaw.prefix(10)) : L10n.t("update.latest_build", fallback: "最新构建")
             let htmlURL = Self.httpsURL(from: json["html_url"] as? String) ?? Self.releasesPageURL
 
-            var dmgURL: URL?
-            var sha256URL: URL?
             let assetList = (json["assets"] as? [[String: Any]]) ?? []
             let assetNames = assetList.compactMap { $0["name"] as? String }
-            let assetChoice = Self.selectReleaseAssetNames(version: remoteVersion, assetNames: assetNames)
-            guard let dmgName = assetChoice.dmg else {
-                // 远端没有当前架构（或 universal）的安装包：安全视为无可用更新，绝不回退到异架构包。
-                if let (prevRel, dmg) = preservedReady,
-                   prevRel.version == remoteVersion,
-                   FileManager.default.fileExists(atPath: dmg.path) {
-                    self.downloadedDMGURL = dmg
-                    self.transition(.readyToInstall(prevRel, dmg))
-                } else {
-                    self.availableRelease = nil
-                    self.downloadedDMGURL = nil
-                    self.transition(.upToDate)
-                }
-                return
+            func assetURL(named name: String) -> URL? {
+                let asset = assetList.first { $0["name"] as? String == name }
+                return Self.httpsURL(from: asset?["browser_download_url"] as? String)
             }
-            for asset in assetList {
-                guard let assetName = asset["name"] as? String,
-                      let downloadStr = asset["browser_download_url"] as? String,
-                      let url = Self.httpsURL(from: downloadStr) else { continue }
-                if assetName == dmgName { dmgURL = url }
-                else if assetName == assetChoice.sha256 { sha256URL = url }
+            guard let assetChoice = Self.selectReleaseAssetNames(version: remoteVersion, assetNames: assetNames),
+                  let dmgURL = assetURL(named: assetChoice.dmg),
+                  let sha256URL = assetURL(named: assetChoice.sha256) else {
+                self.availableRelease = nil
+                self.downloadedDMGURL = nil
+                self.transition(.upToDate)
+                return
             }
 
             let info = AppReleaseInfo(
@@ -424,7 +412,7 @@ final class AppUpdateManager {
     }
 
     private func cachedDMGPath(for version: String) -> URL {
-        app.state.appendingPathComponent("updates/v\(version)/GravityBox-\(version)-\(Self.releaseArchSuffix).dmg")
+        app.state.appendingPathComponent("updates/v\(version)/\(Self.releaseDMGName(forVersion: version))")
     }
 
     private static func configureSilentProcess(_ proc: Process) {
@@ -664,7 +652,7 @@ final class AppUpdateManager {
         options: [.caseInsensitive]
     )
 
-    /// 当前编译架构对应的发行包后缀（arm64 / x86_64）。更新只安装同架构或 universal 的包。
+    /// 当前编译架构对应的发行包后缀（arm64 / x86_64）。
     static var releaseArchSuffix: String {
         #if arch(x86_64)
         return "x86_64"
@@ -673,19 +661,15 @@ final class AppUpdateManager {
         #endif
     }
 
-    /// 可用安装包文件名，按优先级排序：本架构优先，其次 universal。
-    static func releaseAssetNames(forVersion version: String) -> [String] {
-        ["GravityBox-\(version)-\(releaseArchSuffix).dmg", "GravityBox-\(version)-universal.dmg"]
+    private static func releaseDMGName(forVersion version: String) -> String {
+        "GravityBox-\(version)-\(releaseArchSuffix).dmg"
     }
 
-    /// 从远端资产名片中挑选安装包与校验文件；没有同架构/ universal 包时返回空，交由调用方视为无更新。
-    static func selectReleaseAssetNames(version: String, assetNames: [String]) -> (dmg: String?, sha256: String?) {
-        let available = Set(assetNames)
-        for candidate in releaseAssetNames(forVersion: version) where available.contains(candidate) {
-            let sha = candidate + ".sha256"
-            return (candidate, available.contains(sha) ? sha : nil)
-        }
-        return (nil, nil)
+    static func selectReleaseAssetNames(version: String, assetNames: [String]) -> (dmg: String, sha256: String)? {
+        let dmg = releaseDMGName(forVersion: version)
+        let sha256 = dmg + ".sha256"
+        guard assetNames.contains(dmg), assetNames.contains(sha256) else { return nil }
+        return (dmg, sha256)
     }
 
     static func extractGravityBoxDMGVersion(from fileName: String) -> String? {

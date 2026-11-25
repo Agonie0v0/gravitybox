@@ -2,14 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createConnection, createServer } from 'node:net';
-import { access, mkdtemp, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdtemp, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   IPC_SESSION_FILENAME,
+  Win32HelperError,
   antigravityLayout,
+  appGracefulClose,
   atomicRenameWithRetry,
+  classifyWindowsProcesses,
   cleanupIpcEndpoint,
   cleanupIpcSession,
   computeWindowsStateHash16,
@@ -35,9 +38,13 @@ import {
   readIpcSession,
   resolveClientIpcTarget,
   resolveIpcEndpoint,
+  resolveWin32HelperPath,
   safeOpenFlagsNoFollow,
+  trashMove,
+  unlinkWithRetry,
   validateIpcEndpointForClient,
   verifyIpcAuthToken,
+  verifyPipeServer,
   writeIpcSession,
 } from '../dist/platform/index.js';
 import {
@@ -80,6 +87,7 @@ import {
   shouldBypassProxy,
 } from '../dist/proxy.js';
 import {
+  hasActiveAntigravitySshTunnel,
   matchMainLogRemotePort,
   parseSshTunnelProcesses,
   resolveWindowsPowerShellPath,
@@ -819,6 +827,12 @@ test('i18n: Windows 系统语言检测走 Intl 且无需 macOS defaults', () => 
 test('release-integrity: macOS/core sourceDigest 严格排除 windows/，windowsSourceDigest 独立感知变更并忽略 target/', async (t) => {
   assert.equal(includeSourceDigestPath('windows/win-helper/src/main.rs'), false);
   assert.equal(includeSourceDigestPath('windows\\app\\src\\App.tsx'), false);
+  assert.equal(includeSourceDigestPath('tools/package-win.mjs'), false);
+  assert.equal(includeSourceDigestPath('tools/gravitybox-win.nsi'), false);
+  assert.equal(includeSourceDigestPath('tools/dev-win.mjs'), false);
+  assert.equal(includeSourceDigestPath('test/windows-platform.test.mjs'), false);
+  assert.equal(includeSourceDigestPath('.github/workflows/ci-windows.yml'), false);
+  assert.equal(includeSourceDigestPath('.github/workflows/package-windows.yml'), false);
   assert.equal(includeSourceDigestPath('src/main.ts'), true);
   assert.equal(includeWindowsSourceDigestPath('windows/win-helper/src/main.rs'), true);
   assert.equal(includeWindowsSourceDigestPath('windows/win-helper/target/release/gravitybox-win-helper.exe'), false);
@@ -854,4 +868,383 @@ test('release-integrity: macOS/core sourceDigest 严格排除 windows/，windows
   await writeFile(winSrcPath, 'fn main() { println!("v2"); }\n');
   assert.equal(await sourceDigest(fakeRoot), coreDigest1);
   assert.notEqual(await windowsSourceDigest(fakeRoot), winDigest1);
+});
+
+test('win32-helper: verifyPipeServer 原生 SID/PID 鉴权与 resolveClientIpcTarget 自动防抢注', async (t) => {
+  if (process.platform !== 'win32') return;
+  const helperPath = resolveWin32HelperPath();
+  if (!helperPath) {
+    t.skip('gravitybox-win-helper.exe 尚未构建');
+    return;
+  }
+
+  const stateDir = await mkdtemp(join(tmpdir(), 'gb-win-pipe-verify-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+
+  const session = await prepareWindowsIpcForListen(stateDir);
+  const srv = createServer((sock) => sock.end());
+  await new Promise((res, rej) => {
+    srv.once('error', rej);
+    srv.listen(session.pipeName, res);
+  });
+  t.after(() => new Promise((res) => srv.close(() => res())));
+  await writeIpcSession(stateDir, session);
+
+  // 1. 真实 Node Named Pipe 服务端：同用户 SID + PID + 精确文件名 / 精确完整路径匹配通过
+  const okRes = await verifyPipeServer(session.pipeName, {
+    expectedPid: process.pid,
+    expectedExe: 'node.exe',
+    helperPath,
+  });
+  assert.equal(okRes.verified, true);
+  assert.equal(okRes.sameUserSid, true);
+  assert.equal(okRes.serverPid, process.pid);
+  assert.equal(okRes.pipeName, session.pipeName);
+  assert.equal(okRes.reason, null);
+  assert.match(okRes.exePath.toLowerCase(), /node\.exe$/);
+
+  const okFullPathRes = await verifyPipeServer(session.pipeName, {
+    expectedPid: process.pid,
+    expectedExe: process.execPath,
+    helperPath,
+  });
+  assert.equal(okFullPathRes.verified, true);
+  assert.equal(okFullPathRes.reason, null);
+
+  // 1b. 子串匹配（非精确文件名）必须被拒绝，防止目录名/部分名称伪造
+  const substrExeRes = await verifyPipeServer(session.pipeName, {
+    expectedPid: process.pid,
+    expectedExe: 'node',
+    helperPath,
+  });
+  assert.equal(substrExeRes.verified, false);
+  assert.equal(substrExeRes.sameUserSid, true);
+  assert.equal(substrExeRes.reason, 'exe_mismatch');
+
+  // 2. 错 expectedPid 必须返回 pid_mismatch
+  const wrongPidRes = await verifyPipeServer(session.pipeName, {
+    expectedPid: process.pid + 1,
+    helperPath,
+  });
+  assert.equal(wrongPidRes.verified, false);
+  assert.equal(wrongPidRes.sameUserSid, true);
+  assert.equal(wrongPidRes.serverPid, process.pid);
+  assert.equal(wrongPidRes.reason, 'pid_mismatch');
+
+  // 3. 错 expectedExe 必须返回 exe_mismatch
+  const wrongExeRes = await verifyPipeServer(session.pipeName, {
+    expectedPid: process.pid,
+    expectedExe: 'definitely-not-this-binary.exe',
+    helperPath,
+  });
+  assert.equal(wrongExeRes.verified, false);
+  assert.equal(wrongExeRes.sameUserSid, true);
+  assert.equal(wrongExeRes.reason, 'exe_mismatch');
+
+  // 4. 不存在的管道返回 pipe_not_found
+  const missingPipe = `\\\\.\\pipe\\gravitybox-${computeWindowsStateHash16(stateDir)}-0000000000000000`;
+  const missingRes = await verifyPipeServer(missingPipe, { helperPath });
+  assert.equal(missingRes.verified, false);
+  assert.equal(missingRes.sameUserSid, false);
+  assert.equal(missingRes.serverPid, null);
+  assert.equal(missingRes.reason, 'pipe_not_found');
+
+  // 5. 非法管道前缀与路径穿越必须抛出 INVALID_ARGS
+  await assert.rejects(
+    () => verifyPipeServer('\\\\.\\pipe\\other-unrelated-pipe', { helperPath }),
+    (err) => err instanceof Win32HelperError && err.code === 'INVALID_ARGS',
+  );
+
+  // 6. resolveClientIpcTarget 默认自动调用 verifyPipeServer：合法会话通过
+  const targetOk = await resolveClientIpcTarget(stateDir, { helperPath });
+  assert.equal(targetOk?.endpoint, session.pipeName);
+  assert.equal(targetOk?.authToken, session.authToken);
+
+  // 7. 模拟抢注/PID 不匹配：ipc-session.json 中 PID 与实际管道服务端不符必须拒绝
+  await writeIpcSession(stateDir, { ...session, pid: process.pid + 1 });
+  await assert.rejects(() => resolveClientIpcTarget(stateDir, { helperPath }));
+
+  // 8. 过期 session 指向不存在管道时返回 null（交由上层提示服务未运行）
+  await writeIpcSession(stateDir, { ...session, pipeName: missingPipe });
+  assert.equal(await resolveClientIpcTarget(stateDir, { helperPath }), null);
+});
+
+test('win32-helper: appGracefulClose 默认零 TerminateProcess 返回 background_resident，显式 confirmBackgroundExit 才终止隔离无窗口进程', async (t) => {
+  if (process.platform !== 'win32') return;
+  const helperPath = resolveWin32HelperPath();
+  if (!helperPath) {
+    t.skip('gravitybox-win-helper.exe 尚未构建');
+    return;
+  }
+
+  const dummyDir = await mkdtemp(join(tmpdir(), 'gb-win-close-boundary-'));
+  const dummyExe = join(dummyDir, 'dummy_headless.exe');
+  const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+  await copyFile(join(systemRoot, 'System32', 'PING.EXE'), dummyExe);
+
+  const child = spawn(dummyExe, ['127.0.0.1', '-n', '30'], {
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      try { child.kill(); } catch {}
+      await new Promise((res) => child.once('exit', () => res())).catch(() => {});
+    }
+    await rm(dummyDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  assert.ok(child.pid && child.pid > 0, '隔离无窗口哑进程必须成功启动');
+
+  // 0. 危险 --prefix（盘符根 / SystemRoot / 相对路径 / 路径穿越 / UNC）及危险 trashMove 路径必须直接拒绝
+  for (const badPrefix of ['C:\\', 'C:\\Windows', 'C:\\Windows\\System32', 'relative\\app', 'C:\\Users\\demo\\..\\Windows', '\\\\?\\uNc\\server\\share\\app']) {
+    await assert.rejects(
+      () => appGracefulClose(badPrefix, { closeTimeoutMs: 500, helperPath }),
+      (err) => err instanceof Win32HelperError && err.code === 'INVALID_ARGS',
+      `危险 --prefix 必须被拒绝: ${badPrefix}`,
+    );
+  }
+  for (const badTrash of ['relative\\file.txt', 'C:\\Users\\demo\\..\\evil.txt', '\\\\?\\uNc\\server\\share\\file.txt']) {
+    await assert.rejects(
+      () => trashMove([badTrash], { helperPath }),
+      (err) => err instanceof Win32HelperError && err.code === 'INVALID_INPUT',
+      `危险 trashMove 输入必须被拒绝: ${badTrash}`,
+    );
+  }
+
+  // 1. 默认模式严禁强杀：必须返回 closed: false, reason: background_resident，且进程仍存活
+  const defaultRes = await appGracefulClose(dummyDir, {
+    closeTimeoutMs: 1200,
+    graceMs: 200,
+    helperPath,
+  });
+  assert.equal(defaultRes.closed, false);
+  assert.equal(defaultRes.reason, 'background_resident');
+  assert.ok(defaultRes.remainingPids.includes(child.pid));
+  assert.equal(child.exitCode, null, '默认模式下无窗口后台进程绝不可被静默强杀');
+
+  // 2. 显式传入 confirmBackgroundExit: true 后才安全终止隔离哑进程
+  const confirmedRes = await appGracefulClose(dummyDir, {
+    closeTimeoutMs: 1200,
+    graceMs: 200,
+    confirmBackgroundExit: true,
+    helperPath,
+  });
+  assert.equal(confirmedRes.closed, true);
+  assert.equal(confirmedRes.reason, 'background_terminated');
+  assert.deepEqual(confirmedRes.remainingPids, []);
+  await new Promise((res) => {
+    if (child.exitCode !== null || child.signalCode !== null) return res();
+    child.once('exit', () => res());
+  });
+  assert.ok(child.exitCode !== null || child.signalCode !== null);
+});
+
+test('Stage 2 Windows 后端修复回归: 凭据容量裁剪、IPC 缺助手阻断、EXDEV/unlink 重试与进程分类收敛', async (t) => {
+  // 1. Windows Credential Manager 2560B 分级裁剪
+  const baseToken = {
+    access_token: 'short-access-token',
+    refresh_token: '1//valid-refresh-token',
+    expiry_timestamp: 1900000000,
+    expires_in: 3600,
+  };
+  const largeIdAccount = {
+    email: 'trim@example.invalid',
+    token: { ...baseToken, id_token: 'i'.repeat(2400) },
+  };
+  const trimmedIdPayload = encodeKeychainOauthPayload(largeIdAccount, 'raw');
+  assert.ok(Buffer.byteLength(trimmedIdPayload, 'utf8') <= 2560);
+  const parsedIdTrim = JSON.parse(trimmedIdPayload);
+  assert.equal(parsedIdTrim.token.id_token, undefined);
+  assert.equal(parsedIdTrim.token.access_token, 'short-access-token');
+  assert.equal(parsedIdTrim.token.refresh_token, '1//valid-refresh-token');
+
+  const largeAccessAccount = {
+    email: 'trim-access@example.invalid',
+    token: { ...baseToken, access_token: 'a'.repeat(2500), id_token: 'i'.repeat(600) },
+  };
+  const trimmedAccessPayload = encodeKeychainOauthPayload(largeAccessAccount, 'raw');
+  assert.ok(Buffer.byteLength(trimmedAccessPayload, 'utf8') <= 2560);
+  const parsedAccessTrim = JSON.parse(trimmedAccessPayload);
+  assert.equal(parsedAccessTrim.token.access_token, '');
+  assert.equal(parsedAccessTrim.token.expiry_timestamp, 0);
+  assert.equal(parsedAccessTrim.token.refresh_token, '1//valid-refresh-token');
+
+  const oversizedRefreshAccount = {
+    email: 'too-big@example.invalid',
+    token: { ...baseToken, refresh_token: 'r'.repeat(2600) },
+  };
+  assert.throws(() => encodeKeychainOauthPayload(oversizedRefreshAccount, 'raw'), /2560|容量|limit/i);
+
+  // 2. resolveClientIpcTarget 在缺少 win-helper 时必须 fail-closed，验证时透传 expectedExe='node.exe'
+  const ipcDir = await mkdtemp(join(tmpdir(), 'gb-win-ipc-failclosed-'));
+  t.after(() => rm(ipcDir, { recursive: true, force: true }));
+  const sess = await createWindowsIpcSession(ipcDir, process.pid);
+  await writeIpcSession(ipcDir, sess);
+  await assert.rejects(
+    () => resolveClientIpcTarget(ipcDir, { platform: 'win32', resolveHelperPathImpl: () => null }),
+    /不匹配|mismatch/i,
+  );
+  let capturedVerifyOpts = null;
+  const okTarget = await resolveClientIpcTarget(ipcDir, {
+    platform: 'win32',
+    resolveHelperPathImpl: () => 'C:\\GravityBox\\resources\\bin\\gravitybox-win-helper.exe',
+    verifyPipeServerImpl: async (pipeName, opts) => {
+      capturedVerifyOpts = opts;
+      return {
+        verified: true,
+        pipeName,
+        serverPid: sess.pid,
+        sameUserSid: true,
+        exePath: 'C:\\GravityBox\\resources\\node\\node.exe',
+        reason: null,
+      };
+    },
+  });
+  assert.equal(okTarget?.endpoint, sess.pipeName);
+  assert.equal(capturedVerifyOpts?.expectedPid, sess.pid);
+  assert.equal(capturedVerifyOpts?.expectedExe, 'node.exe');
+
+  // 3. atomicRenameWithRetry allowCrossDevice EXDEV 回退与 unlinkWithRetry 重试
+  const fsDir = await mkdtemp(join(tmpdir(), 'gb-win-fs-retry-'));
+  t.after(() => rm(fsDir, { recursive: true, force: true }));
+  const srcFolder = join(fsDir, 'src-folder');
+  const dstFolder = join(fsDir, 'dst-folder');
+  await mkdir(srcFolder, { recursive: true });
+  await writeFile(join(srcFolder, 'data.txt'), 'cross-vol-ok', 'utf8');
+  await atomicRenameWithRetry(srcFolder, dstFolder, {
+    platform: 'win32',
+    allowCrossDevice: true,
+    renameFn: () => {
+      const err = new Error('cross-device link');
+      err.code = 'EXDEV';
+      throw err;
+    },
+  });
+  assert.equal(await readFile(join(dstFolder, 'data.txt'), 'utf8'), 'cross-vol-ok');
+  await assert.rejects(() => access(srcFolder));
+
+  let unlinkAttempts = 0;
+  await unlinkWithRetry('virtual-file.tmp', {
+    platform: 'win32',
+    baseDelayMs: 5,
+    maxRetries: 4,
+    unlinkFn: async () => {
+      unlinkAttempts += 1;
+      if (unlinkAttempts === 1) {
+        const err = new Error('busy');
+        err.code = 'EBUSY';
+        throw err;
+      }
+      if (unlinkAttempts === 2) {
+        const err = new Error('vanished after first try');
+        err.code = 'ENOENT';
+        throw err;
+      }
+    },
+  });
+  assert.equal(unlinkAttempts, 2);
+
+  // 4. hasAntigravityCommand 与 classifyWindowsProcesses：排除 crashpad 与参数误报，区分 detached daemon
+  const winApp = 'C:\\Users\\demo\\AppData\\Local\\Programs\\Antigravity';
+  assert.equal(
+    hasAntigravityCommand(
+      [
+        `"${winApp}\\chrome_crashpad_handler.exe" --type=crashpad-handler`,
+        `"C:\\Windows\\System32\\cmd.exe" /c echo "${winApp}\\Antigravity.exe"`,
+      ],
+      winApp,
+    ),
+    false,
+  );
+  assert.equal(
+    hasAntigravityCommand(
+      [`${winApp}\\Antigravity.exe --type=gpu-process`],
+      winApp,
+    ),
+    true,
+  );
+
+  const classifiedDetachedOnly = classifyWindowsProcesses(
+    [
+      {
+        pid: 100,
+        ppid: 1,
+        exePath: `${winApp}\\chrome_crashpad_handler.exe`,
+        cmdLine: '--type=crashpad-handler',
+      },
+      {
+        pid: 200,
+        ppid: 99999,
+        exePath: `${winApp}\\resources\\bin\\language_server.exe`,
+        cmdLine: 'language_server.exe --app_data_dir antigravity',
+      },
+    ],
+    winApp,
+    ['C:\\Users\\demo\\AppData\\Local\\Programs'],
+  );
+  assert.equal(classifiedDetachedOnly.uiRunning, false);
+  assert.equal(classifiedDetachedOnly.insidersRunning, false);
+  assert.deepEqual(classifiedDetachedOnly.detachedDaemonKinds, ['language_server']);
+  assert.equal(classifiedDetachedOnly.detachedDaemons.length, 1);
+  assert.equal(classifiedDetachedOnly.detachedDaemons[0].pid, 200);
+
+  const classifiedWithUiAndInsiders = classifyWindowsProcesses(
+    [
+      {
+        pid: 300,
+        ppid: 1,
+        exePath: `${winApp}\\Antigravity.exe`,
+        cmdLine: `"${winApp}\\Antigravity.exe"`,
+        role: 'ui',
+      },
+      {
+        pid: 301,
+        ppid: 300,
+        exePath: `${winApp}\\resources\\bin\\language_server.exe`,
+        cmdLine: `"${winApp}\\resources\\bin\\language_server.exe"`,
+      },
+      {
+        pid: 400,
+        ppid: 1,
+        exePath: 'C:\\Users\\demo\\AppData\\Local\\Programs\\Antigravity - Insiders\\Antigravity.exe',
+        cmdLine: '"C:\\Users\\demo\\AppData\\Local\\Programs\\Antigravity - Insiders\\Antigravity.exe"',
+      },
+    ],
+    winApp,
+    ['C:\\Users\\demo\\AppData\\Local\\Programs'],
+  );
+  assert.equal(classifiedWithUiAndInsiders.uiRunning, true);
+  assert.equal(classifiedWithUiAndInsiders.insidersRunning, true);
+  assert.equal(classifiedWithUiAndInsiders.detachedDaemons.length, 0);
+
+  // 5. hasActiveAntigravitySshTunnel 支持 win-helper processTree 直走（免拉起 PowerShell）
+  const sshRes = await hasActiveAntigravitySshTunnel(500, {
+    processTreeImpl: async () => [
+      { pid: 500, ppid: 1, exeName: 'Antigravity.exe', exePath: `${winApp}\\Antigravity.exe`, cmdLine: `"${winApp}\\Antigravity.exe"` },
+      { pid: 501, ppid: 500, exeName: 'cmd.exe', exePath: 'C:\\Windows\\System32\\cmd.exe', cmdLine: 'cmd.exe /c remote' },
+      { pid: 502, ppid: 501, exeName: 'ssh.exe', exePath: 'C:\\Windows\\System32\\OpenSSH\\ssh.exe', cmdLine: 'ssh.exe -N -D 10808 user@remote-host' },
+    ],
+  });
+  assert.equal(sshRes.found, true);
+  assert.deepEqual(sshRes.tunnels, [{ pid: 502, socksPort: 10808 }]);
+
+  // 6. NSIS 安装脚本、package-win 元数据、外链白名单与托盘事件契约静态回归门禁
+  const [nsiText, pkgWinText, tauriTsText, commandsRsText, trayRsText] = await Promise.all([
+    readFile(new URL('../tools/gravitybox-win.nsi', import.meta.url), 'utf8'),
+    readFile(new URL('../tools/package-win.mjs', import.meta.url), 'utf8'),
+    readFile(new URL('../windows/app/src/lib/tauri.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../windows/app/src-tauri/src/commands.rs', import.meta.url), 'utf8'),
+    readFile(new URL('../windows/app/src-tauri/src/tray.rs', import.meta.url), 'utf8'),
+  ]);
+
+  assert.match(nsiText, /FileOpen \$0 "\$INSTDIR\\\$\{APP_EXE\}" a/, 'NSIS 必须检查主程序文件占用锁');
+  assert.match(nsiText, /FileExists\} "\$INSTDIR\\resources\\core\\dist\\main\.js"/, 'NSIS 递归删除 resources 前必须核验双哨兵文件');
+  assert.match(pkgWinText, /signing:\s*'unsigned'/, 'package-win build-info 必须显式标记 signing 为 unsigned');
+  assert.equal(trayRsText.includes('ui-config-changed'), false, 'tray.rs 严禁以动作包覆盖 UiConfig ui-config-changed');
+
+  for (const host of ['github.com', 'raw.githubusercontent.com', 'cdn.jsdelivr.net', 'accounts.google.com', 'cloud.google.com', 'platform.claude.com', 'developers.openai.com']) {
+    assert.ok(tauriTsText.includes(`'${host}'`), `lib/tauri.ts ALLOWED_EXTERNAL_HOSTS 缺少 ${host}`);
+    assert.ok(commandsRsText.includes(`"${host}"`), `commands.rs ALLOWED_EXTERNAL_HOSTS 缺少 ${host}`);
+  }
 });

@@ -22,9 +22,9 @@ const CHROME_ARCHIVES = {
   },
 };
 const root = fileURLToPath(new URL('../', import.meta.url));
-const archDir = isSupportedMacArch() ? chromeArchDir() : null;
+const archDir = process.platform === 'darwin' && isSupportedMacArch() ? chromeArchDir() : null;
 const destination = archDir ? join(root, '.cache', `test-chrome-${TEST_CHROME_VERSION}-${archDir}`) : null;
-const pinnedBinary = archDir ? join(destination, 'chrome-headless-shell') : null;
+const pinnedBinary = destination ? join(destination, 'chrome-headless-shell') : '';
 /** 未设置 CHROME_BIN 时的默认固定测试浏览器；设置了 override 时由调用方直接使用 CHROME_BIN。 */
 export const TEST_CHROME_PATH = process.env.CHROME_BIN || pinnedBinary;
 

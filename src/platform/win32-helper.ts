@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { defaultAntigravityInstallDirs, isPathUnder, normalizePathForCompare } from './paths.js';
 
 export interface Win32HelperOptions {
   helperPath?: string;
@@ -24,14 +25,42 @@ export interface Win32PortOwner {
   port: number;
 }
 
+export type Win32AppProcessRole = 'ui' | 'detached_daemon' | 'crashpad' | 'other';
+
 export interface Win32AppProcess {
   pid: number;
+  ppid?: number;
+  exePath: string;
+  cmdLine: string;
+  role?: Win32AppProcessRole;
+}
+
+export interface Win32ProcessTreeEntry {
+  pid: number;
+  ppid: number;
+  exeName: string;
   exePath: string;
   cmdLine: string;
 }
 
+export type WindowsDetachedDaemonKind = 'language_server' | 'sidecar';
+
+export interface WindowsProcessClassification {
+  uiRunning: boolean;
+  insidersRunning: boolean;
+  detachedDaemons: Array<{
+    pid: number;
+    ppid: number;
+    kind: WindowsDetachedDaemonKind;
+    exePath: string;
+    cmdLine: string;
+  }>;
+  detachedDaemonKinds: WindowsDetachedDaemonKind[];
+}
+
 export type Win32GracefulCloseReason =
   | 'clean_exit'
+  | 'background_resident'
   | 'background_terminated'
   | 'visible_window_open'
   | 'timeout'
@@ -45,8 +74,35 @@ export interface Win32GracefulCloseResult {
 
 export interface Win32GracefulCloseOptions extends Win32HelperOptions {
   closeTimeoutMs?: number;
-  terminateBackground?: boolean;
+  /**
+   * Explicit user-confirmed opt-in to terminate headless/background processes
+   * remaining after all visible windows have closed (`--confirm-background-exit`).
+   * Default `false`: strictly graceful WM_CLOSE only, zero TerminateProcess.
+   */
+  confirmBackgroundExit?: boolean;
   graceMs?: number;
+}
+
+export type Win32PipeVerifyReason =
+  | 'pid_mismatch'
+  | 'sid_mismatch'
+  | 'integrity_mismatch'
+  | 'exe_mismatch'
+  | 'pipe_not_found'
+  | (string & {});
+
+export interface Win32VerifyPipeServerOptions extends Win32HelperOptions {
+  expectedPid?: number;
+  expectedExe?: string;
+}
+
+export interface Win32VerifyPipeServerResult {
+  verified: boolean;
+  pipeName: string;
+  serverPid: number | null;
+  sameUserSid: boolean;
+  exePath: string;
+  reason: Win32PipeVerifyReason | null;
 }
 
 export interface Win32PeVersion {
@@ -408,29 +464,211 @@ export async function appProcesses(
   if (!Array.isArray(res.processes)) return [];
   return res.processes
     .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+    .map((item): Win32AppProcess => {
+      const ppidRaw = Number(item.ppid);
+      const roleRaw = typeof item.role === 'string' ? item.role : undefined;
+      const role: Win32AppProcessRole | undefined =
+        roleRaw === 'ui' || roleRaw === 'detached_daemon' || roleRaw === 'crashpad' || roleRaw === 'other'
+          ? roleRaw
+          : undefined;
+      return {
+        pid: Number(item.pid) || 0,
+        ...(Number.isInteger(ppidRaw) && ppidRaw >= 0 ? { ppid: ppidRaw } : {}),
+        exePath: typeof item.exePath === 'string' ? item.exePath : '',
+        cmdLine: typeof item.cmdLine === 'string' ? item.cmdLine : '',
+        ...(role ? { role } : {}),
+      };
+    })
+    .filter((item) => item.pid > 0);
+}
+
+/**
+ * Enumerate active user processes (pid, ppid, exeName, exePath, cmdLine) via win-helper.
+ */
+export async function processTree(
+  options?: Win32HelperOptions,
+): Promise<Win32ProcessTreeEntry[]> {
+  const res = await invokeWin32Helper<{ ok: true; processes?: unknown }>(['process-tree'], options);
+  if (!Array.isArray(res.processes)) return [];
+  return res.processes
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
     .map((item) => ({
       pid: Number(item.pid) || 0,
+      ppid: Number.isInteger(Number(item.ppid)) && Number(item.ppid) >= 0 ? Number(item.ppid) : 0,
+      exeName: typeof item.exeName === 'string' ? item.exeName : '',
       exePath: typeof item.exePath === 'string' ? item.exePath : '',
       cmdLine: typeof item.cmdLine === 'string' ? item.cmdLine : '',
     }))
     .filter((item) => item.pid > 0);
 }
 
+function windowsExeBasenameLower(exePath: string, cmdLine: string): string {
+  const norm = normalizePathForCompare(exePath || '', 'win32');
+  if (norm) {
+    const slash = norm.lastIndexOf('/');
+    return slash >= 0 ? norm.slice(slash + 1) : norm;
+  }
+  const trimmed = cmdLine.trim();
+  if (!trimmed) return '';
+  const firstToken = trimmed.startsWith('"')
+    ? trimmed.slice(1, Math.max(1, trimmed.indexOf('"', 1)))
+    : (trimmed.split(/\s+/)[0] ?? '');
+  const normTok = normalizePathForCompare(firstToken, 'win32');
+  const slash = normTok.lastIndexOf('/');
+  return slash >= 0 ? normTok.slice(slash + 1) : normTok;
+}
+
+/**
+ * Classify Windows Antigravity processes using the same isolation contract as macOS:
+ * - Excludes `chrome_crashpad_handler.exe`
+ * - Flags any Insiders executable under Insiders roots
+ * - Distinguishes live UI / browser helpers from detached background daemons (`language_server` / `sidecar`)
+ */
+export function classifyWindowsProcesses(
+  processes: Win32AppProcess[],
+  stableAppPath: string,
+  installDirs: string[] = defaultAntigravityInstallDirs(),
+): WindowsProcessClassification {
+  const cleanDir = (dir: string) => dir.replace(/[\\/]+$/, '');
+  const stableRoots = Array.from(new Set([
+    stableAppPath,
+    ...installDirs.map((dir) => `${cleanDir(dir)}\\Antigravity`),
+  ].filter(Boolean)));
+  const insidersRoots = Array.from(new Set(
+    installDirs.flatMap((dir) => {
+      const base = cleanDir(dir);
+      return [
+        `${base}\\Antigravity - Insiders`,
+        `${base}\\Antigravity Insiders`,
+        `${base}\\Antigravity-Insiders`,
+      ];
+    }),
+  ));
+
+  const byPid = new Map<number, Win32AppProcess>();
+  const uiRootPids = new Set<number>();
+  for (const proc of processes) {
+    byPid.set(proc.pid, proc);
+    const exeName = windowsExeBasenameLower(proc.exePath, proc.cmdLine);
+    if (proc.role === 'crashpad' || exeName === 'chrome_crashpad_handler.exe') continue;
+    const normExe = normalizePathForCompare(proc.exePath, 'win32');
+    const isInsiders = insidersRoots.some((root) => isPathUnder(proc.exePath, root, 'win32'))
+      || /\/antigravity[- ]insiders\//.test(normExe);
+    if (isInsiders) continue;
+    if (proc.role === 'ui' || (proc.role === undefined && exeName === 'antigravity.exe')) {
+      uiRootPids.add(proc.pid);
+    }
+  }
+
+  const hasUiAncestor = (proc: Win32AppProcess): boolean => {
+    if (typeof proc.ppid !== 'number' || proc.ppid <= 0) return false;
+    const visited = new Set<number>([proc.pid]);
+    let cur = proc.ppid;
+    while (cur > 0 && !visited.has(cur)) {
+      if (uiRootPids.has(cur)) return true;
+      visited.add(cur);
+      const parent = byPid.get(cur);
+      if (!parent || typeof parent.ppid !== 'number' || parent.ppid <= 0) break;
+      cur = parent.ppid;
+    }
+    return false;
+  };
+
+  let uiRunning = false;
+  let insidersRunning = false;
+  const detachedDaemons: WindowsProcessClassification['detachedDaemons'] = [];
+
+  for (const proc of processes) {
+    const exeName = windowsExeBasenameLower(proc.exePath, proc.cmdLine);
+    if (
+      proc.role === 'crashpad' ||
+      exeName === 'chrome_crashpad_handler.exe' ||
+      proc.cmdLine.toLowerCase().includes('chrome_crashpad_handler')
+    ) {
+      continue;
+    }
+    const normExe = normalizePathForCompare(proc.exePath, 'win32');
+    const isInsiders = insidersRoots.some((root) => isPathUnder(proc.exePath, root, 'win32'))
+      || /\/antigravity[- ]insiders\//.test(normExe);
+    if (isInsiders) {
+      insidersRunning = true;
+      continue;
+    }
+    const matchesStable = stableRoots.some((root) => isPathUnder(proc.exePath, root, 'win32'));
+    if (!matchesStable && proc.role === undefined) {
+      continue;
+    }
+
+    if (proc.role === 'detached_daemon') {
+      const kind: WindowsDetachedDaemonKind = exeName.includes('language_server') ? 'language_server' : 'sidecar';
+      detachedDaemons.push({
+        pid: proc.pid,
+        ppid: proc.ppid ?? 0,
+        kind,
+        exePath: proc.exePath,
+        cmdLine: proc.cmdLine,
+      });
+      continue;
+    }
+
+    if (proc.role === 'ui') {
+      uiRunning = true;
+      continue;
+    }
+
+    const isLsExe = exeName.startsWith('language_server');
+    const isSidecarCmd =
+      proc.cmdLine.includes('sidecar_sdk') && !/--type=(renderer|gpu-process|utility|zygote|broker|ppapi)\b/i.test(proc.cmdLine);
+    if (proc.role === undefined && (isLsExe || isSidecarCmd)) {
+      const attachedToUi = typeof proc.ppid === 'number' && proc.ppid > 0
+        ? hasUiAncestor(proc)
+        : uiRootPids.size > 0;
+      if (!attachedToUi) {
+        detachedDaemons.push({
+          pid: proc.pid,
+          ppid: proc.ppid ?? 0,
+          kind: isLsExe ? 'language_server' : 'sidecar',
+          exePath: proc.exePath,
+          cmdLine: proc.cmdLine,
+        });
+        continue;
+      }
+    }
+
+    uiRunning = true;
+  }
+
+  const presentKinds = new Set(detachedDaemons.map((d) => d.kind));
+  const detachedDaemonKinds: WindowsDetachedDaemonKind[] = (['language_server', 'sidecar'] as const).filter((k) =>
+    presentKinds.has(k),
+  );
+
+  return {
+    uiRunning,
+    insidersRunning,
+    detachedDaemons,
+    detachedDaemonKinds,
+  };
+}
+
 /**
  * Gracefully close all processes under `prefix` using progressive staged shutdown:
  * 1. Send WM_CLOSE to visible top-level windows (never force-kills while any visible window remains open).
  * 2. Once no visible windows remain, send WM_CLOSE to hidden/tray top-level windows and wait `graceMs`.
- * 3. Only when `terminateBackground` is explicitly enabled and 0 visible windows are re-confirmed,
- *    terminate remaining headless/background processes under `prefix`.
+ *    In default mode (`confirmBackgroundExit !== true`), zero `TerminateProcess` calls are ever made;
+ *    any remaining headless/tray processes return `{ closed: false, reason: 'background_resident' }`.
+ * 3. Only when `confirmBackgroundExit` is explicitly `true` and 0 visible windows are re-confirmed,
+ *    terminate remaining headless/background processes under `prefix` (same user SID only).
  */
 export async function appGracefulClose(
   prefix: string,
   options?: Win32GracefulCloseOptions,
 ): Promise<Win32GracefulCloseResult> {
   const closeTimeoutMs = Math.max(200, Math.floor(options?.closeTimeoutMs ?? 8_000));
+  const confirmBackgroundExit = options?.confirmBackgroundExit === true;
   const args = ['app-graceful-close', '--prefix', prefix, '--timeout-ms', String(closeTimeoutMs)];
-  if (options?.terminateBackground === true) {
-    args.push('--terminate-background');
+  if (confirmBackgroundExit) {
+    args.push('--confirm-background-exit');
   }
   const graceMs =
     typeof options?.graceMs === 'number' && Number.isFinite(options.graceMs)
@@ -439,7 +677,7 @@ export async function appGracefulClose(
   if (graceMs !== undefined) {
     args.push('--grace-ms', String(graceMs));
   }
-  const stageOverheadMs = (options?.terminateBackground === true ? 8_000 : 4_000) + (graceMs ?? 0);
+  const stageOverheadMs = (confirmBackgroundExit ? 8_000 : 4_000) + (graceMs ?? 0);
   const processTimeoutMs = Math.max(options?.timeoutMs ?? 0, closeTimeoutMs + stageOverheadMs);
   const res = await invokeWin32Helper<{
     ok: true;
@@ -460,6 +698,58 @@ export async function appGracefulClose(
     closed: res.closed === true,
     remainingPids,
     ...(reason !== undefined ? { reason } : {}),
+  };
+}
+
+/**
+ * Verify the server identity of a GravityBox Named Pipe (`\\.\pipe\gravitybox-...`) via
+ * `CreateFileW(SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION)` + `GetNamedPipeServerProcessId`
+ * + `OpenProcessToken` + `EqualSid`.
+ */
+export async function verifyPipeServer(
+  pipeName: string,
+  options?: Win32VerifyPipeServerOptions,
+): Promise<Win32VerifyPipeServerResult> {
+  if (typeof pipeName !== 'string' || !pipeName.trim()) {
+    throw new Win32HelperError('INVALID_ARGS', 'pipeName must be a non-empty string');
+  }
+  const args = ['verify-pipe-server', '--pipe', pipeName];
+  if (options?.expectedPid !== undefined) {
+    if (!Number.isInteger(options.expectedPid) || options.expectedPid <= 0) {
+      throw new Win32HelperError('INVALID_ARGS', `Invalid expectedPid: ${String(options.expectedPid)}`);
+    }
+    args.push('--expected-pid', String(options.expectedPid));
+  }
+  if (options?.expectedExe !== undefined) {
+    if (typeof options.expectedExe !== 'string' || !options.expectedExe.trim()) {
+      throw new Win32HelperError('INVALID_ARGS', 'expectedExe must be a non-empty string');
+    }
+    args.push('--expected-exe', options.expectedExe);
+  }
+  const res = await invokeWin32Helper<{
+    ok: true;
+    verified?: unknown;
+    pipeName?: unknown;
+    serverPid?: unknown;
+    sameUserSid?: unknown;
+    exePath?: unknown;
+    reason?: unknown;
+  }>(args, options);
+  const serverPid =
+    typeof res.serverPid === 'number' && Number.isInteger(res.serverPid) && res.serverPid > 0
+      ? res.serverPid
+      : null;
+  const reason =
+    typeof res.reason === 'string' && res.reason.trim().length > 0
+      ? (res.reason.trim() as Win32PipeVerifyReason)
+      : null;
+  return {
+    verified: res.verified === true,
+    pipeName: typeof res.pipeName === 'string' ? res.pipeName : pipeName,
+    serverPid,
+    sameUserSid: res.sameUserSid === true,
+    exePath: typeof res.exePath === 'string' ? res.exePath : '',
+    reason,
   };
 }
 

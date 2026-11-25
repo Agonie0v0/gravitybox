@@ -31,8 +31,8 @@ export async function nativeBuildArgs(root, output, { uiTest = false, typecheck 
 }
 
 async function hashCommonSwiftInputs(hash, root) {
-  // 架构必须进入指纹：arm64 与 x86_64 的编译产物不可互换，缓存不能跨架构复用。
-  hash.update(`arch:${process.arch}\n`);
+  // 编译目标必须进入指纹，避免跨架构或部署目标复用缓存。
+  hash.update(`target:${nativeTargetTriple()}\n`);
   try {
     const { stdout } = await run('/usr/bin/swiftc', ['--version'], { cwd: root });
     hash.update(`swiftc:${stdout.trim()}\n`);
