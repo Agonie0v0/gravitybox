@@ -1,7 +1,7 @@
 # GravityBox 工程架构总览
 
 ## 核心定位
-GravityBox (`1.2.1`) 是面向 macOS 14+ (Apple Silicon `arm64`) 的轻量级 Google Antigravity 正式版伴侣工具箱，提供**原生 AppKit / Node 后端 / HUD 全链路中英双语界面（跟随系统 / 简体中文 / English）**、零侵入式 IDE 双语热适配、输入框实时会话遥测 HUD（含 `2.34.0+` BTW 侧边提问分栏）、SSH 远程窗口零外部 `ssh` 适配、双周期/多池配额监控、多账号四阶段原子切换与同源 `agy` CLI 凭据同步、本机 + SSH 统一只读 SQLite 用量与时序计费核算、HTTP/HTTPS 网络代理管理及非破坏性缓存维护；并从 `1.2.1` 起通过 `src/platform/` 与 `windows/` 同仓隔离提供社区共建的 Windows x64 支持（`#27`、`#30`、`#32`，致谢 `@Agonie0v0` 贡献实现并完成真机验收，由独立 `package-windows.yml` 产出预构建自包含 `.zip` 与 `-setup.exe`，随 `v1.2.1` 通过 GitHub Releases 同步分发，终端用户无需自行构建）。
+GravityBox (`1.2.2`) 是面向 macOS 14+ (Apple Silicon `arm64`) 的轻量级 Google Antigravity 正式版伴侣工具箱，提供**原生 AppKit / Node 后端 / HUD 全链路中英双语界面（跟随系统 / 简体中文 / English）**、零侵入式 IDE 双语热适配、输入框实时会话遥测 HUD（含 `2.34.0+` BTW 侧边提问分栏）、SSH 远程窗口零外部 `ssh` 适配、双周期/多池配额监控、多账号四阶段原子切换与同源 `agy` CLI 凭据同步、本机 + SSH 统一只读 SQLite 用量与时序计费核算、HTTP/HTTPS 网络代理管理及非破坏性缓存维护；并从 `1.2.1` 起通过 `src/platform/` 与 `windows/` 同仓隔离提供社区共建的 Windows x64 支持（`#27`、`#30`、`#32`，致谢 `@Agonie0v0` 贡献实现并完成真机验收，由独立 `package-windows.yml` 产出预构建自包含 `.zip` 与 `-setup.exe`，随 `v1.2.1` 通过 GitHub Releases 同步分发，终端用户无需自行构建）。
 
 macOS 官方预构建包目前面向 Apple Silicon（`arm64`）；Intel（`x86_64`）可从源码在本机完成验证与打包，不进入官方发布工作流。
 

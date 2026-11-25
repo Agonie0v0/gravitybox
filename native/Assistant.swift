@@ -2044,13 +2044,15 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     }
     func showMessage(_ message: String, error: Bool = false) {
         guard error, !message.isEmpty else { lastOperationError = nil; pageHost.setAccessibilityHelp(nil); return }
-        lastOperationError = message
-        pageHost.setAccessibilityHelp(message)
+        let knownEmails = cachedAccounts.compactMap { $0["email"] as? String } + [statusValue.liveAccountEmail]
+        let safeMessage = AccountIdentity.maskEmailsInText(message, knownEmails: knownEmails, masked: privacyMaskAccounts)
+        lastOperationError = safeMessage
+        pageHost.setAccessibilityHelp(safeMessage)
         #if !NATIVE_UI_TEST
         guard presentedError == nil else { return }
-        presentedError = message
+        presentedError = safeMessage
         let alert = NSAlert(); alert.alertStyle = .warning
-        alert.messageText = L10n.t("assistant.action_incomplete", fallback: "操作未完成"); alert.informativeText = message
+        alert.messageText = L10n.t("assistant.action_incomplete", fallback: "操作未完成"); alert.informativeText = safeMessage
         alert.addButton(withTitle: L10n.t("common.ok", fallback: "好"))
         presentSheetAlert(alert) { [weak self] _ in self?.presentedError = nil }
         #endif

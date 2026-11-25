@@ -23,6 +23,12 @@ class DesignButton: NSButton {
             needsDisplay = true
         }
     }
+    var hidesQuietHoverBackground: Bool = false {
+        didSet {
+            guard oldValue != hidesQuietHoverBackground else { return }
+            needsDisplay = true
+        }
+    }
 
     var isActivitySpinning: Bool { false }
 
@@ -102,6 +108,17 @@ class DesignButton: NSButton {
     override func mouseEntered(with event: NSEvent) { if isEnabled { hovered = true } }
     override func mouseExited(with event: NSEvent) { hovered = false }
 
+    func resetInteractionState() {
+        hovered = false
+        hoverMotion.cancel()
+        pressMotion.cancel()
+        lastHighlighted = false
+        let changed = hoverProgress != 0 || pressProgress != 0
+        hoverProgress = 0
+        pressProgress = 0
+        if changed { needsDisplay = true }
+    }
+
     override var intrinsicContentSize: NSSize {
         let isSmall = controlSize == .small
         let btnHeight: CGFloat = isSmall ? 24 : 28
@@ -165,13 +182,15 @@ class DesignButton: NSButton {
             }
             Design.drawSpecularBevel(in: rect, cornerRadius: cornerR, isDark: true)
         } else if isQuietAccessory {
-            let activeHighlight = max(hp, pp)
-            if isEnabled && activeHighlight > 0.01 {
-                let fill = isDark
-                    ? NSColor.white.withAlphaComponent(0.10 * hp + 0.06 * pp)
-                    : NSColor.black.withAlphaComponent(0.055 * hp + 0.04 * pp)
-                fill.setFill()
-                NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7).fill()
+            if !hidesQuietHoverBackground {
+                let activeHighlight = max(hp, pp)
+                if isEnabled && activeHighlight > 0.01 {
+                    let fill = isDark
+                        ? NSColor.white.withAlphaComponent(0.10 * hp + 0.06 * pp)
+                        : NSColor.black.withAlphaComponent(0.055 * hp + 0.04 * pp)
+                    fill.setFill()
+                    NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7).fill()
+                }
             }
         } else if inPopover {
             // Pure translucent glass overlay that blends with the popover's vibrant wallpaper tint in both Light and Dark mode.
@@ -249,11 +268,23 @@ class DesignButton: NSButton {
         }
 
         let fgAlpha: CGFloat = primary ? ((isEnabled || isActivitySpinning) ? 1.0 : 0.88) : (isEnabled ? 1.0 : (isActivitySpinning ? 0.86 : 0.42))
-        let baseFg: NSColor = primary
-            ? .white
-            : (isQuietAccessory
-                ? (contentTintColor ?? (hp > 0.25 ? Design.primary : Design.secondary))
-                : Design.primary)
+        let baseFg: NSColor
+        if primary {
+            baseFg = .white
+        } else if isQuietAccessory {
+            if let tint = contentTintColor {
+                baseFg = tint
+            } else if hidesQuietHoverBackground {
+                let hoverMix = min(1.0, max(hp, pp * 1.15))
+                baseFg = isDark
+                    ? NSColor(white: 0.58 + 0.18 * hoverMix, alpha: 0.86 + 0.09 * hoverMix)
+                    : NSColor(white: 0.48 - 0.18 * hoverMix, alpha: 0.88 + 0.08 * hoverMix)
+            } else {
+                baseFg = hp > 0.25 ? Design.primary : Design.secondary
+            }
+        } else {
+            baseFg = Design.primary
+        }
         let fgColor = baseFg.withAlphaComponent(fgAlpha)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font ?? NSFont.systemFont(ofSize: 12, weight: .medium),

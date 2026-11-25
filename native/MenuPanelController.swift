@@ -670,6 +670,8 @@ final class MenuPanelController: NSViewController {
     func panelWillOpen() {
         let _ = self.view
         trendChart.resetHoverState()
+        quotaPrivacyEyeButton.resetInteractionState()
+        accountsPrivacyEyeButton.resetInteractionState()
         showHistoricalQuotaFallbackNotice = false
         let cfgTab = max(0, min(2, app.configuration?.value.menuSelectedTab ?? selectedTab))
         let cfgPeriod = max(0, min(3, app.configuration?.value.menuUsagePeriod ?? selectedPeriod))
@@ -695,6 +697,8 @@ final class MenuPanelController: NSViewController {
     func panelDidClose() {
         showHistoricalQuotaFallbackNotice = false
         trendChart.stopAnimation()
+        quotaPrivacyEyeButton.resetInteractionState()
+        accountsPrivacyEyeButton.resetInteractionState()
     }
 
     func selectTab(_ index: Int, persist: Bool = true) {
@@ -703,6 +707,8 @@ final class MenuPanelController: NSViewController {
         selectedTab = clamped
         tabSelector.setSelected(clamped)
         trendChart.resetHoverState()
+        quotaPrivacyEyeButton.resetInteractionState()
+        accountsPrivacyEyeButton.resetInteractionState()
         if persist, app.configuration?.value.menuSelectedTab != clamped {
             app.configuration?.value.menuSelectedTab = clamped
             app.scheduleConfigurationSave()

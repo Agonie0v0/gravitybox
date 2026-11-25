@@ -194,8 +194,7 @@ export function maskLocalSegment(segment: string | undefined | null): string {
   if (!trimmed) return '';
   const chars = Array.from(trimmed);
   if (chars.length === 1) return '•';
-  if (chars.length === 2) return `${chars[0]}•`;
-  if (chars.length === 3) return `${chars[0]}••`;
+  if (chars.length <= 3) return `${chars[0]}•••`;
   return `${chars[0]}${chars[1]}•••${chars[chars.length - 1]}`;
 }
 
@@ -229,8 +228,6 @@ export function maskDisplayName(name: string | undefined | null): string {
   if (trimmed.includes('@')) return maskEmail(trimmed);
   const chars = Array.from(trimmed);
   if (chars.length === 1) return '•';
-  if (chars.length === 2) return `${chars[0]}•`;
-  if (chars.length === 3) return `${chars[0]}••`;
   return `${chars[0]}•••`;
 }
 

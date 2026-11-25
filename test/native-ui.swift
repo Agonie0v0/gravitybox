@@ -7247,18 +7247,18 @@ import Cocoa
             defer { AccountIdentity.isPrivacyMaskEnabled = false }
             check(AccountIdentity.maskEmail("") == "", "maskEmail empty")
             check(AccountIdentity.maskEmail("a@example.test") == "•@e•••.test", "maskEmail 1-char local")
-            check(AccountIdentity.maskEmail("ab@example.invalid") == "a•@e•••.invalid", "maskEmail 2-char local")
+            check(AccountIdentity.maskEmail("ab@example.invalid") == "a•••@e•••.invalid", "maskEmail 2-char local")
             let multiLevelCorpEmail = "foo@" + "corp.company.example.invalid"
             let aliceCorpEmail = "alice@" + "corp.example.invalid"
-            check(AccountIdentity.maskEmail(multiLevelCorpEmail) == "f••@c•••.invalid", "maskEmail 3-char local and multi-level domain must hide corporate domain")
+            check(AccountIdentity.maskEmail(multiLevelCorpEmail) == "f•••@c•••.invalid", "maskEmail 3-char local and multi-level domain must hide corporate domain")
             check(AccountIdentity.maskEmail("zhangsan@example.invalid") == "zh•••n@e•••.invalid", "maskEmail >=4-char local keeps 2 head + 1 tail")
             check(AccountIdentity.maskEmail("localonly") == "lo•••y", "maskEmail without @")
 
             check(AccountIdentity.maskDisplayName("A") == "•", "maskDisplayName 1-char")
             check(AccountIdentity.maskDisplayName("甲") == "•", "maskDisplayName 1-char CJK")
-            check(AccountIdentity.maskDisplayName("甲乙") == "甲•", "maskDisplayName 2-char CJK")
-            check(AccountIdentity.maskDisplayName("丙丁") == "丙•", "maskDisplayName 2-char CJK alt")
-            check(AccountIdentity.maskDisplayName("甲乙丙") == "甲••", "maskDisplayName 3-char CJK")
+            check(AccountIdentity.maskDisplayName("甲乙") == "甲•••", "maskDisplayName 2-char CJK uses 3 bullets")
+            check(AccountIdentity.maskDisplayName("丙丁") == "丙•••", "maskDisplayName 2-char CJK alt uses 3 bullets")
+            check(AccountIdentity.maskDisplayName("甲乙丙") == "甲•••", "maskDisplayName 3-char CJK uses 3 bullets")
             check(AccountIdentity.maskDisplayName("Alex Sample User") == "A•••", "maskDisplayName >=4-char Latin hides spaces and full initials")
             check(AccountIdentity.maskDisplayName("主力工作号") == "主•••", "maskDisplayName >=4-char CJK")
             check(AccountIdentity.maskDisplayName("zhangsan@example.invalid") == "zh•••n@e•••.invalid", "maskDisplayName delegates email-shaped names")
@@ -7268,7 +7268,7 @@ import Cocoa
             check(AccountIdentity.displayName(name: "", email: "", masked: true) == "", "Empty identity must stay empty")
             check(
                 AccountIdentity.displayTarget(name: "甲乙", email: "zhangsan@example.invalid", masked: true, isEnglish: false)
-                    == "甲•（zh•••n@e•••.invalid）",
+                    == "甲•••（zh•••n@e•••.invalid）",
                 "displayTarget must mask both nickname and email"
             )
             check(
@@ -7317,7 +7317,12 @@ import Cocoa
 
             check(dash.activeAccountLabel.stringValue == "主力工作号" && dash.activeEmailLabel.stringValue == "zhangsan@example.invalid", "Unmasked overview shows raw email")
             check(!dash.privacyEyeButton.isHidden && (dash.privacyEyeButton.accessibilityValue() as? Int) == 0, "Unmasked overview eye button shows unmasked state")
-            check(dash.privacyEyeButton.contentTintColor == nil && accPage.privacyEyeButton.contentTintColor == nil && mPanel.quotaPrivacyEyeButton.contentTintColor == nil, "Unmasked quiet eye buttons must clear active tint")
+            check(!dash.privacyEyeButton.isBordered && !accPage.privacyEyeButton.isBordered && !mPanel.quotaPrivacyEyeButton.isBordered && !mPanel.accountsPrivacyEyeButton.isBordered, "All privacy eye buttons must remain borderless")
+            check(dash.privacyEyeButton.hidesQuietHoverBackground && accPage.privacyEyeButton.hidesQuietHoverBackground && mPanel.quotaPrivacyEyeButton.hidesQuietHoverBackground && mPanel.accountsPrivacyEyeButton.hidesQuietHoverBackground, "All privacy eye buttons must suppress hover background box")
+            check(dash.privacyEyeButton.contentTintColor == nil && accPage.privacyEyeButton.contentTintColor == nil && mPanel.quotaPrivacyEyeButton.contentTintColor == nil && mPanel.accountsPrivacyEyeButton.contentTintColor == nil, "Unmasked quiet eye buttons must clear active tint")
+            mPanel.quotaPrivacyEyeButton.hovered = true
+            mPanel.panelDidClose()
+            check(!mPanel.quotaPrivacyEyeButton.hovered && mPanel.quotaPrivacyEyeButton.hoverProgress == 0, "MenuPanel close must reset privacy eye hover state")
             check(
                 accPage.privacyEyeButton.superview !== accPage.manageAccountsButton.superview
                     && (accPage.privacyEyeButton.superview?.subviews.contains(where: { $0.identifier?.rawValue == "page-title" }) == true),
@@ -7351,7 +7356,7 @@ import Cocoa
             check(dash.activeAccountLabel.stringValue == "主•••", "Masked overview masks custom nickname")
             check(dash.activeEmailLabel.stringValue == "zh•••n@e•••.invalid", "Masked overview masks active email")
             check((dash.privacyEyeButton.accessibilityValue() as? Int) == 1, "Masked overview eye button updates accessibility state")
-            check(dash.privacyEyeButton.contentTintColor == Design.blue && accPage.privacyEyeButton.contentTintColor == Design.blue && mPanel.quotaPrivacyEyeButton.contentTintColor == Design.blue && mPanel.accountsPrivacyEyeButton.contentTintColor == Design.blue, "Masked eye buttons must apply Design.blue active tint")
+            check(dash.privacyEyeButton.contentTintColor == nil && accPage.privacyEyeButton.contentTintColor == nil && mPanel.quotaPrivacyEyeButton.contentTintColor == nil && mPanel.accountsPrivacyEyeButton.contentTintColor == nil, "Masked eye buttons must keep quiet neutral deference without high-saturation blue tint")
             if let copyItem = dash.activeEmailLabel.menu?.items.first, let target = copyItem.target, let action = copyItem.action {
                 _ = target.perform(action, with: copyItem)
                 check(NSPasteboard.general.string(forType: .string) == "zhangsan@example.invalid", "Context copy menu must still copy unmasked raw email")
@@ -7367,6 +7372,9 @@ import Cocoa
             evCard.configure(["model": "gemini-test", "account_email": "zhangsan@example.invalid", "input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "estimated_usd": 0.001], showLocalEnvironmentBadge: false)
             check(evCard.accountLabel.stringValue == "zh•••n@e•••.invalid", "UsageEventCard must mask event account email")
             check(mPanel.quotaAccountNameLabel.stringValue == "主•••" && mPanel.quotaEmailLabel.stringValue == "zh•••n@e•••.invalid", "MenuPanel quota header must mask both nickname and email")
+            maskHost.showMessage("Refresh failed for zhangsan@example.invalid", error: true)
+            check(maskHost.lastOperationError == "Refresh failed for zh•••n@e•••.invalid", "showMessage must mask emails when privacy mask is enabled")
+            maskHost.showMessage("", error: false)
 
             maskHost.togglePrivacyMaskAccounts()
             pump()

@@ -175,6 +175,31 @@ body,
   border-radius: 7px;
 }
 
+.gb-privacy-eye-btn {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--text-tertiary);
+  transition: color 120ms ease, transform 120ms ease;
+}
+
+.gb-privacy-eye-btn[aria-pressed='true'] {
+  color: var(--text-secondary);
+}
+
+.gb-privacy-eye-btn:hover:not(:disabled) {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: color-mix(in srgb, var(--text) 68%, var(--text-secondary));
+}
+
+.gb-privacy-eye-btn:active:not(:disabled) {
+  background: transparent;
+  border-color: transparent;
+  transform: scale(0.975);
+}
+
 /* Segmented Control */
 .gb-segmented {
   display: inline-flex;

@@ -49,7 +49,7 @@
 
 ## Overview
 
-**GravityBox** (`GravityBox v1.2.1`) is a lightweight, privacy-first companion for the official stable release of **Google Antigravity** across **macOS (native primary edition, author-verified)** and **Windows x64 (community-contributed edition added in `v1.2.1` via `#27`, `#30`, `#32` — implemented and real-machine verified by `@Agonie0v0`, distributed alongside `v1.2.1`)**. Both editions share a self-contained Node 22 engine and communicate via local loopback CDP and read-only SQLite transactions—never unpacking, modifying, or re-signing the official Antigravity application bundle.
+**GravityBox** (`GravityBox v1.2.2`) is a lightweight, privacy-first companion for the official stable release of **Google Antigravity** across **macOS (native primary edition, author-verified)** and **Windows x64 (community-contributed edition added in `v1.2.1` via `#27`, `#30`, `#32` — implemented and real-machine verified by `@Agonie0v0`, distributed alongside `v1.2.1`)**. Both editions share a self-contained Node 22 engine and communicate via local loopback CDP and read-only SQLite transactions—never unpacking, modifying, or re-signing the official Antigravity application bundle.
 
 | Capability | What It Solves |
 | :--- | :--- |

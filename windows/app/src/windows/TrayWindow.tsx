@@ -751,12 +751,11 @@ export function TrayWindow() {
                           />
                           <button
                             type="button"
-                            className="gb-btn gb-btn-ghost gb-icon-btn"
+                            className="gb-btn gb-privacy-eye-btn gb-icon-btn"
                             style={{
                               width: 22,
                               height: 22,
                               flexShrink: 0,
-                              color: masked ? 'var(--blue)' : 'var(--text-tertiary)',
                             }}
                             aria-label={privacyLabel}
                             aria-pressed={masked}
@@ -845,11 +844,10 @@ export function TrayWindow() {
                 <span style={{ fontSize: 12.5, fontWeight: 600 }}>{t('menu_panel.accounts.section_title')}</span>
                 <button
                   type="button"
-                  className="gb-btn gb-btn-ghost gb-icon-btn"
+                  className="gb-btn gb-privacy-eye-btn gb-icon-btn"
                   style={{
                     width: 22,
                     height: 22,
-                    color: masked ? 'var(--blue)' : 'var(--text-tertiary)',
                   }}
                   aria-label={privacyLabel}
                   aria-pressed={masked}

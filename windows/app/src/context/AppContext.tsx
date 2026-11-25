@@ -204,6 +204,17 @@ export function AppProvider({
   const toastTimerRef = useRef<number | null>(null);
   const timersRef = useRef<Set<number>>(new Set());
   const configRef = useRef<UiConfig>(DEFAULT_CONFIG);
+  const knownEmailsRef = useRef<string[]>([]);
+
+  useEffect(() => {
+    const emails: string[] = [];
+    if (status.activeAccountEmail) emails.push(status.activeAccountEmail);
+    if (dashboard?.accounts?.activeEmail) emails.push(dashboard.accounts.activeEmail);
+    for (const acc of accountsPayload?.accounts ?? []) {
+      if (acc.email) emails.push(acc.email);
+    }
+    knownEmailsRef.current = emails;
+  }, [accountsPayload, dashboard?.accounts?.activeEmail, status.activeAccountEmail]);
 
   const scheduleTimer = useCallback((fn: () => void, ms: number) => {
     const id = window.setTimeout(() => {
@@ -240,7 +251,12 @@ export function AppProvider({
 
   const showToast = useCallback((message: string, error = false) => {
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-    setToast({ id: Date.now(), message, error });
+    const safeMessage = maskEmailsInText(
+      message,
+      knownEmailsRef.current,
+      Boolean(configRef.current.privacyMaskAccounts),
+    );
+    setToast({ id: Date.now(), message: safeMessage, error });
     toastTimerRef.current = window.setTimeout(() => {
       toastTimerRef.current = null;
       setToast(null);

@@ -70,7 +70,10 @@ func button(_ title: String, target: AnyObject?, action: Selector) -> NSButton {
 }
 func makePrivacyEyeButton(target: AnyObject?, action: Selector, symbolSize: CGFloat = 13.5, buttonSize: CGFloat = 24) -> DesignButton {
     let btn = DesignButton(title: "", target: target, action: action)
+    btn.bezelStyle = .rounded
+    btn.isBordered = false
     btn.isQuietAccessory = true
+    btn.hidesQuietHoverBackground = true
     btn.imagePosition = .imageOnly
     btn.controlSize = .small
     btn.translatesAutoresizingMaskIntoConstraints = false
@@ -87,7 +90,7 @@ func applyPrivacyEyeButtonState(_ btn: NSButton, masked: Bool, symbolSize: CGFlo
         .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: symbolSize, weight: .medium))
     img?.isTemplate = true
     btn.image = img
-    btn.contentTintColor = masked ? Design.blue : nil
+    btn.contentTintColor = nil
     btn.needsDisplay = true
     let actionTitle = masked
         ? L10n.t("accounts.privacy.show", fallback: "显示账号信息")

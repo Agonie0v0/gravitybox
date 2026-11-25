@@ -31,8 +31,7 @@ struct AccountIdentity {
         let chars = Array(trimmed)
         switch chars.count {
         case 1: return "•"
-        case 2: return "\(chars[0])•"
-        case 3: return "\(chars[0])••"
+        case 2, 3: return "\(chars[0])•••"
         default: return "\(chars[0])\(chars[1])•••\(chars[chars.count - 1])"
         }
     }
@@ -70,8 +69,6 @@ struct AccountIdentity {
         let chars = Array(trimmed)
         switch chars.count {
         case 1: return "•"
-        case 2: return "\(chars[0])•"
-        case 3: return "\(chars[0])••"
         default: return "\(chars[0])•••"
         }
     }

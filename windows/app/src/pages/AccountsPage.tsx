@@ -328,11 +328,10 @@ export function AccountsPage() {
           <h1 className="gb-page-title">{t('accounts.title')}</h1>
           <button
             type="button"
-            className="gb-btn gb-btn-ghost gb-icon-btn"
+            className="gb-btn gb-privacy-eye-btn gb-icon-btn"
             style={{
               width: 26,
               height: 26,
-              color: masked ? 'var(--blue)' : 'var(--text-tertiary)',
             }}
             aria-label={privacyLabel}
             aria-pressed={masked}

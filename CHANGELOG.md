@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-25
+
+### Added
+- **账号信息隐私遮挡（`#34`，致谢 `@Agonie0v0` 发起并贡献 Windows 实现，macOS / Windows 双端统一）**：在总览页、账号页与菜单栏/托盘浮窗的身份或标题旁提供统一纯图标小眼睛一键切换，并支持全局快捷键（macOS `⇧⌘M` 与「显示」菜单项，Windows `Ctrl+Shift+M`）；同步脱敏账号昵称（`首字 + •••`）与邮箱（保留前缀尾字符便于多账号区分），全面覆盖账号卡片、推荐横幅、SSH 伴随行、用量筛选下拉框、切号确认弹窗及全局错误/Toast 提示；总览页右键复制邮箱仍保留完整原始邮箱，重命名输入框保留原昵称防误覆写。
+- **macOS Intel (`x86_64`) 宿主架构构建与更新保护（`#31`，致谢 `@lvyandev` 贡献）**：原生构建与打包脚本按宿主架构自动选择 `arm64` / `x86_64` 目标并校验内置 Node 与主程序 Mach-O 架构一致；应用内更新仅接受当前编译架构安装包防止跨架构误装，关于页自动展示当前编译架构（Intel `x86_64` 为社区按宿主本地构建支持，官方自动 Release 仅分发 Apple Silicon `arm64` 成品）。
+
+### Changed
+- **删号时静默清理关联恢复快照**：删除账号时在后台自动清空 `account-switch-journal-stable.json` 中命中该账号的切号凭据与文件快照（处于中断待恢复态的切号事务自动跳过保护），同时不再向 `accounts-removed/` 写入删号留档并顺手清理该账号的历史旧留档；用量总账与缓存清理快照保持隔离不动，交互上零新增弹窗或选项。
+
+### Fixed
+- **Windows 安全关闭确认与跨分区文件重试加固**：为全部 4 处 `closeAntigravitySafely` 调用透传 `detachedOnly` 避免重复二次确认，补齐 `user_cancelled` 中性提示与 `uipi_access_denied` 提权提示优先级；为 Windows `EXDEV` 跨卷回退补齐 `rmSync` 重试参数。
+
 ## [1.2.1] - 2026-11-24
 
 ### Added
@@ -219,7 +231,8 @@
 ### Fixed
 - **Native UI**：保持菜单栏状态图标在不同翻译开关状态下的不透明度一致（`b9921e8`，已包含于 1.0.0）。
 
-[Unreleased]: https://github.com/Enzoo404/gravitybox/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/Enzoo404/gravitybox/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/Enzoo404/gravitybox/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/Enzoo404/gravitybox/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Enzoo404/gravitybox/compare/v1.1.3...v1.2.0
 [1.1.3]: https://github.com/Enzoo404/gravitybox/compare/v1.1.2...v1.1.3

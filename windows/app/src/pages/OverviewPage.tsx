@@ -351,11 +351,10 @@ export function OverviewPage() {
               {rawActiveEmail && (
                 <button
                   type="button"
-                  className="gb-btn gb-btn-ghost gb-icon-btn"
+                  className="gb-btn gb-privacy-eye-btn gb-icon-btn"
                   style={{
                     width: 22,
                     height: 22,
-                    color: masked ? 'var(--blue)' : 'var(--text-tertiary)',
                   }}
                   aria-label={privacyLabel}
                   aria-pressed={masked}
