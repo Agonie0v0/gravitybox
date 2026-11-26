@@ -49,7 +49,7 @@
 
 ## 概览
 
-**GravityBox**（`GravityBox v1.2.2`）是一款专为 **Google Antigravity** 官方正式版打造的轻量级、零侵入、重隐私伴侣工具箱，覆盖 **macOS（原生主线，作者主导并实机验收）** 与 **Windows x64（`v1.2.1` 起由社区共建合入：`#27`、`#30`、`#32` 致谢 `@Agonie0v0` 贡献实现并完成真机验收，随 `v1.2.1` 同步分发）**。双端共享同一套内置 Node 22 核心引擎，全程通过本机回环 CDP 与只读 SQLite 事务工作，绝不解包、篡改或重签名官方应用包。
+**GravityBox**（`GravityBox v1.2.2`）是一款专为 **Google Antigravity** 官方正式版打造的轻量级、零侵入、重隐私伴侣工具箱，覆盖 **macOS**（Apple Silicon 原生预构建主线，同时支持 Intel `x86_64` 本机源码构建）与 **Windows x64**（社区共建端，提供免编译安装与便携包）。各端共享同一套内置 Node 22 核心引擎，全程通过本机回环 CDP 与只读 SQLite 事务工作，绝不解包、篡改或重签名官方应用包。
 
 | 核心能力 | 解决什么问题 |
 | :--- | :--- |
@@ -57,8 +57,8 @@
 | **对话状态栏 (HUD)** | 在每个聊天输入框正下方嵌入三联遥测条，实时展示轮次用时、输出速度、Token 消耗、缓存命中率、压缩次数与上下文水位。 |
 | **双周期配额与账单** | 将 **5 小时** 滚动限额、**每周** 限额与独立高阶池（如 `Gemini 4 Argon`）拆开展示；汇总页自动合并同一模型的各思考档位变体（`-low` 至 `-max`），并按时序官方单价核算等效 API 费用。 |
 | **SSH 远程窗口与统一账本** | 无需调用外部 `ssh` 进程即可适配 Antigravity `2.33.0+` SSH 远程窗口（双语界面、实时 HUD、按主机只读配额），并将本机与 SSH 会话用量统一合账且支持「环境 × 账号」正交筛选。 |
-| **HTTP / HTTPS 网络代理** | 支持 **关闭**、**自动跟随系统代理**（macOS / Windows 系统设置）或 **手动指定** `http://` / `https://` 代理地址，自动为 Antigravity 注入代理环境变量、让 GravityBox 后台外联复用同一代理，并检测 Shell 覆盖冲突。 |
-| **多账号、隐私遮挡与 CLI 同步** | 支持保存当前会话、JSON 批量导入与确认后备份导出（macOS 锁定 `0600`）、一键账号隐私遮挡（`⇧⌘M` / `Ctrl+Shift+M`）、删号静默清理恢复快照、低配额智能推荐、同源 `agy` CLI 凭据非侵入同步，以及四阶段原子安全切换与异常自动回滚。 |
+| **免 TUN HTTP(S) 代理** | 支持 **关闭**、**自动跟随系统代理**（macOS / Windows 系统设置）或 **手动指定** `http://` / `https://` 代理地址，无需开启 TUN 模式即可为 Antigravity 注入代理环境变量、让 GravityBox 后台外联复用同一代理，并检测 Shell 覆盖冲突。 |
+| **多账号、隐私遮挡与 CLI 同步** | 支持保存当前会话、JSON 批量导入与确认后备份导出（macOS 锁定 `0600`）、一键账号隐私遮挡（`⇧⌘M` / `Ctrl+Shift+M`）、删号静默清理切号恢复快照、低配额智能推荐、同源 `agy` CLI 凭据非侵入同步，以及四阶段原子安全切换与异常自动回滚。 |
 | **可撤回缓存瘦身** | 仅清理无状态运行缓存与可选超期后台日志（清理前归档账单），统一移入 macOS 废纸篓或 Windows 回收站（`IFileOperation`）并支持一键原位还原，登录凭据与聊天正文受白名单隔离保护。 |
 
 ---
@@ -68,7 +68,8 @@
 | 目标平台 | 前端与系统助手 | IPC 与凭据机制 | 分发产物与验收状态 |
 | :--- | :--- | :--- | :--- |
 | **macOS 14+ (Apple Silicon `arm64`)** | 原生 **Swift 6 / AppKit** 五页主控制台与 `MenuFloatingPanel`（`native/`） | Unix Domain Socket IPC · macOS 钥匙串与 `0600` 本地文件 | **原生主线（作者已实机验收）**：通过 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 直接下载预构建 `GravityBox-<version>-arm64.dmg` |
-| **Windows 10/11 (x64)** | **Tauri 2 / React 19** 五页控制台与系统托盘面板（`windows/app/`）+ 静态链接 Rust Win32 助手（`windows/win-helper/`） | 每启动随机 Named Pipe（256-bit `authToken`、同用户 SID 与完整性校验）· Windows Credential Manager（2560 字节容量边界与内存清零） | **社区共建端（`@Agonie0v0` 已完成真机验收）**：通过 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 随 `v1.2.1` 同步提供预构建自包含 `-setup.exe` 与便携 `.zip`（**普通用户无需自行构建**） |
+| **macOS 14+ (Intel `x86_64`)** | 同源原生 **Swift 6 / AppKit** 五页主控制台与 `MenuFloatingPanel`（`native/`） | Unix Domain Socket IPC · macOS 钥匙串与 `0600` 本地文件 | **本机源码构建支持**：按宿主架构构建校验并提供防跨架构误装保护，源码目录运行 `npm ci && npm run package:mac` 即可生成本机 `.app` 与 `.dmg` |
+| **Windows 10/11 (x64)** | **Tauri 2 / React 19** 五页控制台与系统托盘面板（`windows/app/`）+ 静态链接 Rust Win32 助手（`windows/win-helper/`） | 每启动随机 Named Pipe（256-bit `authToken`、同用户 SID 与完整性校验）· Windows Credential Manager（2560 字节容量边界与内存清零） | **社区共建端（已实机验收）**：通过 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 提供预构建自包含 `-setup.exe` 与便携 `.zip`（免编译开箱即用） |
 
 ---
 
@@ -76,9 +77,9 @@
 
 > GitHub Releases 的 macOS 预构建包目前仅面向 Apple Silicon（`arm64`）。Intel（`x86_64`）用户可[从源码在本机验证并打包](#架构与源码构建)。
 
-### macOS（原生主线 · Apple Silicon）
+### macOS（原生主线 · Apple Silicon / Intel 源码构建）
 
-1. **下载与安装**：前往 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 获取最新 `GravityBox-<version>-arm64.dmg`，将 **GravityBox.app** 拖入 **Applications**。因开源版本未经过 Apple 付费公证，首次运行前在终端执行一次放行命令即可（也可在「系统设置 → 隐私与安全性」点击仍要打开）：
+1. **下载与安装**：Apple Silicon 用户前往 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 获取最新 `GravityBox-<version>-arm64.dmg`（Intel 用户见下方[源码构建](#架构与源码构建)），将 **GravityBox.app** 拖入 **Applications**。因开源版本未经过 Apple 付费公证，首次运行前在终端执行一次放行命令即可（也可在「系统设置 → 隐私与安全性」点击仍要打开）：
    ```bash
    xattr -cr /Applications/GravityBox.app
    ```
@@ -87,7 +88,7 @@
 
 ### Windows x64（社区共建端）
 
-1. **直接下载（无需自行打包构建）**：前往 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 直接下载开箱即用的自包含产物——`GravityBox-<version>-win-x64-setup.exe`（用户级安装程序，默认安装到 `%LOCALAPPDATA%\Programs\GravityBox`，无需管理员权限）或 `GravityBox-<version>-win-x64.zip`（便携包，解压即用），已内置 Node 22 与 Win32 助手，**普通用户无需自己运行编译或打包命令**。*（已由 `@Agonie0v0` 完成 Windows 真机验收，随 `v1.2.1` 同步分发。）*
+1. **直接下载（无需自行打包构建）**：前往 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 直接下载开箱即用的自包含产物——`GravityBox-<version>-win-x64-setup.exe`（用户级安装程序，默认安装到 `%LOCALAPPDATA%\Programs\GravityBox`，无需管理员权限）或 `GravityBox-<version>-win-x64.zip`（便携包，解压即用），已内置 Node 22 与 Win32 助手，**普通用户无需自己运行编译或打包命令**。
 2. **启动并连接**：运行 `GravityBox.exe`（需 Windows 10/11 x64 及系统 WebView2 运行时）。通过侧栏或系统托盘菜单点击 **「打开 Antigravity」**，或开启 **设置 → 启动时自动打开 Antigravity**。若外部启动的 Antigravity 未开启调试端口，点击横幅 **「安全重启以连接」** 即可优雅重启（严格遵守 Windows UIPI 与同用户 SID 边界，绝不静默调用 `TerminateProcess` 强杀官方编辑器）。
 3. **日常协作**：在 Antigravity 内直接查看 **HUD**；点击 **系统托盘浮窗** 快速浏览额度、用量与切换账号；打开 **主控制台**（总览 · 账号 · 用量 · 设置 · 关于）进行多账号与账单管理。
 
@@ -154,7 +155,7 @@ HUD 挂载于每个 Antigravity 对话输入框下方（含 `2.34.0+` 的 BTW �
 
 - **对话统计**：拆分模型与工具累计耗时（自动合并并行工具重叠时间），展示全局平均与最近一步的 TTFT / TPS，以及子智能体运行步数。
 - **Token 用量**：细分为未缓存输入、缓存读取、缓存写入与输出（模型支持时自动拆分 `思维链 / 回复`），并按当时生效费率折算等效 API 费用与缓存节省金额（含未公开定价模型时显示 `≥ $X`）。
-- **当前上下文**：单行标题融合当前模型名与角色徽章（`规划` / `执行`），配合双色进度条（缓存复用 vs. 本步新增输入）、本步输出与模型历史峰值，并以统一磨砂中性灰胶囊在 **曾用模型上下文** 列表展示切换过的模型水位与压缩次数（`v1.2.1` 通过 `executor_metadata` 增量扫描在对话回退/截断场景下保留历史编排器角色）。
+- **当前上下文**：单行标题融合当前模型名与角色徽章（`规划` / `执行`），配合双色进度条（缓存复用 vs. 本步新增输入）、本步输出与模型历史峰值，并以统一磨砂中性灰胶囊在 **曾用模型上下文** 列表展示切换过的模型水位与压缩次数（通过 `executor_metadata` 增量扫描在对话回退/截断场景下保留历史编排器角色）。
 
 </details>
 
@@ -162,7 +163,7 @@ HUD 挂载于每个 Antigravity 对话输入框下方（含 `2.34.0+` 的 BTW �
 
 ## 界面与核心机制
 
-> *以下截图摄于已实机验收的 macOS 原生端（Swift 6 / AppKit）。Windows x64 端（Tauri 2 / React）已同步实现功能对等的五页主控制台（总览 · 账号 · 用量 · 设置 · 关于）与系统托盘面板（已由 `@Agonie0v0` 完成真机验收，Windows 实机截图后续补充）。*
+> *以下截图摄于已实机验收的 macOS 原生端（Swift 6 / AppKit）。Windows x64 端（Tauri 2 / React）已同步实现功能对等的五页主控制台（总览 · 账号 · 用量 · 设置 · 关于）与系统托盘面板（已由社区完成真机验收，Windows 实机截图后续补充）。*
 
 <table>
   <tr>
@@ -247,20 +248,14 @@ HUD 挂载于每个 Antigravity 对话输入框下方（含 `2.34.0+` 的 BTW �
 
 ### v1.2.2 核心机制说明
 
-- **账号信息隐私遮挡（PR `#34`，致谢 `@Agonie0v0` 发起并贡献 Windows 实现，macOS / Windows 双端统一）**：在 **总览**、**账号** 与菜单栏 / 托盘浮窗的身份或标题旁提供纯图标小眼睛一键切换与眨眼/淡入动效（遵守系统减少动态效果设置），支持全局快捷键（macOS `⇧⌘M` 与「显示」菜单项，Windows `Ctrl+Shift+M`）；同步脱敏昵称（`首字 + •••`）与邮箱，覆盖账号卡片、推荐横幅、SSH 伴随行、用量筛选下拉框、请求明细、切号/删号确认弹窗、辅助功能标签、弹窗内联报错与全局 Toast 提示；总览页右键仍可复制完整原邮箱，重命名输入框保留原昵称防误覆写。
-- **macOS Intel (`x86_64`) 本地源码构建与更新架构保护（Issue `#29`、PR `#31`，致谢 `@lvyandev`）**：按宿主架构统一解析 Swift 编译目标、`lipo` 单架构一致性校验（主程序与内置 Node）、`mac-arm64` / `mac-x64` 无头测试浏览器下载及关于页右键复制的环境架构标签；应用内更新仅接受当前编译架构安装包防止跨架构误装（GitHub Releases 仅自动分发 `arm64` 成品，Intel 端由本机源码验证打包）。
-- **删号静默清理关联恢复快照与 Windows 关闭/跨卷加固**：删除账号时后台自动清空 `account-switch-journal-stable.json` 中命中该账号的切号凭据与文件快照（覆盖索引引用、`go-keyring-base64:` 钥匙串载荷及 `state.vscdb` 双层 Base64 Protobuf `userStatus` 行，中断待恢复事务跳过保护），停止写入 `accounts-removed/` 并清理对应历史旧留档；Windows 端为全部 4 处 `closeAntigravitySafely` 透传 `detachedOnly`、完善 `user_cancelled` / `uipi_access_denied` 提示优先级，并为 `EXDEV` 跨卷回退补齐 `rmSync` 重试参数。
-- **Windows x64 社区共建跨平台支持（`v1.2.1` — 响应 Issue `#17` 致谢 `@dysonkai`；PR `#27`、`#30`、`#32` 致谢 `@Agonie0v0` 贡献实现）**：引入同仓隔离的跨平台后端抽象（`src/platform/`）、原生 Rust Win32 助手（`windows/win-helper`，提供凭据管理器、SID 鉴权 Named Pipe、非破坏性 `IFileOperation` 回收站迁移与严格优雅退出边界）、Tauri 2 Windows 桌面控制台与托盘浮窗（`windows/app`），以及独立非阻塞 `windows-latest` CI 与自包含 ZIP / NSIS 安装包构建流（`tools/package-win.mjs`），所有 Windows 专属文件与 macOS `sourceDigest` 彻底隔离。
-- **进程隔离、HUD 精度与视图保护加固（`#28`、`#33`，致谢 `@lvyandev` 与 `@MongoRolls`）**：在切号、回滚与存储维护期间隔离 `chrome_crashpad_handler` 与已脱离主进程树的后台守护进程（`language_server` / `sidecar`，`#28`）；细化权限四档翻译并新增代码查看、Diff、CSV 视口、LSP 引用与 Notebook 代码/输出区防误译保护（`#33`）；通过 `executor_metadata` 增量扫描保留对话回退/截断后的历史编排器角色；对齐 Windows 凭据 2560 字节边界、Named Pipe 完整性校验、NTFS 锁退避及请求明细全量分页导出。
-- **启动时自动打开 Antigravity**：因新版 Antigravity 默认不再开启调试端口（且本工具坚持不修改官方安装包），原「跟随 Antigravity 启停」已替换为 **设置 → 启动时自动打开 Antigravity**。开启后，打开 GravityBox 会自动静默驻留菜单栏 / 系统托盘并拉起带 `--remote-debugging-port=0` 调试端口的 Antigravity。
-- **SSH 远程窗口零外部 SSH 适配与多主机视图**：通过本机 CDP 通道直接适配 Antigravity `2.33.0+` SSH 远程窗口，不拉起任何外部 `ssh` 进程——提供完整双语热适配、实时对话状态栏 HUD、严格隔离本机账号的 `本机 / SSH: <host>` 只读双周期配额查看、切号/安全重启/维护时的活跃 SSH 保护提醒，以及 **总览** 伴生 SSH 主机列表与 **菜单栏 / 托盘浮窗** 可展开范围切换器。
-- **本机 + SSH 统一多环境用量账本**：增量同步远端会话用量至本地 SQLite 账本（按远端轨迹 ID 去重并基于时间线判定账号归属），提供默认合并总览、`本机 % · SSH %` 环境占比条、`环境 × 账号` 正交筛选与离线 SSH 历史徽标。
-- **BTW 侧边提问分栏隔离与 `2.34.0` 目录更新**：独立观测 `2.34.0` BTW 侧边提问分栏 HUD 并在用量核算中自动去重克隆前缀生成记录，同时收录 `2.34.0` 官方词典并为 `gemini-2.5-pro` 补全 `>200K` 上下文阶梯定价。
-- **HTTP / HTTPS 网络代理支持**：在 **设置** 中选择 **关闭**、**跟随系统代理** 或 **手动配置** `http://` / `https://` 代理（不支持 PAC 与 SOCKS5）。GravityBox 启动 Antigravity 时自动注入 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`，自身外联请求共享同一代理通道，并实时检测运行中进程的代理不匹配或 Shell 覆盖状态。
-- **Antigravity `2.34.0+` 备用账号配额追踪**：当前正在使用的账号通过进程环境变量读取，无需额外配置即可持续实时刷新。受 `2.34.0` 本地通道仅限单一活跃会话、以及 GravityBox 坚持纯本地开源（不内置官方客户端密钥、不设中转服务器）的限制，未激活的备用账号离开约 1 小时登录态过期后不再后台拉取云端额度；GravityBox 会在过期前自动补刷、超时后静默跳过不弹窗报错、保留上次快照并按重置时间标示 **「预计已重置」** 供智能推荐参考，待手动切回该账号时同步最新余额。
-- **JSON 批量管理与 `agy` CLI 同步**：集成保存当前账号、JSON 文件/目录批量导入（按邮箱去重）与二次确认备份导出（macOS 锁定 `0600`）；切号与撤销回滚时会顺带更新本机已存在的 `antigravity-oauth-token` 与 `jetski-standalone-oauth-token`，不干扰 `@google/gemini-cli` 凭据。
-- **思考档位折叠与价格表热更新**：主界面与浮窗自动将同一基础模型的 `-low`、`-medium`、`-high`、`-xhigh`、`-thinking`、`-max`、`-tiered` 等变体合并展示汇总消耗（请求明细流水保留原始标识）；开启 **「自动更新价格基准」** 或点击 **「立即检查」** 可在线热同步最新公开模型单价表。
-- **独立双语与 HUD 开关**：在设置页或菜单栏 / 托盘 `···` 菜单随时切换 **跟随系统 / 简体中文 / English**，无需重启；选择 `English` 恢复官方英文界面时，仍可保持英文版 HUD 正常工作。
+- **账号信息隐私遮挡与删号快照静默清理**：在 **总览**、**账号** 与菜单栏 / 托盘浮窗旁提供纯图标小眼睛一键切换与眨眼/淡入动效（遵守系统减少动态效果设置），支持全局快捷键（macOS `⇧⌘M` 与「显示」菜单项，Windows `Ctrl+Shift+M`）；同步脱敏昵称（`首字 + •••`）与邮箱，覆盖账号卡片、推荐横幅、SSH 伴随行、用量筛选下拉框、请求明细、切号/删号确认弹窗、辅助功能标签、弹窗内联报错及全局 Toast 提示（总览页右键仍可复制完整原邮箱，重命名输入框保留原昵称）。删除账号时后台自动清空 `account-switch-journal-stable.json` 中命中该账号的切号凭据与文件快照（含 `go-keyring-base64:` 与双层 Base64 Protobuf `userStatus`，中断待恢复事务跳过保护），停止写入 `accounts-removed/` 并清理对应历史留档。
+- **macOS Intel (`x86_64`) 本地源码构建与更新架构保护**：按宿主架构统一解析 Swift 编译目标，支持 `lipo` 单架构一致性校验（主程序与内置 Node）、按架构下载无头测试浏览器及关于页右键复制环境架构标签；应用内更新仅接受当前编译架构安装包防止跨架构误装（GitHub Releases 仅自动分发 `arm64` 成品，Intel 端由本机源码验证打包）。
+- **启动自动连接、进程隔离与无强杀安全重启**：开启 **设置 → 启动时自动打开 Antigravity** 后，打开 GravityBox 自动静默驻留菜单栏 / 系统托盘并拉起带 `--remote-debugging-port=0` 的 Antigravity；外部直接启动未开调试端口时通过 **「安全重启以连接」** 优雅退出重连（Windows 端严格遵循 UIPI / 同用户 SID 边界，不后台强杀），并在切号、回滚与维护期间隔离 `chrome_crashpad_handler` 及已脱离主进程树的后台守护进程（`language_server` / `sidecar`）。
+- **SSH 远程窗口零外部 `ssh` 适配与本机 + SSH 统一账本**：经本机 CDP 通道直接适配 Antigravity `2.33.0+` SSH 远程窗口（不拉起外部 `ssh` 进程），提供双语热适配、实时 HUD、与本机隔离的 `本机 / SSH: <host>` 只读配额查看及活跃 SSH 保护提醒；增量同步远端会话至本地只读 SQLite 账本（按轨迹 ID 去重、按时间线归属账号），提供合并总览、`本机 % · SSH %` 占比条与「环境 × 账号」正交筛选。
+- **BTW 侧边提问分栏、`2.34.0` 目录与视图防误译保护**：独立观测 `2.34.0+` BTW 侧边提问分栏 HUD 并在用量核算中自动去重克隆前缀生成记录，完整覆盖 `2.34.0` 词典与 `gemini-2.5-pro` `>200K` 阶梯定价（`2.35.0+` 自适应兼容），同时对代码查看、Diff、CSV 视口、LSP 引用与 Notebook 代码/输出区提供防误译保护。
+- **免 TUN HTTP / HTTPS 网络代理**：在 **设置** 中选择 **关闭**、**跟随系统代理** 或 **手动配置** `http://` / `https://` 代理（不支持 PAC 与 SOCKS5），无需开启 TUN 模式即可在启动 Antigravity 时自动注入 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`、让受控外联复用同一代理，并实时检测代理不匹配或 Shell 覆盖冲突。
+- **JSON 批量管理、`agy` CLI 同步与 `2.34.0+` 备用账号配额追踪**：集成保存当前账号、JSON 批量导入（按邮箱去重）与确认后备份导出（macOS 锁定 `0600`），切号与回滚时非侵入同步同源 `antigravity-oauth-token` 与 `jetski-standalone-oauth-token`（不干扰 `@google/gemini-cli`）。针对 `2.34.0+` 单一活跃会话限制，当前账号保持免密实时刷新；未激活备用账号在过期前自动补刷、过期后静默跳过并按重置时间标示 **「预计已重置」** 供智能推荐参考，切回时自动同步最新余额。
+- **思考档位折叠、价格表热同步与独立双语/HUD 开关**：汇总视图自动合并同一基座模型的 `-low`～`-max` / `-tiered` 变体（请求明细保留原始标识）；支持通过 GitHub Raw / jsDelivr 在线热同步公开定价表（带 `ETag` 与 SHA-256 校验）；在设置或浮窗随时热切换 **跟随系统 / 简体中文 / English**，切回官方英文时仍可独立保持英文 HUD。
 
 ---
 
@@ -269,8 +264,8 @@ HUD 挂载于每个 Antigravity 对话输入框下方（含 `2.34.0+` 的 BTW �
 - **macOS（原生主线）**：macOS 14 (Sonoma) 或更高版本、官方正式版 `/Applications/Antigravity.app`（不支持也不干扰 Insiders 预览版），内置运行环境、零外部依赖。
   - SHA-256 校验（可选）：`shasum -a 256 -c GravityBox-<version>-arm64.dmg.sha256`
   - 无损升级：退出旧版 GravityBox 后将新版拖入 `/Applications` 替换，或在 **关于** 页检查更新（默认关闭后台检查）。
-  - GitHub Releases 提供 Apple Silicon（`arm64`）DMG。Intel（`x86_64`）在源码目录运行 `npm run verify` 与 `npm run package:mac`，再安装本地产出的 DMG；升级时用新版源码重新构建。
-- **Windows x64（社区共建端）**：Windows 10/11 x64（需系统 WebView2 运行时）及官方正式版 Antigravity；由维护者/CI 统一构建开箱即用的自包含安装版（`GravityBox-<version>-win-x64-setup.exe`）与便携版（`GravityBox-<version>-win-x64.zip`，均附 `.sha256` 校验文件），已由 `@Agonie0v0` 完成真机验收，随 `v1.2.1` 直接发布至 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest)，**普通用户无需自行编译打包**。
+  - GitHub Releases 提供 Apple Silicon（`arm64`）DMG；Intel（`x86_64`）用户在源码目录运行 `npm ci && npm run verify && npm run package:mac`，再安装本地产出的 DMG（升级时拉取新版源码重新构建）。
+- **Windows x64（社区共建端）**：Windows 10/11 x64（需系统 WebView2 运行时）及官方正式版 Antigravity；通过 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 直接提供开箱即用的自包含安装版（`GravityBox-<version>-win-x64-setup.exe`）与便携版（`GravityBox-<version>-win-x64.zip`，均附 `.sha256` 校验文件），**普通用户无需自行编译打包**。
   - PowerShell 校验（可选）：`Get-FileHash GravityBox-<version>-win-x64.zip -Algorithm SHA256`
 - **本地数据与缓存路径**：
   - macOS：状态库 `~/Library/Application Support/GravityBox`（缓存位于 `~/Library/Caches/GravityBox`）
@@ -378,10 +373,9 @@ Antigravity 运行时会持续持有本地 SQLite（`state.vscdb`）与认证文
 
 提交代码或反馈请先阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)、[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)、[SECURITY.md](./SECURITY.md) 与 [CHANGELOG.md](./CHANGELOG.md)，欢迎在 [GitHub Issues](https://github.com/Enzoo404/gravitybox/issues) 提交讨论。
 
-**社区致谢**：
-- **代码贡献**：`@Agonie0v0`（`#26` `sqlite-worker` 稳定性修复；`#27`、`#30`、`#32` Windows x64 跨平台同仓三阶段实现；`#34` 账号信息隐私遮挡）、`@lvyandev`（`#31` macOS Intel `x86_64` 源码构建、门禁与更新架构保护）
-- **问题反馈与特性建议**：`@Rentrer`（`#15`）、`@dysonkai`（`#17`）、`@Allenbayern`（`#19`、`#20`）、`@willingning-coder`（`#21`）、`@YangFuting`（`#24`）、`@lvyandev`（`#28`、`#29`）、`@MongoRolls`（`#33`）
-- **交流社区**：感谢 [LINUX DO](https://linux.do/) 社区提供技术交流与开源分享平台，欢迎前往社区交流使用体验与改进建议。
+**致谢**：
+- **贡献者**：`@Agonie0v0`、`@lvyandev`
+- **交流社区**：感谢 [LINUX DO](https://linux.do/) 社区提供技术交流与开源分享平台。
 
 <div align="center">
   <a href="https://star-history.com/#Enzoo404/gravitybox&Date">
