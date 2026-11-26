@@ -2,6 +2,7 @@ import { readdir, readFile, writeFile, stat } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, join } from 'node:path';
+import { releaseDmgName } from './native-target.mjs';
 
 /** Dictionary maintenance files are neither release inputs nor packaged resources. */
 export function includeDictionaryPath(path) {
@@ -207,7 +208,7 @@ export async function checkReleaseConsistency({
   const warn = (code, message) => warnings.push({ code, message });
   const version = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version;
   const currentDigest = digest ?? await sourceDigest(root);
-  const dmg = join(outputDir, `GravityBox-${version}-arm64.dmg`);
+  const dmg = join(outputDir, releaseDmgName(version));
   const sidecar = `${dmg}.sha256`;
   let dmgHash = null;
   if (await exists(dmg)) dmgHash = await fileSha256(dmg);

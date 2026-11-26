@@ -269,7 +269,8 @@ enum UsageFilterSupport {
         selectedId: String,
         allTitle: String,
         maxWidth: CGFloat = 220,
-        fitsSelectedTitleOnly: Bool = true
+        fitsSelectedTitleOnly: Bool = true,
+        masked: Bool = AccountIdentity.isPrivacyMaskEnabled
     ) -> String {
         if (popup.cell as? DesignPopUpCell)?.isTrackingMenu == true {
             let trimmed = selectedId.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -295,7 +296,22 @@ enum UsageFilterSupport {
             let email = (acc["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let label = (acc["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let name = (acc["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let title = !email.isEmpty ? email : (!label.isEmpty ? label : (!name.isEmpty ? name : id))
+            let title: String
+            if masked {
+                let shownEmail = AccountIdentity.displayEmail(email, masked: true)
+                let shownName = AccountIdentity.maskDisplayName(name)
+                if !shownName.isEmpty && name.caseInsensitiveCompare(email) != .orderedSame && !shownEmail.isEmpty {
+                    title = "\(shownName) (\(shownEmail))"
+                } else if !shownEmail.isEmpty {
+                    title = shownEmail
+                } else if !label.isEmpty {
+                    title = AccountIdentity.maskDisplayName(label)
+                } else {
+                    title = id
+                }
+            } else {
+                title = !email.isEmpty ? email : (!label.isEmpty ? label : (!name.isEmpty ? name : id))
+            }
             items.append((id, title))
         }
         let trimmedSelected = selectedId.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -781,6 +797,24 @@ final class UsagePage: NSObject {
         }
 
         fetch()
+    }
+
+    func refreshPrivacyMaskState() {
+        if !latestReport.isEmpty {
+            _ = updateFilterBar(from: latestReport)
+        } else {
+            _ = UsageFilterSupport.syncAccountPopup(
+                accountPopup,
+                accounts: availableAccounts,
+                cachedAccounts: app.cachedAccounts,
+                selectedId: selectedAccountId,
+                allTitle: L10n.t("usage.account.all"),
+                maxWidth: 210,
+                fitsSelectedTitleOnly: true
+            )
+            refreshEnvironmentContextBarFromCurrentState()
+            syncContextBarVisibility()
+        }
     }
 
     private func scheduleFilterFetch() {

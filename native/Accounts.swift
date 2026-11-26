@@ -92,6 +92,7 @@ final class AccountsPage: NSObject {
     let autoSwitchStatusBadge = pillBadge(L10n.t("accounts.smart_switch.disabled"), color: Design.inactivePill)
     let policySubtitleLabel = text("", size: 11, color: Design.secondary)
     let configButton = button(L10n.t("accounts.smart_switch.config_btn"), target: nil, action: #selector(showPolicySettings))
+    let privacyEyeButton = makePrivacyEyeButton(target: nil, action: #selector(togglePrivacyMask), symbolSize: 14, buttonSize: 26)
     let toggleCollapseAllButton = button(L10n.t("accounts.collapse_all"), target: nil, action: #selector(toggleCollapseAllAccounts))
     let manageAccountsButton = button(L10n.t("accounts.manage_btn", fallback: "管理账号…"), target: nil, action: #selector(addAccount))
     let policyBox: NSBox
@@ -128,6 +129,7 @@ final class AccountsPage: NSObject {
     private(set) var isAllCollapsedMode = false
     private var renderedFingerprint = ""
     private var recommendationFingerprint = ""
+    private var lastRecommendationState: (shouldSwitch: Bool, candidate: [String: Any]?, reason: String)?
     private var accountReadError: String?
     private var policyInFlight = false
     private var savingPolicy = false
@@ -307,7 +309,7 @@ final class AccountsPage: NSObject {
 
         let headerActions = horizontal([toggleCollapseAllButton, refreshQuotaBtn, manageAccountsButton], spacing: 8)
         headerActions.detachesHiddenViews = true
-        let root = pageStack(title: L10n.t("accounts.title"), actions: headerActions)
+        let root = pageStack(title: L10n.t("accounts.title"), titleAccessory: privacyEyeButton, actions: headerActions)
         root.spacing = Design.Spacing.page
 
         // B12: 待生效横幅
@@ -476,6 +478,8 @@ final class AccountsPage: NSObject {
             }
         }
 
+        privacyEyeButton.target = self
+        applyPrivacyEyeButtonState(privacyEyeButton, masked: app.privacyMaskAccounts, symbolSize: 14)
         toggleCollapseAllButton.target = self
         manageAccountsButton.target = self
         refreshQuotaBtn.target = self
@@ -597,7 +601,8 @@ final class AccountsPage: NSObject {
         let name = item["name"] as? String ?? ""
         let tier = AccountIdentity.normalizeTier(item["subscription_tier"] as? String)
 
-        let displayName = AccountIdentity.displayName(name: name, email: email)
+        let masked = app.privacyMaskAccounts
+        let displayName = AccountIdentity.displayName(name: name, email: email, masked: masked)
         let titleLbl = text(displayName, size: 15, weight: .semibold, color: .labelColor)
         titleLbl.lineBreakMode = .byTruncatingTail
         titleLbl.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -635,8 +640,9 @@ final class AccountsPage: NSObject {
         titleRow.alignment = .centerY
         titleRow.detachesHiddenViews = true
 
-        let emailLbl = text(email, size: 11, color: .secondaryLabelColor)
-        enableTextCopy(emailLbl, title: L10n.t("common.copy_full_email"))
+        let shownEmail = AccountIdentity.displayEmail(email, masked: masked)
+        let emailLbl = text(shownEmail.isEmpty ? L10n.t("accounts.unnamed") : shownEmail, size: 11, color: .secondaryLabelColor)
+        enableTextCopy(emailLbl, value: email, title: L10n.t("common.copy_full_email"))
         emailLbl.font = .systemFont(ofSize: 11.5, weight: .regular)
         emailLbl.lineBreakMode = .byTruncatingMiddle
         emailLbl.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(242), for: .horizontal)
@@ -659,7 +665,13 @@ final class AccountsPage: NSObject {
         nameAndEmail.setContentHuggingPriority(.defaultLow, for: .horizontal)
         fillWidth(titleRow, in: nameAndEmail); fillWidth(subRow, in: nameAndEmail)
 
-        let accountTitle = name.isEmpty ? email : "\(name) · \(email)"
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let accountTitle: String
+        if !trimmedName.isEmpty && trimmedName.caseInsensitiveCompare(email) != .orderedSame && !shownEmail.isEmpty {
+            accountTitle = "\(displayName) · \(shownEmail)"
+        } else {
+            accountTitle = shownEmail.isEmpty ? displayName : shownEmail
+        }
 
         let swBtn = button(L10n.t("accounts.switch_btn"), target: self, action: #selector(switchCardAccountById(_:)))
         swBtn.identifier = NSUserInterfaceItemIdentifier(id)
@@ -832,9 +844,13 @@ final class AccountsPage: NSObject {
         let isActive = id == activeId
         let isCollapsed = collapsedAccountIds.contains(id)
 
-        let displayName = AccountIdentity.displayName(name: name, email: email)
+        let masked = app.privacyMaskAccounts
+        let displayName = AccountIdentity.displayName(name: name, email: email, masked: masked)
         if card.titleLbl.stringValue != displayName { card.titleLbl.stringValue = displayName }
-        if card.emailLbl.stringValue != email { card.emailLbl.stringValue = email }
+        let shownEmail = AccountIdentity.displayEmail(email, masked: masked)
+        let resolvedEmailText = shownEmail.isEmpty ? L10n.t("accounts.unnamed") : shownEmail
+        if card.emailLbl.stringValue != resolvedEmailText { card.emailLbl.stringValue = resolvedEmailText }
+        enableTextCopy(card.emailLbl, value: email, title: L10n.t("common.copy_full_email"))
 
         card.tierPill.title = tier
         card.tierPill.isHidden = tier.isEmpty
@@ -874,7 +890,13 @@ final class AccountsPage: NSObject {
             card.hostTagBadge.isHidden = true
         }
 
-        let accountTitle = name.isEmpty ? email : "\(name) · \(email)"
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let accountTitle: String
+        if !trimmedName.isEmpty && trimmedName.caseInsensitiveCompare(email) != .orderedSame && !shownEmail.isEmpty {
+            accountTitle = "\(displayName) · \(shownEmail)"
+        } else {
+            accountTitle = shownEmail.isEmpty ? displayName : shownEmail
+        }
         let canSwitch = !isActive && item["disabled"] as? Bool != true && item["validation_blocked"] as? Bool != true
         card.switchButton.identifier = NSUserInterfaceItemIdentifier(id)
         card.switchButton.toolTip = nil
@@ -1051,7 +1073,11 @@ final class AccountsPage: NSObject {
     }
 
     private func makeRemoteAccountCardViews(host: CanonicalHostEnvironment) -> RemoteAccountCardViews {
-        let titleLbl = text(host.displayName, size: 15, weight: .semibold, color: .labelColor)
+        let masked = app.privacyMaskAccounts
+        let remoteTitle = host.email.isEmpty
+            ? host.displayName
+            : AccountIdentity.displayName(name: host.name, email: host.email, masked: masked)
+        let titleLbl = text(remoteTitle, size: 15, weight: .semibold, color: .labelColor)
         titleLbl.lineBreakMode = .byTruncatingTail
         titleLbl.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         titleLbl.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(240), for: .horizontal)
@@ -1082,7 +1108,7 @@ final class AccountsPage: NSObject {
         titleRow.alignment = .centerY
         titleRow.detachesHiddenViews = true
 
-        let emailLbl = text(host.email, size: 11.5, color: .secondaryLabelColor)
+        let emailLbl = text(AccountIdentity.displayEmail(host.email, masked: masked), size: 11.5, color: .secondaryLabelColor)
         emailLbl.lineBreakMode = .byTruncatingMiddle
         emailLbl.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(242), for: .horizontal)
         emailLbl.setContentHuggingPriority(.defaultHigh, for: .horizontal)
@@ -1187,9 +1213,13 @@ final class AccountsPage: NSObject {
     private func updateRemoteAccountCardViews(_ card: RemoteAccountCardViews, host: CanonicalHostEnvironment) {
         let isCollapsed = collapsedRemoteEnvIds.contains(host.environmentId)
         card.primaryRemoteKey = host.primaryRemoteKey
+        let masked = app.privacyMaskAccounts
+        let remoteDisplayName = host.email.isEmpty
+            ? host.displayName
+            : AccountIdentity.displayName(name: host.name, email: host.email, masked: masked)
 
-        if card.titleLbl.stringValue != host.displayName {
-            card.titleLbl.stringValue = host.displayName
+        if card.titleLbl.stringValue != remoteDisplayName {
+            card.titleLbl.stringValue = remoteDisplayName
         }
         card.tierPill.title = host.tier
         card.tierPill.isHidden = host.tier.isEmpty
@@ -1204,7 +1234,8 @@ final class AccountsPage: NSObject {
         card.hostTagBadge.setAccessibilityHelp(Self.hostSummaryLine(for: host))
 
         if !host.email.isEmpty {
-            if card.emailLbl.stringValue != host.email { card.emailLbl.stringValue = host.email }
+            let shownRemoteEmail = AccountIdentity.displayEmail(host.email, masked: masked)
+            if card.emailLbl.stringValue != shownRemoteEmail { card.emailLbl.stringValue = shownRemoteEmail }
             enableTextCopy(card.emailLbl, value: host.email, title: L10n.t("common.copy_full_email"))
             card.subRow.isHidden = isCollapsed
         } else {
@@ -1631,7 +1662,7 @@ final class AccountsPage: NSObject {
 
     private func computeRenderedFingerprint(remoteHosts: [CanonicalHostEnvironment]) -> String {
         let displayAccounts = remoteHosts.isEmpty ? accounts : accounts.map { app.fusedAccount($0) }
-        let localPart = "\(activeId):\(app.statusValue.liveAccountEmail):\(app.quotaStaleThresholdSeconds):" + displayAccounts.map { item in
+        let localPart = "\(app.privacyMaskAccounts):\(activeId):\(app.statusValue.liveAccountEmail):\(app.quotaStaleThresholdSeconds):" + displayAccounts.map { item in
             let id = item["id"] as? String ?? ""
             let rev = item["revision"] as? String ?? ""
             let g5Cd = item["geminiFiveHourResetCountdown"] as? String ?? ""
@@ -1817,6 +1848,7 @@ final class AccountsPage: NSObject {
     /// A04: 唯一的推荐状态复位入口（fetchPolicy / savePolicy / 预览失败 / 开关关闭共用）。
     func clearRecommendation() {
         recommendationFingerprint = ""
+        lastRecommendationState = nil
         recommendedAccountId = nil
         app.cachedRecommendedAccountId = nil
         app.lastRecommendedAccountsFingerprint = ""
@@ -1861,10 +1893,18 @@ final class AccountsPage: NSObject {
             clearRecommendation()
             return
         }
+        lastRecommendationState = (shouldSwitch, candidate, reason)
+        let masked = app.privacyMaskAccounts
+        let knownEmails = accounts.compactMap { $0["email"] as? String } + [candidate?["email"] as? String].compactMap { $0 }
+        let safeReason = AccountIdentity.maskEmailsInText(reason, knownEmails: knownEmails, masked: masked)
         if shouldSwitch, let candidate, let cId = candidate["id"] as? String, cId != activeId {
             let email = candidate["email"] as? String ?? ""
-            let name = candidate["name"] as? String ?? ""
-            let displayName = name.isEmpty ? email : "\(name) · \(email)"
+            let name = (candidate["name"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let shownName = masked ? AccountIdentity.maskDisplayName(name) : name
+            let shownEmail = AccountIdentity.displayEmail(email, masked: masked)
+            let displayName = (!shownName.isEmpty && name.caseInsensitiveCompare(email) != .orderedSame && !shownEmail.isEmpty)
+                ? "\(shownName) · \(shownEmail)"
+                : (shownEmail.isEmpty ? shownName : shownEmail)
             recommendationLabel.stringValue = L10n.t("accounts.smart_switch.recommend_low", ["display": displayName])
             recommendationLabel.textColor = .labelColor
             recommendationLabel.toolTip = nil
@@ -1874,10 +1914,14 @@ final class AccountsPage: NSObject {
             recommendationRow.isHidden = false
         } else if let candidate, let cId = candidate["id"] as? String, cId != activeId {
             let email = candidate["email"] as? String ?? ""
-            let name = candidate["name"] as? String ?? ""
-            let displayName = name.isEmpty ? email : "\(name) · \(email)"
-            
-            recommendationLabel.stringValue = reason.isEmpty ? L10n.t("accounts.smart_switch.backup_display", ["display": displayName]) : reason
+            let name = (candidate["name"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let shownName = masked ? AccountIdentity.maskDisplayName(name) : name
+            let shownEmail = AccountIdentity.displayEmail(email, masked: masked)
+            let displayName = (!shownName.isEmpty && name.caseInsensitiveCompare(email) != .orderedSame && !shownEmail.isEmpty)
+                ? "\(shownName) · \(shownEmail)"
+                : (shownEmail.isEmpty ? shownName : shownEmail)
+
+            recommendationLabel.stringValue = safeReason.isEmpty ? L10n.t("accounts.smart_switch.backup_display", ["display": displayName]) : safeReason
             recommendationLabel.textColor = Design.secondary
             switchRecommendedBtn.isHidden = true
             recommendationDivider.isHidden = false
@@ -1889,7 +1933,7 @@ final class AccountsPage: NSObject {
             recommendationDivider.isHidden = false
             recommendationRow.isHidden = false
         } else {
-            recommendationLabel.stringValue = reason.isEmpty ? L10n.t("accounts.smart_switch.no_candidate") : reason
+            recommendationLabel.stringValue = safeReason.isEmpty ? L10n.t("accounts.smart_switch.no_candidate") : safeReason
             recommendationLabel.textColor = Design.secondary
             switchRecommendedBtn.isHidden = true
             recommendationDivider.isHidden = false
@@ -1977,6 +2021,22 @@ final class AccountsPage: NSObject {
     }
 
 
+
+    @objc func togglePrivacyMask() {
+        app.togglePrivacyMaskAccounts()
+    }
+
+    func refreshPrivacyMaskState() {
+        applyPrivacyEyeButtonState(privacyEyeButton, masked: app.privacyMaskAccounts, symbolSize: 14, animated: true)
+        applyPrivacyFadeTransition(to: [cardsStack, remoteCardsStack, recommendationLabel])
+        renderedFingerprint = ""
+        let remoteHosts = app.canonicalRemoteHosts()
+        renderedFingerprint = computeRenderedFingerprint(remoteHosts: remoteHosts)
+        rebuildAccountCards(hosts: remoteHosts)
+        if let rec = lastRecommendationState, autoSwitchToggle.state == .on {
+            updateRecommendationBanner(shouldSwitch: rec.shouldSwitch, candidate: rec.candidate, reason: rec.reason)
+        }
+    }
 
     @objc func refreshAllQuotas() {
         app.refreshAllQuotasIncludingRemotes()
@@ -2115,7 +2175,8 @@ final class AccountsPage: NSObject {
         sheet.contentView = surface
 
         let titleLabel = text(L10n.t("accounts.rename.title"), size: 15, weight: .semibold, color: .labelColor)
-        let subLabel = text(email, size: 11.5, color: Design.secondary)
+        let shownEmail = AccountIdentity.displayEmail(email, masked: app.privacyMaskAccounts)
+        let subLabel = text(shownEmail, size: 11.5, color: Design.secondary)
         subLabel.lineBreakMode = .byTruncatingMiddle
 
         let field = NSTextField(string: oldName)
@@ -2187,11 +2248,12 @@ final class AccountsPage: NSObject {
             return
         }
         let email = item["email"] as? String ?? ""
+        let shownEmail = AccountIdentity.displayEmail(email, masked: app.privacyMaskAccounts)
 
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = L10n.t("accounts.delete.confirm_title")
-        alert.informativeText = L10n.t("accounts.delete.confirm_body", ["email": email])
+        alert.informativeText = L10n.t("accounts.delete.confirm_body", ["email": shownEmail])
         alert.addButton(withTitle: L10n.t("accounts.delete.confirm_action"))
         alert.addButton(withTitle: L10n.t("common.cancel"))
 

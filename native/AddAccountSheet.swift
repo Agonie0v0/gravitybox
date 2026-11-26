@@ -21,6 +21,8 @@ final class AddAccountSheet: NSObject {
     let cancelButton = button(L10n.t("common.cancel", fallback: "取消"), target: nil, action: #selector(cancel))
     private var feedback: NSStackView!
     private var languageObserver: NSObjectProtocol?
+    private var privacyMaskObserver: NSObjectProtocol?
+    private var rawCurrentEmail = ""
     private var headerTitleLabel: NSTextField!
     private var saveCurrentTitleLabel: NSTextField!
     private var saveCurrentSubLabel: NSTextField!
@@ -53,6 +55,7 @@ final class AddAccountSheet: NSObject {
         window.isReleasedWhenClosed = false
 
         let currentEmail = app.statusValue.liveAccountEmail.isEmpty ? app.statusValue.activeAccountEmail : app.statusValue.liveAccountEmail
+        self.rawCurrentEmail = currentEmail
         currentButton.target = self
         currentButton.title = L10n.t("add_account.save_current", fallback: "保存当前账号")
         currentButton.isEnabled = true
@@ -128,8 +131,9 @@ final class AddAccountSheet: NSObject {
         // 第一卡：保存当前 Antigravity 登录账号（主操作）
         var saveExtras: [NSView] = []
         if !currentEmail.isEmpty {
-            let emailLbl = text(currentEmail, size: 10.5, color: .secondaryLabelColor)
-            enableTextCopy(emailLbl, title: L10n.t("common.copy_full_email", fallback: "复制完整邮箱"))
+            let shownEmail = AccountIdentity.displayEmail(currentEmail, masked: app.privacyMaskAccounts)
+            let emailLbl = text(shownEmail, size: 10.5, color: .secondaryLabelColor)
+            enableTextCopy(emailLbl, value: currentEmail, title: L10n.t("common.copy_full_email", fallback: "复制完整邮箱"))
             emailLbl.font = .systemFont(ofSize: 11.5, weight: .regular)
             emailLbl.lineBreakMode = .byTruncatingMiddle
             emailLbl.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -218,11 +222,26 @@ final class AddAccountSheet: NSObject {
                 DispatchQueue.main.async { [weak self] in self?.syncLocalizedChrome() }
             }
         }
+        privacyMaskObserver = NotificationCenter.default.addObserver(
+            forName: Assistant.privacyMaskDidChangeNotification,
+            object: app,
+            queue: nil
+        ) { [weak self] _ in
+            let update = {
+                guard let self, let emailLbl = self.saveEmailCopyTitle, !self.rawCurrentEmail.isEmpty else { return }
+                emailLbl.stringValue = AccountIdentity.displayEmail(self.rawCurrentEmail, masked: self.app.privacyMaskAccounts)
+                enableTextCopy(emailLbl, value: self.rawCurrentEmail, title: L10n.t("common.copy_full_email", fallback: "复制完整邮箱"))
+            }
+            if Thread.isMainThread { update() } else { DispatchQueue.main.async(execute: update) }
+        }
     }
 
     deinit {
         if let languageObserver {
             NotificationCenter.default.removeObserver(languageObserver)
+        }
+        if let privacyMaskObserver {
+            NotificationCenter.default.removeObserver(privacyMaskObserver)
         }
     }
 
@@ -276,7 +295,7 @@ final class AddAccountSheet: NSObject {
         cancelButton.title = L10n.t("common.cancel", fallback: "取消")
         cancelButton.setAccessibilityLabel(cancelButton.title)
         if let saveEmailCopyTitle {
-            enableTextCopy(saveEmailCopyTitle, title: L10n.t("common.copy_full_email", fallback: "复制完整邮箱"))
+            enableTextCopy(saveEmailCopyTitle, value: rawCurrentEmail, title: L10n.t("common.copy_full_email", fallback: "复制完整邮箱"))
         }
         resizeSheetToFit()
     }

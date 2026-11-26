@@ -302,9 +302,10 @@ final class UsageEventCard: NSView {
         let rawEmail = ((event["account_email"] as? String) ?? (event["accountEmail"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let rawConfidence = ((event["account_confidence"] as? String) ?? (event["accountConfidence"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !rawEmail.isEmpty {
-            accountLabel.stringValue = rawEmail
+            let shownEmail = AccountIdentity.displayEmail(rawEmail, masked: AccountIdentity.isPrivacyMaskEnabled)
+            accountLabel.stringValue = shownEmail
             accountLabel.textColor = Design.secondary
-            accountLabel.setAccessibilityLabel(rawEmail)
+            accountLabel.setAccessibilityLabel(shownEmail)
             if rawConfidence == "inferred" {
                 accountLabel.setAccessibilityHelp(L10n.t("usage_event.env.inferred_account_tooltip"))
             } else {

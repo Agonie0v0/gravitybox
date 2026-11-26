@@ -175,6 +175,69 @@ body,
   border-radius: 7px;
 }
 
+.gb-privacy-eye-btn {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--text-tertiary);
+  transition: color 120ms ease, transform 120ms ease;
+}
+
+.gb-privacy-eye-btn[aria-pressed='true'] {
+  color: var(--text-secondary);
+}
+
+.gb-privacy-eye-btn:hover:not(:disabled) {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: color-mix(in srgb, var(--text) 68%, var(--text-secondary));
+}
+
+.gb-privacy-eye-btn:active:not(:disabled) {
+  background: transparent;
+  border-color: transparent;
+  transform: scale(0.975);
+}
+
+@keyframes gb-eye-blink {
+  0% {
+    opacity: 0.25;
+    transform: scale(0.78);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes gb-privacy-fade {
+  0% {
+    opacity: 0.45;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+.gb-privacy-eye-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  animation: gb-eye-blink 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.gb-privacy-text-fade {
+  animation: gb-privacy-fade 140ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gb-privacy-eye-glyph,
+  .gb-privacy-text-fade {
+    animation: none;
+  }
+}
+
 /* Segmented Control */
 .gb-segmented {
   display: inline-flex;

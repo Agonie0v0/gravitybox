@@ -2,8 +2,6 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   BarChart3,
   DollarSign,
-  Eye,
-  EyeOff,
   Globe,
   HardDrive,
   Languages,
@@ -515,41 +513,6 @@ export function SettingsPage() {
               <option value="light">{locale === 'en' ? 'Light' : '浅色'}</option>
               <option value="dark">{locale === 'en' ? 'Dark' : '深色'}</option>
             </select>
-          </div>
-
-          <div className="gb-divider" />
-
-          {/* Privacy Masking Toggle */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div
-              className="gb-icon-badge"
-              style={{ background: 'var(--subcard)', border: '0.5px solid var(--border-strong)', color: 'var(--text-secondary)' }}
-            >
-              {config.privacyMaskAccounts ? <EyeOff size={14} /> : <Eye size={14} />}
-            </div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>
-                {t('settings.privacy.title', undefined, locale === 'en' ? 'Hide Account Info' : '隐藏账号敏感信息')}
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
-                {t(
-                  'settings.privacy.subtitle',
-                  undefined,
-                  locale === 'en'
-                    ? 'Mask account names and email addresses while keeping quota bars visible'
-                    : '在界面中脱敏隐藏账号名称与邮箱，保留配额进度条与卡片状态可见',
-                )}
-              </div>
-            </div>
-            <ToggleSwitch
-              checked={Boolean(config.privacyMaskAccounts)}
-              onChange={(next) => void updateConfig({ privacyMaskAccounts: next })}
-              ariaLabel={t(
-                'settings.privacy.title',
-                undefined,
-                locale === 'en' ? 'Hide Account Info' : '隐藏账号敏感信息',
-              )}
-            />
           </div>
         </div>
       </div>

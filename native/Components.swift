@@ -1,4 +1,5 @@
 import Cocoa
+import QuartzCore
 
 private final class CopyTextMenuItem: NSMenuItem {
     weak var label: NSTextField?
@@ -67,6 +68,60 @@ func button(_ title: String, target: AnyObject?, action: Selector) -> NSButton {
     let view = DesignButton(title: title, target: target, action: action)
     view.bezelStyle = .rounded; view.isBordered = false; view.font = .systemFont(ofSize: 12, weight: .medium)
     return view
+}
+func makePrivacyEyeButton(target: AnyObject?, action: Selector, symbolSize: CGFloat = 13.5, buttonSize: CGFloat = 24) -> DesignButton {
+    let btn = DesignButton(title: "", target: target, action: action)
+    btn.bezelStyle = .rounded
+    btn.isBordered = false
+    btn.isQuietAccessory = true
+    btn.hidesQuietHoverBackground = true
+    btn.preferredIconButtonSize = buttonSize
+    btn.imagePosition = .imageOnly
+    btn.controlSize = .small
+    btn.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+        btn.widthAnchor.constraint(equalToConstant: buttonSize),
+        btn.heightAnchor.constraint(equalToConstant: buttonSize)
+    ])
+    applyPrivacyEyeButtonState(btn, masked: AccountIdentity.isPrivacyMaskEnabled, symbolSize: symbolSize)
+    return btn
+}
+func applyPrivacyEyeButtonState(_ btn: NSButton, masked: Bool, symbolSize: CGFloat = 13.5, includeShortcutHint: Bool = true, animated: Bool = false) {
+    let previousVal = btn.accessibilityValue() as? Int
+    let nextVal = masked ? 1 : 0
+    let initialized = previousVal != nil
+    let stateChanged = initialized && previousVal != nextVal
+    let hasRealSymbol = (btn.image?.size.width ?? 0) > 2 && (btn.image?.size.height ?? 0) > 2
+    if !initialized || stateChanged || !hasRealSymbol {
+        let symbolName = masked ? "eye.slash" : "eye"
+        let img = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: symbolSize, weight: .medium))
+        img?.isTemplate = true
+        if let designBtn = btn as? DesignButton {
+            designBtn.setImage(img, animated: animated && stateChanged && hasRealSymbol)
+        } else {
+            btn.image = img
+        }
+    }
+    btn.contentTintColor = nil
+    btn.needsDisplay = true
+    let actionTitle = masked
+        ? L10n.t("accounts.privacy.show", fallback: "显示账号信息")
+        : L10n.t("accounts.privacy.hide", fallback: "隐藏账号信息")
+    btn.toolTip = nil
+    btn.setAccessibilityLabel(actionTitle)
+    btn.setAccessibilityHelp(includeShortcutHint ? "\(actionTitle) (⇧⌘M)" : actionTitle)
+    btn.setAccessibilityValue(nextVal)
+}
+func applyPrivacyFadeTransition(to views: [NSView], duration: CFTimeInterval = 0.14) {
+    for view in views where !view.isHidden && Design.shouldAnimate(in: view) {
+        view.wantsLayer = true
+        let transition = CATransition()
+        transition.type = .fade
+        transition.duration = duration
+        transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        view.layer?.add(transition, forKey: "gb-privacy-fade")
+    }
 }
 class DesignCardBox: NSBox {
     var enablesHoverHighlight: Bool = false {
@@ -258,20 +313,31 @@ final class DesignDividerView: NSView {
 func divider() -> NSView {
     DesignDividerView()
 }
-func pageHeader(title: String, actions: NSView? = nil) -> NSView {
+func pageHeader(title: String, titleAccessory: NSView? = nil, actions: NSView? = nil) -> NSView {
     let titleLabel = text(title, size: 24, weight: .semibold)
     titleLabel.identifier = NSUserInterfaceItemIdentifier("page-title")
     titleLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
     titleLabel.setContentCompressionResistancePriority(.required, for: .vertical)
-    guard let actions else { return titleLabel }
+    let leadingView: NSView
+    if let titleAccessory {
+        titleAccessory.setContentHuggingPriority(.required, for: .horizontal)
+        titleAccessory.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let titleGroup = horizontal([titleLabel, titleAccessory], spacing: 6)
+        titleGroup.alignment = .centerY
+        titleGroup.detachesHiddenViews = true
+        leadingView = titleGroup
+    } else {
+        leadingView = titleLabel
+    }
+    guard let actions else { return leadingView }
     actions.setContentHuggingPriority(.required, for: .horizontal)
     actions.setContentCompressionResistancePriority(.required, for: .horizontal)
-    let row = horizontal([titleLabel, flexibleSpace(), actions])
+    let row = horizontal([leadingView, flexibleSpace(), actions])
     row.alignment = .centerY
     return row
 }
-func pageStack(title: String, actions: NSView? = nil) -> NSStackView {
-    vertical([pageHeader(title: title, actions: actions)], spacing: 20)
+func pageStack(title: String, titleAccessory: NSView? = nil, actions: NSView? = nil) -> NSStackView {
+    vertical([pageHeader(title: title, titleAccessory: titleAccessory, actions: actions)], spacing: 20)
 }
 func fixedPage(_ stack: NSStackView) -> NSView {
     let container = NSView()

@@ -55,9 +55,10 @@ struct AppConfiguration: Codable {
     var appLanguage: String? = nil
     var antigravityProxyMode = "off"
     var antigravityProxyManualUrl = ""
+    var privacyMaskAccounts = false
 
     enum CodingKeys: String, CodingKey {
-        case autoPricingSyncEnabled, hudEnabled, quotaRefreshMinutes, schema, lastPage, navigationVersion, launchAntigravityOnStart, autoUpdateEnabled, lastCleanedVersion, accountsCollapsed, menuSelectedTab, menuUsagePeriod, menuUsageEnvironmentId, menuTrendMetric, applicationChannel, appLanguage, antigravityProxyMode, antigravityProxyManualUrl
+        case autoPricingSyncEnabled, hudEnabled, quotaRefreshMinutes, schema, lastPage, navigationVersion, launchAntigravityOnStart, autoUpdateEnabled, lastCleanedVersion, accountsCollapsed, menuSelectedTab, menuUsagePeriod, menuUsageEnvironmentId, menuTrendMetric, applicationChannel, appLanguage, antigravityProxyMode, antigravityProxyManualUrl, privacyMaskAccounts
     }
 
     init() {}
@@ -99,6 +100,7 @@ struct AppConfiguration: Codable {
         }
         antigravityProxyManualUrl = ((try? container.decodeIfPresent(String.self, forKey: .antigravityProxyManualUrl)) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        privacyMaskAccounts = (try? container.decode(Bool.self, forKey: .privacyMaskAccounts)) ?? false
     }
 
     mutating func migrateNavigation() {

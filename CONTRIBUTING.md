@@ -22,8 +22,8 @@ GravityBox 以 macOS 原生体验（`native/`）为核心主线，同时通过 `
 
 ## 1. 开发环境要求
 
-- **操作系统**：macOS 14 (Sonoma) 或更高版本（主线，推荐 Apple Silicon 芯片）；参与 Windows 端开发需 Windows 10/11 x64
-- **Node.js**：`>=22.15.0 <23`（推荐使用 nvm 或 fnm 管理）
+- **操作系统**：macOS 14 (Sonoma) 或更高版本；Apple Silicon（`arm64`）与 Intel（`x86_64`）均可在本机从源码构建，目前官方预构建 macOS 包仅面向 Apple Silicon。参与 Windows 端开发需 Windows 10/11 x64
+- **Node.js**：`>=22.15.0 <23`（推荐使用 nvm 或 fnm 管理）；macOS 请使用与构建架构匹配的 Node.js
 - **Swift / Xcode CLI Tools**（macOS）：系统自带 `swiftc`（Xcode Command Line Tools）
 - **Rust / Tauri 2 / NSIS**（Windows 可选）：`cargo` / `rustc`、WebView2 与 MSVC 构建工具（仅打安装程序时需 NSIS）
 - **Google Chrome**：用于运行基于 CDP 的无头浏览器回归套件（`/Applications/Google Chrome.app`）
@@ -61,7 +61,7 @@ npm run verify
 
 1. **隐私安全底线**：
    - 严禁加入任何未经用户明确授权的外部遥测、埋点或数据回传代码。
-   - 本机账号库凭据与原子写入临时文件必须严格锁定当前用户私有权限（macOS `0600`），macOS Keychain 与 Windows Credential Manager 读写严格限定于官方登录态同步，切号归档与账号移除快照必须对敏感 Token 作不可逆脱敏。
+   - 本机账号库凭据与原子写入临时文件必须严格锁定当前用户私有权限（macOS `0600`），macOS Keychain 与 Windows Credential Manager 读写严格限定于官方登录态同步，切号历史归档必须对敏感 Token 作不可逆脱敏，删号时不再写入 `accounts-removed/` 留档并须同步清理关联切号恢复快照。
 2. **数据零硬删除（Non-destructive Safety）**：
    - 缓存维护与账号切号事务严禁执行物理硬删除操作，必须走四阶段原子恢复引擎与隔离废纸篓 / 回收站快照（macOS 废纸篓 / Windows COM `IFileOperation` 回收站迁移，禁止直接物理删档）。
 3. **版权与上游隔离**：
@@ -99,7 +99,7 @@ npm run test:browser
 ```
 启动无头 Chromium 实例，通过 CDP 验证界面汉化、微补丁、Shadow DOM 穿透、双语热切换及受保护元素隔离。
 
-macOS ARM64 开发环境与 CI 使用固定版本的 Chrome Headless Shell，下载至 `.cache/` 并核对压缩包及二进制 SHA-256。版本与哈希在 `tools/setup-test-browser.mjs` 中一起维护。可用 `CHROME_BIN` 显式指定其他测试浏览器；未准备固定浏览器时，本地仍可使用已安装的 Chrome。测试浏览器不随应用打包。
+macOS 开发环境与 CI 按构建架构使用固定版本的 Chrome Headless Shell（`mac-arm64` 或 `mac-x64`），下载至 `.cache/` 并核对压缩包及二进制 SHA-256。版本与哈希在 `tools/setup-test-browser.mjs` 中一起维护。可用 `CHROME_BIN` 显式指定其他测试浏览器；未准备固定浏览器时，本地仍可使用已安装的 Chrome。测试浏览器不随应用打包。
 
 ### 自动化发布门禁 (Release Gate)
 ```bash

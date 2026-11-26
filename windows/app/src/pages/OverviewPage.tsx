@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react';
 import {
   BarChart3,
   DollarSign,
+  Eye,
+  EyeOff,
   HardDrive,
   Languages,
   Layers,
@@ -51,6 +53,7 @@ export function OverviewPage() {
     locale,
     isDark,
     config,
+    updateConfig,
     reachable,
     status,
     dashboard,
@@ -99,6 +102,10 @@ export function OverviewPage() {
   const rawActiveEmail = (dashAccounts?.activeEmail ?? status.activeAccountEmail ?? '').trim();
   const activeEmail = rawActiveEmail ? (masked ? maskEmail(rawActiveEmail) : rawActiveEmail) : '';
   const activeTier = normalizeTier(dashAccounts?.activeTier ?? status.activeSubscriptionTier, locale);
+  const privacyActionTitle = masked
+    ? t('accounts.privacy.show', undefined, locale === 'en' ? 'Show Account Info' : '显示账号信息')
+    : t('accounts.privacy.hide', undefined, locale === 'en' ? 'Hide Account Info' : '隐藏账号信息');
+  const privacyLabel = `${privacyActionTitle} (Ctrl+Shift+M)`;
 
   const contract = useMemo(
     () => parseQuotaContract(dashAccounts as Record<string, unknown> | null, locale, { compact: true }),
@@ -357,6 +364,8 @@ export function OverviewPage() {
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
               <span
+                key={`name-${masked ? 'm' : 'p'}`}
+                className="gb-privacy-text-fade"
                 style={{
                   fontSize: 16,
                   fontWeight: 700,
@@ -368,9 +377,29 @@ export function OverviewPage() {
                 {activeName}
               </span>
               <TierBadge tier={activeTier} />
+              {rawActiveEmail && (
+                <button
+                  type="button"
+                  className="gb-btn gb-privacy-eye-btn gb-icon-btn"
+                  style={{
+                    width: 22,
+                    height: 22,
+                    flexShrink: 0,
+                  }}
+                  aria-label={privacyLabel}
+                  aria-pressed={masked}
+                  title={privacyLabel}
+                  onClick={() => void updateConfig({ privacyMaskAccounts: !masked })}
+                >
+                  <span key={masked ? 'off' : 'on'} className="gb-privacy-eye-glyph">
+                    {masked ? <EyeOff size={13} /> : <Eye size={13} />}
+                  </span>
+                </button>
+              )}
             </div>
             <div
-              className="selectable"
+              key={`email-${masked ? 'm' : 'p'}`}
+              className="selectable gb-privacy-text-fade"
               style={{
                 fontSize: 12,
                 color: 'var(--text-secondary)',

@@ -105,6 +105,71 @@ import Cocoa
         for sub in v.subviews { values.append(contentsOf: visibleTextValues(sub)) }
         return values
     }
+
+    static func checkUpdateAssetDiscovery(in state: URL) throws {
+        let host = Assistant(state: state)
+        host.configuration = try ConfigurationStore(state: state)
+        let manager = host.updateManager
+        let version = "9.9.9"
+        #if arch(x86_64)
+        let matchingArch = "x86_64", foreignArch = "arm64"
+        #else
+        let matchingArch = "arm64", foreignArch = "x86_64"
+        #endif
+        let matchingName = "GravityBox-\(version)-\(matchingArch).dmg"
+        func assets(for name: String) -> [[String: String]] {
+            [name, name + ".sha256"].map { ["name": $0, "browser_download_url": "https://example.invalid/\($0)"] }
+        }
+        let matching = assets(for: matchingName)
+        let foreign = assets(for: "GravityBox-\(version)-\(foreignArch).dmg")
+        let universal = assets(for: "GravityBox-\(version)-universal.dmg")
+
+        func checkRelease(_ assets: [[String: String]], description: String) throws {
+            let payload = try JSONSerialization.data(withJSONObject: ["tag_name": "v\(version)", "assets": assets])
+            var finished = false
+            manager.onStateChanged = { [weak manager] in
+                if let manager, case .checking = manager.state { return }
+                finished = true
+            }
+            manager.checkTransport = { request, completion in
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)
+                completion(payload, response, nil)
+            }
+            defer { manager.onStateChanged = nil; manager.checkTransport = nil }
+            manager.checkForUpdates()
+            waitUntil(step: 0.01, description: description) { finished }
+        }
+
+        try checkRelease(foreign + universal + matching, description: "matching update pair")
+        if case .updateAvailable(let release) = manager.state {
+            check(release.dmgURL?.lastPathComponent == matchingName, "Must select this build's DMG")
+            check(release.sha256URL?.lastPathComponent == matchingName + ".sha256", "Must pair it with its own checksum")
+        } else {
+            check(false, "A matching pair with HTTPS URLs must be offered")
+        }
+
+        var invalidDMG = matching, invalidChecksum = matching
+        invalidDMG[0]["browser_download_url"] = "https:///missing-host"
+        invalidChecksum[1]["browser_download_url"] = "http://example.invalid/checksum"
+        let unavailable = [
+            ("missing checksum", [matching[0]] + foreign),
+            ("missing DMG", [matching[1]]),
+            ("invalid DMG URL", invalidDMG),
+            ("non-HTTPS checksum URL", invalidChecksum),
+            ("foreign architecture", foreign),
+            ("universal package", universal),
+        ]
+        for (description, assets) in unavailable {
+            try checkRelease(assets, description: description)
+            if case .upToDate = manager.state {
+                check(manager.availableRelease == nil && manager.downloadedDMGURL == nil, "\(description) must clear the update prompt")
+            } else {
+                check(false, "\(description) must be treated as no update")
+            }
+        }
+        print("Update asset discovery passed (\(matchingArch), \(1 + unavailable.count) cases)")
+    }
+
     static func main() throws {
         let application = NSApplication.shared
         let interactive = CommandLine.arguments.contains("--interactive")
@@ -113,6 +178,7 @@ import Cocoa
         let state = URL(fileURLWithPath:CommandLine.arguments[1]), output = URL(fileURLWithPath:CommandLine.arguments[2])
         try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
         L10n.shared.setLanguage("zh-Hans", notify: false)
+        try checkUpdateAssetDiscovery(in: state.appendingPathComponent("update-asset-discovery"))
         let assistant = Assistant(state:state)
         assistant.configuration = try ConfigurationStore(state:state)
         assistant.configuration.value.navigationVersion = 5
@@ -1263,6 +1329,7 @@ import Cocoa
             check(updaterScript.contains("HUP TERM INT QUIT PIPE") && updaterScript.contains("kill -9 12345") && updaterScript.contains("--install-update"), "Detached updater must wait for its parent then invoke the transactional helper")
             check(!updaterScript.contains("rm -rf") && !updaterScript.contains("ditto"), "Detached launcher must never delete or copy over the live app")
             check(AppUpdateManager.extractGravityBoxDMGVersion(from: "GravityBox-1.0.4-arm64.dmg") == "1.0.4", "Must extract version from standard arm64 DMG filename")
+            check(AppUpdateManager.extractGravityBoxDMGVersion(from: "GravityBox-1.0.4-x86_64.dmg") == "1.0.4", "Must extract version from Intel x86_64 DMG filename")
             check(AppUpdateManager.extractGravityBoxDMGVersion(from: "GravityBox-v1.0.3-universal.dmg.sha256") == "1.0.3", "Must extract version from v-prefixed DMG sha256 sidecar")
             check(AppUpdateManager.extractGravityBoxDMGVersion(from: "OtherApp-1.0.4-arm64.dmg") == nil, "Must ignore unrelated DMG filenames")
 
@@ -1377,7 +1444,8 @@ import Cocoa
         check(aboutPage.versionSpecLabel.stringValue.contains("Antigravity") && !aboutPage.versionSpecLabel.stringValue.contains("Build "), "About page versionSpecLabel must display Antigravity version without Build number")
         let aboutTexts = allTextValues(aboutPage.view)
         check(aboutTexts.contains("自动检查更新") && aboutTexts.contains("运行信息") && aboutTexts.contains("目标应用") && aboutTexts.contains("GravityBox 数据目录"), "Simplified About page must render 自动检查更新, 运行信息, 目标应用 and GravityBox 数据目录")
-        check(!aboutTexts.contains("系统环境") && !aboutTexts.contains("构建与环境") && !aboutTexts.contains("本地数据与隐私原则") && !aboutTexts.contains("macOS · arm64") && !aboutTexts.contains { $0.contains("查看历史发行版本") }, "Simplified About page must omit redundant OS, build, privacy, arm64 pill and Releases subtitle rows")
+        let aboutArchPill = "macOS · \(AppUpdateManager.releaseArchSuffix)"
+        check(!aboutTexts.contains("系统环境") && !aboutTexts.contains("构建与环境") && !aboutTexts.contains("本地数据与隐私原则") && !aboutTexts.contains(aboutArchPill) && !aboutTexts.contains { $0.contains("查看历史发行版本") }, "Simplified About page must omit redundant OS, build, privacy, arch pill and Releases subtitle rows")
         check(aboutPage.revealDataBtn.title == "在访达中显示", "About page revealDataBtn title must be 在访达中显示")
         check(aboutPage.githubReleasesBtn.title == "GitHub ↗", "About page githubReleasesBtn title must be GitHub ↗")
 
@@ -1723,7 +1791,8 @@ import Cocoa
         let wrongName = updateRoot.appendingPathComponent("wrong-name.sha256")
         try Data((String(repeating: "0", count: 64) + "  Other.dmg\n").utf8).write(to: wrongName)
         let mismatch = updateRoot.appendingPathComponent("mismatch.sha256")
-        try Data((String(repeating: "0", count: 64) + "  GravityBox-9.9.9-arm64.dmg\n").utf8).write(to: mismatch)
+        let targetDMGName = "GravityBox-9.9.9-\(AppUpdateManager.releaseArchSuffix).dmg"
+        try Data((String(repeating: "0", count: 64) + "  \(targetDMGName)\n").utf8).write(to: mismatch)
         let sources: [URL?] = [nil, updateRoot.appendingPathComponent("missing.sha256"), malformed, wrongName, mismatch]
         for source in sources {
             let release = AppReleaseInfo(version: "9.9.9", tagName: "v9.9.9", title: "fixture", changelog: "", publishedDate: "", htmlURL: URL(string: "https://example.invalid")!, dmgURL: fakeDMG, sha256URL: source)
@@ -1737,7 +1806,7 @@ import Cocoa
             }
             check(finished && !accepted && assistant.updateManager.downloadedDMGURL == nil, "Invalid or missing checksum must never produce an installable package")
         }
-        let cachedDMG = state.appendingPathComponent("updates/v9.9.9/GravityBox-9.9.9-arm64.dmg")
+        let cachedDMG = state.appendingPathComponent("updates/v9.9.9/\(targetDMGName)")
         try FileManager.default.createDirectory(at: cachedDMG.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("previously verified synthetic package".utf8).write(to: cachedDMG)
         let cachedHash = try UpdatePackageIntegrity.fileHash(cachedDMG)
@@ -7171,6 +7240,190 @@ import Cocoa
                     check(!source.contains("NSApp.activate(ignoringOtherApps:"), "Regression: direct NSApp.activate(ignoringOtherApps:) outside Design.swift is forbidden in \(swiftFile.lastPathComponent); use Design.activateApplicationForcingFront()")
                 }
             }
+        }
+
+        // 1.2.2 账号邮箱隐私遮挡与就地小眼睛、快捷键回归验证
+        do {
+            defer { AccountIdentity.isPrivacyMaskEnabled = false }
+            check(AccountIdentity.maskEmail("") == "", "maskEmail empty")
+            check(AccountIdentity.maskEmail("a@example.test") == "•••@e•••.test", "maskEmail 1-char local")
+            check(AccountIdentity.maskEmail("ab@example.invalid") == "a•••@e•••.invalid", "maskEmail 2-char local")
+            let multiLevelCorpEmail = "foo@" + "corp.company.example.invalid"
+            let aliceCorpEmail = "alice@" + "corp.example.invalid"
+            check(AccountIdentity.maskEmail(multiLevelCorpEmail) == "f•••@c•••.invalid", "maskEmail 3-char local and multi-level domain must hide corporate domain")
+            check(AccountIdentity.maskEmail("zhangsan@example.invalid") == "zh•••n@e•••.invalid", "maskEmail >=4-char local keeps 2 head + 1 tail")
+            check(AccountIdentity.maskEmail("localonly") == "lo•••y", "maskEmail without @")
+
+            check(AccountIdentity.maskDisplayName("A") == "••••", "maskDisplayName 1-char uses 4 bullets")
+            check(AccountIdentity.maskDisplayName("甲") == "••••", "maskDisplayName 1-char CJK uses 4 bullets")
+            check(AccountIdentity.maskDisplayName("甲乙") == "甲•••", "maskDisplayName 2-char CJK uses 3 bullets")
+            check(AccountIdentity.maskDisplayName("丙丁") == "丙•••", "maskDisplayName 2-char CJK alt uses 3 bullets")
+            check(AccountIdentity.maskDisplayName("甲乙丙") == "甲•••", "maskDisplayName 3-char CJK uses 3 bullets")
+            check(AccountIdentity.maskDisplayName("Alex Sample User") == "A•••", "maskDisplayName >=4-char Latin hides spaces and full initials")
+            check(AccountIdentity.maskDisplayName("主力工作号") == "主•••", "maskDisplayName >=4-char CJK")
+            check(AccountIdentity.maskDisplayName("zhangsan@example.invalid") == "zh•••n@e•••.invalid", "maskDisplayName delegates email-shaped names")
+            check(AccountIdentity.displayName(name: "主力工作号", email: "zhangsan@example.invalid", masked: true) == "主•••", "Custom nickname must be masked when privacy mask is enabled")
+            check(AccountIdentity.displayName(name: "zhangsan@example.invalid", email: "zhangsan@example.invalid", masked: true) == "zh•••n@e•••.invalid", "Email-shaped name must still be masked")
+            check(AccountIdentity.displayName(name: "", email: "zhangsan@example.invalid", masked: true) == "zh•••n", "Fallback prefix without custom name must be masked")
+            check(AccountIdentity.displayName(name: "", email: "", masked: true) == "", "Empty identity must stay empty")
+            check(
+                AccountIdentity.displayTarget(name: "甲乙", email: "zhangsan@example.invalid", masked: true, isEnglish: false)
+                    == "甲•••（zh•••n@e•••.invalid）",
+                "displayTarget must mask both nickname and email"
+            )
+            check(
+                AccountIdentity.maskEmailsInText("Switch to \(aliceCorpEmail) (80%)", knownEmails: [aliceCorpEmail], masked: true)
+                    == "Switch to al•••e@c•••.invalid (80%)",
+                "maskEmailsInText must mask emails inside prose"
+            )
+
+            let maskStateDir = state.appendingPathComponent("privacy-mask-regression")
+            try? FileManager.default.removeItem(at: maskStateDir)
+            try FileManager.default.createDirectory(at: maskStateDir, withIntermediateDirectories: true)
+            try Data(#"{"schema":2,"lastPage":0}"#.utf8).write(to: maskStateDir.appendingPathComponent("config.json"))
+
+            let maskHost = Assistant(state: maskStateDir)
+            maskHost.configuration = try ConfigurationStore(state: maskStateDir)
+            check(maskHost.configuration.value.privacyMaskAccounts == false, "Legacy config without privacyMaskAccounts must default to false")
+            AccountIdentity.isPrivacyMaskEnabled = maskHost.configuration.value.privacyMaskAccounts
+            maskHost.bridge = BackendBridge(resources: state, state: maskStateDir)
+            maskHost.reachable = true
+            maskHost.installApplicationMenu()
+
+            check(maskHost.privacyMaskMenuItem?.keyEquivalent == "m", "View menu privacy toggle must bind keyEquivalent 'm'")
+            check(maskHost.privacyMaskMenuItem?.keyEquivalentModifierMask == [.command, .shift], "View menu privacy toggle must use Shift+Cmd+M")
+
+            let dash = DashboardPage(app: maskHost)
+            maskHost.overview = dash
+            let accPage = AccountsPage(app: maskHost)
+            maskHost.accountsPage = accPage
+            let uPage = UsagePage(app: maskHost)
+            maskHost.usagePage = uPage
+            let mPanel = maskHost.ensureMenuPanelController()
+
+            let maskedTestAccounts: [[String: Any]] = [
+                ["id": "acc1", "name": "主力工作号", "email": "zhangsan@example.invalid", "subscription_tier": "PRO"],
+                ["id": "acc2", "name": "", "email": aliceCorpEmail, "subscription_tier": "FREE"]
+            ]
+            maskHost.cachedAccounts = maskedTestAccounts
+            maskHost.activeAccountId = "acc1"
+            dash.renderSummary([
+                "accounts": ["activeEmail": "zhangsan@example.invalid", "activeName": "主力工作号", "activeTier": "PRO", "isLiveVerified": true, "liveAccountEmail": "zhangsan@example.invalid"],
+                "usage": ["availability": "complete", "todayTokens": 100, "requestCount": 1, "estimatedUsd": 0.01, "totalTokens": 100, "totalRequestCount": 1, "allTimeEstimatedUsd": 0.01]
+            ], isStaleFallback: false)
+            accPage.fetch(["accounts": maskedTestAccounts, "activeId": "acc1"])
+            _ = UsageFilterSupport.syncAccountPopup(uPage.accountPopup, accounts: maskedTestAccounts, selectedId: "all", allTitle: "全部")
+            mPanel.selectTab(1, persist: true); mPanel.panelWillOpen(); pump()
+
+            check(dash.activeAccountLabel.stringValue == "主力工作号" && dash.activeEmailLabel.stringValue == "zhangsan@example.invalid", "Unmasked overview shows raw email")
+            func hasRealSymbolImage(_ btn: NSButton) -> Bool {
+                guard let img = btn.image else { return false }
+                return img.isTemplate && img.size.width > 2 && img.size.height > 2
+            }
+            check(
+                hasRealSymbolImage(dash.privacyEyeButton)
+                    && hasRealSymbolImage(accPage.privacyEyeButton)
+                    && hasRealSymbolImage(mPanel.quotaPrivacyEyeButton)
+                    && hasRealSymbolImage(mPanel.accountsPrivacyEyeButton),
+                "All privacy eye buttons must hold a real template SF Symbol image rather than AppKit 1x1 placeholder on initial render"
+            )
+            check(!dash.privacyEyeButton.isHidden && (dash.privacyEyeButton.accessibilityValue() as? Int) == 0, "Unmasked overview eye button shows unmasked state")
+            check(!dash.privacyEyeButton.isBordered && !accPage.privacyEyeButton.isBordered && !mPanel.quotaPrivacyEyeButton.isBordered && !mPanel.accountsPrivacyEyeButton.isBordered, "All privacy eye buttons must remain borderless")
+            check(dash.privacyEyeButton.hidesQuietHoverBackground && accPage.privacyEyeButton.hidesQuietHoverBackground && mPanel.quotaPrivacyEyeButton.hidesQuietHoverBackground && mPanel.accountsPrivacyEyeButton.hidesQuietHoverBackground, "All privacy eye buttons must suppress hover background box")
+            check(dash.privacyEyeButton.contentTintColor == nil && accPage.privacyEyeButton.contentTintColor == nil && mPanel.quotaPrivacyEyeButton.contentTintColor == nil && mPanel.accountsPrivacyEyeButton.contentTintColor == nil, "Unmasked quiet eye buttons must clear active tint")
+            mPanel.quotaPrivacyEyeButton.hovered = true
+            mPanel.panelDidClose()
+            check(!mPanel.quotaPrivacyEyeButton.hovered && mPanel.quotaPrivacyEyeButton.hoverProgress == 0, "MenuPanel close must reset privacy eye hover state")
+            if let titleRow = dash.privacyEyeButton.superview as? NSStackView {
+                let views = titleRow.arrangedSubviews
+                check(
+                    dash.privacyEyeButton.superview !== dash.refreshQuotaButton.superview
+                        && views.last !== dash.privacyEyeButton
+                        && (views.firstIndex(where: { $0 === dash.privacyEyeButton }) ?? -1) == ((views.firstIndex(where: { $0 === dash.heroRemoteHostBadge }) ?? -2) + 1),
+                    "Overview Hero privacyEyeButton must sit inline right after account badges before spacer"
+                )
+            } else {
+                check(false, "Overview Hero privacyEyeButton must live inside titleRow NSStackView")
+            }
+            check(
+                accPage.privacyEyeButton.superview !== accPage.manageAccountsButton.superview
+                    && (accPage.privacyEyeButton.superview?.subviews.contains(where: { $0.identifier?.rawValue == "page-title" }) == true),
+                "AccountsPage privacyEyeButton must sit inline next to the page title"
+            )
+            if let quotaNameRow = mPanel.quotaPrivacyEyeButton.superview as? NSStackView {
+                let views = quotaNameRow.arrangedSubviews
+                check(
+                    views.last !== mPanel.quotaPrivacyEyeButton
+                        && (views.firstIndex(where: { $0 === mPanel.quotaPrivacyEyeButton }) ?? -1) == ((views.firstIndex(where: { $0 === mPanel.quotaStatusBadge }) ?? -2) + 1),
+                    "MenuPanel quotaPrivacyEyeButton must sit inline right after status badge before spacer"
+                )
+            } else {
+                check(false, "MenuPanel quotaPrivacyEyeButton must live inside an NSStackView row")
+            }
+            if let accountsTopRow = mPanel.accountsPrivacyEyeButton.superview as? NSStackView {
+                let views = accountsTopRow.arrangedSubviews
+                check(
+                    views.count >= 3 && views[1] === mPanel.accountsPrivacyEyeButton,
+                    "MenuPanel accountsPrivacyEyeButton must sit inline right after section title"
+                )
+            } else {
+                check(false, "MenuPanel accountsPrivacyEyeButton must live inside an NSStackView row")
+            }
+
+            maskHost.togglePrivacyMaskAccounts()
+            pump()
+            check(maskHost.privacyMaskAccounts == true && AccountIdentity.isPrivacyMaskEnabled == true, "togglePrivacyMaskAccounts must enable privacy masking")
+            let reloadedCfg = try ConfigurationStore(state: maskStateDir)
+            check(reloadedCfg.value.privacyMaskAccounts == true, "privacyMaskAccounts must persist to config.json")
+            check(dash.activeAccountLabel.stringValue == "主•••", "Masked overview masks custom nickname")
+            check(dash.activeEmailLabel.stringValue == "zh•••n@e•••.invalid", "Masked overview masks active email")
+            check((dash.privacyEyeButton.accessibilityValue() as? Int) == 1, "Masked overview eye button updates accessibility state")
+            check(
+                hasRealSymbolImage(dash.privacyEyeButton)
+                    && hasRealSymbolImage(accPage.privacyEyeButton)
+                    && hasRealSymbolImage(mPanel.quotaPrivacyEyeButton)
+                    && hasRealSymbolImage(mPanel.accountsPrivacyEyeButton),
+                "All privacy eye buttons must retain real template SF Symbol images after toggling mask state"
+            )
+            check(dash.privacyEyeButton.contentTintColor == nil && accPage.privacyEyeButton.contentTintColor == nil && mPanel.quotaPrivacyEyeButton.contentTintColor == nil && mPanel.accountsPrivacyEyeButton.contentTintColor == nil, "Masked eye buttons must keep quiet neutral deference without high-saturation blue tint")
+            if let copyItem = dash.activeEmailLabel.menu?.items.first, let target = copyItem.target, let action = copyItem.action {
+                _ = target.perform(action, with: copyItem)
+                check(NSPasteboard.general.string(forType: .string) == "zhangsan@example.invalid", "Context copy menu must still copy unmasked raw email")
+            } else {
+                check(false, "Dashboard activeEmailLabel must retain copy menu when masked")
+            }
+            let accTextsMasked = allTextValues(accPage.cardsStack)
+            check(accTextsMasked.contains("主•••") && accTextsMasked.contains("zh•••n@e•••.invalid") && accTextsMasked.contains("al•••e@c•••.invalid") && accTextsMasked.contains("al•••e"), "AccountsPage must mask custom nicknames, emails, and unnamed local parts")
+            check(!accTextsMasked.contains("主力工作号") && !accTextsMasked.contains("zhangsan@example.invalid") && !accTextsMasked.contains(aliceCorpEmail), "AccountsPage must not leak raw nicknames or emails when masked")
+            func allButtons(_ v: NSView) -> [NSButton] { (v as? NSButton).map { [$0] } ?? v.subviews.flatMap { allButtons($0) } }
+            let accButtons = allButtons(accPage.cardsStack)
+            check(accButtons.count >= 4, "AccountsPage must render card action buttons for privacy check")
+            for btn in accButtons {
+                let a11y = btn.accessibilityLabel() ?? ""
+                check(!a11y.contains("主力工作号") && !a11y.contains("zhangsan@example.invalid") && !a11y.contains(aliceCorpEmail), "AccountsPage button accessibilityLabel must stay masked: \(a11y)")
+            }
+            mPanel.selectTab(2, persist: false); pump()
+            check(mPanel.accountsCardsStack.arrangedSubviews.count >= 2, "MenuPanel must render account cards before accessibility check")
+            for btn in allButtons(mPanel.accountsCardsStack) {
+                let a11y = btn.accessibilityLabel() ?? ""
+                check(!a11y.contains("主力工作号") && !a11y.contains("zhangsan@example.invalid") && !a11y.contains(aliceCorpEmail), "MenuPanel account card accessibilityLabel must stay masked: \(a11y)")
+            }
+            let switchMenuTitles = maskHost.buildAccountSwitchMenu().items.map(\.title)
+            check(switchMenuTitles.contains { $0.contains("主••• · zh•••n@e•••.invalid") }, "buildAccountSwitchMenu must mask both nickname and email")
+            check(!switchMenuTitles.contains { $0.contains("主力工作号") || $0.contains("zhangsan@example.invalid") || $0.contains(aliceCorpEmail) }, "buildAccountSwitchMenu must not leak raw nickname or email")
+            let popupTitles = (uPage.accountPopup.menu?.items ?? []).map(\.title)
+            check(popupTitles.contains("主••• (zh•••n@e•••.invalid)") && popupTitles.contains("al•••e@c•••.invalid") && !popupTitles.contains(where: { $0.contains("主力工作号") }), "Usage accountPopup must mask both nickname and email")
+            let evCard = UsageEventCard(frame: NSRect(x: 0, y: 0, width: 520, height: 64))
+            evCard.configure(["model": "gemini-test", "account_email": "zhangsan@example.invalid", "input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "estimated_usd": 0.001], showLocalEnvironmentBadge: false)
+            check(evCard.accountLabel.stringValue == "zh•••n@e•••.invalid", "UsageEventCard must mask event account email")
+            check(mPanel.quotaAccountNameLabel.stringValue == "主•••" && mPanel.quotaEmailLabel.stringValue == "zh•••n@e•••.invalid", "MenuPanel quota header must mask both nickname and email")
+            maskHost.showMessage("Refresh failed for zhangsan@example.invalid", error: true)
+            check(maskHost.lastOperationError == "Refresh failed for zh•••n@e•••.invalid", "showMessage must mask emails when privacy mask is enabled")
+            maskHost.showMessage("", error: false)
+
+            maskHost.togglePrivacyMaskAccounts()
+            pump()
+            check(maskHost.privacyMaskAccounts == false && dash.activeAccountLabel.stringValue == "主力工作号" && dash.activeEmailLabel.stringValue == "zhangsan@example.invalid" && mPanel.quotaAccountNameLabel.stringValue == "主力工作号" && mPanel.quotaEmailLabel.stringValue == "zhangsan@example.invalid", "Second toggle must restore unmasked nicknames and emails everywhere")
         }
 
         let result:[String:Any] = ["stableOnlySelectionPassed":true,"nativeLayouts":captures.count,"captures":captures,"enCaptures":enCaptures,"enExtraCaptures":enExtraCaptures,"menuCaptures":6,"safeSwitchSharedFlowPassed":true,"emailWidthPassed":true,"partialPricingPassed":true,"headlessNoVisibleWindowLeaksPassed":true,"nativeAssertions":assertionCount,"scope":"isolated synthetic AppKit fixture; not installed-app acceptance"]

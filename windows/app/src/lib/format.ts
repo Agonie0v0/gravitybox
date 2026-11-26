@@ -189,54 +189,46 @@ export function accountDisplayName(name: string | undefined | null, email: strin
   return translate(locale, 'accounts.unnamed');
 }
 
-const GENERIC_ACCOUNT_NAMES = new Set([
-  'google 账号',
-  'google account',
-  '未登录账号',
-  'not signed in',
-  '未命名账号',
-  'unnamed account',
-]);
+export function maskLocalSegment(segment: string | undefined | null): string {
+  const trimmed = (segment ?? '').trim();
+  if (!trimmed) return '';
+  const chars = Array.from(trimmed);
+  if (chars.length === 1) return '•••';
+  if (chars.length <= 3) return `${chars[0]}•••`;
+  return `${chars[0]}${chars[1]}•••${chars[chars.length - 1]}`;
+}
 
 export function maskEmail(email: string | undefined | null): string {
   const trimmed = (email ?? '').trim();
   if (!trimmed) return '';
   const at = trimmed.indexOf('@');
-  if (at < 0) {
-    const chars = Array.from(trimmed);
-    if (chars.length <= 1) return '*';
-    if (chars.length === 2) return `${chars[0]}*`;
-    return `${chars.slice(0, 2).join('')}***`;
+  if (at <= 0) {
+    return maskLocalSegment(trimmed);
   }
   const local = trimmed.slice(0, at);
   const domain = trimmed.slice(at + 1);
-  const localChars = Array.from(local);
-  const maskedLocal =
-    localChars.length <= 1
-      ? '*'
-      : localChars.length === 2
-      ? `${localChars[0]}*`
-      : `${localChars.slice(0, 2).join('')}***`;
-  if (!domain) return `${maskedLocal}@***`;
-  const parts = domain.split('.');
-  const firstChars = Array.from(parts[0] ?? '');
-  const maskedDomain =
-    parts.length >= 2 && firstChars.length > 0
-      ? `${firstChars[0]}***.${parts.slice(1).join('.')}`
-      : `${Array.from(domain)[0] ?? '*'}***`;
+  const maskedLocal = maskLocalSegment(local);
+  if (!domain) return `${maskedLocal}@•••`;
+  const parts = domain.split('.').filter((p) => p.length > 0);
+  let maskedDomain: string;
+  if (parts.length >= 2) {
+    const firstChars = Array.from(parts[0] ?? '');
+    const tld = parts[parts.length - 1] ?? '';
+    maskedDomain = `${firstChars[0] ?? '•'}•••.${tld}`;
+  } else {
+    const dChars = Array.from(domain);
+    maskedDomain = dChars.length <= 1 ? '•' : `${dChars[0]}•••`;
+  }
   return `${maskedLocal}@${maskedDomain}`;
 }
 
-export function maskAccountName(name: string | undefined | null): string {
+export function maskDisplayName(name: string | undefined | null): string {
   const trimmed = (name ?? '').trim();
   if (!trimmed) return '';
-  if (GENERIC_ACCOUNT_NAMES.has(trimmed.toLowerCase())) {
-    return trimmed;
-  }
+  if (trimmed.includes('@')) return maskEmail(trimmed);
   const chars = Array.from(trimmed);
-  if (chars.length <= 1) return '*';
-  if (chars.length === 2) return `${chars[0]}*`;
-  return `${chars[0]}***`;
+  if (chars.length === 1) return '••••';
+  return `${chars[0]}•••`;
 }
 
 export function displayAccountIdentity(
@@ -245,14 +237,21 @@ export function displayAccountIdentity(
   locale: ResolvedLocale,
   masked: boolean,
 ): { name: string; email: string } {
-  const resolvedName = accountDisplayName(name, email, locale);
+  const cleanName = (name ?? '').trim();
   const cleanEmail = (email ?? '').trim();
-  if (!masked) {
-    return { name: resolvedName, email: cleanEmail };
+  let resolvedName: string;
+  if (cleanName) {
+    resolvedName = masked ? maskDisplayName(cleanName) : cleanName;
+  } else if (cleanEmail) {
+    const at = cleanEmail.indexOf('@');
+    const local = at > 0 ? cleanEmail.slice(0, at) : cleanEmail;
+    resolvedName = masked ? maskLocalSegment(local) : local;
+  } else {
+    resolvedName = translate(locale, 'accounts.unnamed');
   }
   return {
-    name: maskAccountName(resolvedName),
-    email: cleanEmail ? maskEmail(cleanEmail) : '',
+    name: resolvedName,
+    email: cleanEmail ? (masked ? maskEmail(cleanEmail) : cleanEmail) : '',
   };
 }
 
@@ -267,12 +266,32 @@ export function formatAccountOptionLabel(
     return rawLabel || rawEmail || opt.id;
   }
   if (rawName && rawEmail && rawName.toLowerCase() !== rawEmail.toLowerCase()) {
-    return `${maskAccountName(rawName)} (${maskEmail(rawEmail)})`;
+    return `${maskDisplayName(rawName)} (${maskEmail(rawEmail)})`;
   }
   if (rawEmail) return maskEmail(rawEmail);
-  if (rawLabel.includes('@')) return maskEmail(rawLabel);
-  if (rawLabel) return maskAccountName(rawLabel);
+  if (rawLabel) return maskDisplayName(rawLabel);
   return opt.id;
+}
+
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function maskEmailsInText(
+  text: string | undefined | null,
+  knownEmails: Array<string | undefined | null> = [],
+  masked = true,
+): string {
+  const raw = text ?? '';
+  if (!masked || !raw) return raw;
+  let output = raw;
+  const uniqueKnown = Array.from(
+    new Set(knownEmails.map((e) => (e ?? '').trim()).filter((e) => e.length > 0)),
+  ).sort((a, b) => b.length - a.length);
+  for (const email of uniqueKnown) {
+    output = output.replace(new RegExp(escapeRegExp(email), 'gi'), maskEmail(email));
+  }
+  return output.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, (m) => maskEmail(m));
 }
 
 const EFFORT_LABELS: Record<string, string> = {

@@ -5,11 +5,12 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { fileSha256 } from './release-integrity.mjs';
+import { releaseArchSuffix, releaseDmgName } from './native-target.mjs';
 
 /**
  * 验收摘要生成/更新工具。
  * 数据来源（全部只读）：.cache/verified-release.json、质检报告/<version>-改造验收/*.log、
- * 成品/<version>-arm64.dmg 实际 sha256、已安装/暂存 build-info、codesign 签名状态、现有摘要。
+ * 成品/GravityBox-<version>-<arch>.dmg 实际 sha256、已安装/暂存 build-info、codesign 签名状态、现有摘要。
  * 只写 `文档/当前版本验收摘要.json`（或用 --out 指定），绝不触碰词典/账号/成品等用户数据。
  * `--dry-run` 只打印差异，不落盘。
  */
@@ -130,10 +131,10 @@ export async function collectAcceptance({
     gates.push({ version: ledgerVersion, pass: parsed.pass });
   }
 
-  const dmg = join(root, '成品', `GravityBox-${version}-arm64.dmg`);
+  const dmg = join(root, '成品', releaseDmgName(version));
   let dmgSHA256 = null;
   if (existsSync(dmg)) dmgSHA256 = await fileSha256(dmg);
-  else warnings.push(`缺少成品 DMG：成品/GravityBox-${version}-arm64.dmg`);
+  else warnings.push(`缺少成品 DMG：成品/GravityBox-${version}-${releaseArchSuffix()}.dmg`);
 
   let installedFilesVerified = null;
   if (existsSync(installedApp)) installedFilesVerified = await countFiles(installedApp);

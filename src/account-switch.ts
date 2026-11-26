@@ -11,7 +11,7 @@ import { atomicJson, atomicText, sanitizeError } from './files.js';
 import { withProcessLease } from './process-lock.js';
 import { AccountsManager, SystemKeychainAdapter, buildGoOauthPayload, decodeKeychainOauthPayload, syncAccountToKeychain, type KeychainAdapter, type Account } from './accounts.js';
 import { ProtobufWriter as Writer } from './protobuf.js';
-import { removeTopicRow, replaceTopicRow } from './account-state.js';
+import { decodeTopicRow, removeTopicRow, replaceTopicRow } from './account-state.js';
 export { removeTopicRow, replaceTopicRow } from './account-state.js';
 import { bt } from './i18n.js';
 import {
@@ -380,6 +380,91 @@ function tryParseJsonRecord(raw: string): Record<string, any> | null {
   } catch {
     return null;
   }
+}
+
+const TOPIC_SENTINELS = ['userStatusSentinelKey', 'oauthTokenInfoSentinelKey', 'enterpriseGcpProjectId'] as const;
+
+function valueContainsEmail(raw: unknown, emailLower: string): boolean {
+  if (typeof raw !== 'string' || !raw || raw.startsWith('[REDACTED')) return false;
+  if (raw.toLowerCase().includes(emailLower)) return true;
+
+  // 1) macOS go-keyring-base64:<b64> 与 Windows 裸 JSON 钥匙串载荷
+  const decodedKeychain = decodeKeychainOauthPayload(raw);
+  if (decodedKeychain && decodedKeychain.toLowerCase().includes(emailLower)) return true;
+
+  // 2) state.vscdb 双层 Base64 + Protobuf Topic 行（如 userStatusSentinelKey）
+  for (const sentinel of TOPIC_SENTINELS) {
+    try {
+      const payload = decodeTopicRow(raw, sentinel);
+      if (payload && payload.toString('utf8').toLowerCase().includes(emailLower)) return true;
+    } catch {}
+  }
+
+  // 3) 通用 JSON { data } 包装或单层/嵌套 Base64 兜底
+  let candidate = raw.trim();
+  if (candidate.startsWith('{')) {
+    const parsed = tryParseJsonRecord(candidate);
+    if (typeof parsed?.data === 'string') {
+      candidate = parsed.data.trim();
+    }
+  }
+  if (/^[A-Za-z0-9+/]{8,}={0,2}$/.test(candidate)) {
+    try {
+      const decoded = Buffer.from(candidate, 'base64').toString('utf8');
+      if (decoded.toLowerCase().includes(emailLower)) return true;
+      // 防御未来非已知 sentinel 的嵌套 Base64 字段
+      const innerMatches = decoded.match(/[A-Za-z0-9+/]{16,}={0,2}/g) ?? [];
+      for (const token of innerMatches) {
+        if (token.length > 16384) continue;
+        try {
+          if (Buffer.from(token, 'base64').toString('utf8').toLowerCase().includes(emailLower)) return true;
+        } catch {}
+      }
+    } catch {}
+  }
+  return false;
+}
+
+export function journalReferencesAccount(
+  journal: Pick<Journal, 'before' | 'after' | 'files' | 'cliSnapshots' | 'keychainBefore'>,
+  target: { id: string; email?: string | null }
+): boolean {
+  const id = target.id.trim();
+  const emailLower = (target.email ?? '').trim().toLowerCase();
+
+  for (const file of journal.files || []) {
+    const base = basename((file.path || '').replaceAll('\\', '/'));
+    if (id && base === `${id}.json`) return true;
+    if (isNonSensitiveIndexFile(file.path || '')) {
+      for (const content of [file.before, file.after]) {
+        const obj = typeof content === 'string' ? tryParseJsonRecord(content) : null;
+        if (!obj) continue;
+        if (id && obj.current_account_id === id) return true;
+        if (emailLower && typeof obj.current_account_id === 'string' && Array.isArray(obj.accounts)) {
+          const activeEntry = obj.accounts.find((item: any) => item?.id === obj.current_account_id);
+          if (typeof activeEntry?.email === 'string' && activeEntry.email.trim().toLowerCase() === emailLower) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+
+  if (emailLower) {
+    for (const snap of journal.cliSnapshots || []) {
+      if (snap.afterEmail?.trim().toLowerCase() === emailLower) return true;
+      if (valueContainsEmail(snap.before, emailLower)) return true;
+    }
+    if (valueContainsEmail(journal.keychainBefore, emailLower)) return true;
+    for (const val of Object.values(journal.before || {})) {
+      if (valueContainsEmail(val, emailLower)) return true;
+    }
+    for (const val of Object.values(journal.after || {})) {
+      if (valueContainsEmail(val, emailLower)) return true;
+    }
+  }
+
+  return false;
 }
 
 function resolveManagedFileTarget(
@@ -934,6 +1019,50 @@ export class AccountSwitchService {
       if(!['complete','rolled-back'].includes(journal.status))throw new Error(bt('switch.err.incomplete_clear_forbidden'));
       await atomicJson(this.journalPath,{version:1,status:'cleared',at:journal.at,clearedAt:new Date().toISOString(),before:{},after:{},files:[],cliSnapshots:[],keychainBefore:null,keychainAfter:''});
       return {message:bt('switch.msg.recovery_cleared')};
+    });
+  }
+  async purgeRecoveryForDeletedAccount(
+    target: { id: string; email?: string | null }
+  ): Promise<{ cleared: boolean; reason: 'cleared' | 'missing' | 'unreadable' | 'already_cleared' | 'rollback_pending' | 'pending' | 'unmatched' }> {
+    return this.locked(async () => {
+      if (await this.optionalRegular(this.rollbackPath)) {
+        return { cleared: false, reason: 'rollback_pending' };
+      }
+      let raw: string;
+      try {
+        raw = await readFile(this.journalPath, 'utf8');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          return { cleared: false, reason: 'missing' };
+        }
+        return { cleared: false, reason: 'unreadable' };
+      }
+      const journal = tryParseJsonRecord(raw) as Journal | null;
+      if (!journal || typeof journal.status !== 'string') {
+        return { cleared: false, reason: 'unreadable' };
+      }
+      if (journal.status === 'cleared') {
+        return { cleared: false, reason: 'already_cleared' };
+      }
+      if (!['complete', 'rolled-back'].includes(journal.status)) {
+        return { cleared: false, reason: 'pending' };
+      }
+      if (!journalReferencesAccount(journal, target)) {
+        return { cleared: false, reason: 'unmatched' };
+      }
+      await atomicJson(this.journalPath, {
+        version: 1,
+        status: 'cleared',
+        at: journal.at,
+        clearedAt: new Date().toISOString(),
+        before: {},
+        after: {},
+        files: [],
+        cliSnapshots: [],
+        keychainBefore: null,
+        keychainAfter: '',
+      });
+      return { cleared: true, reason: 'cleared' };
     });
   }
   async rollback() {

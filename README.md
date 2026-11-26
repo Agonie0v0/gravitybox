@@ -6,8 +6,8 @@
   <h1>GravityBox</h1>
 
   <p>
-    <strong>Cross-Platform Companion for Google Antigravity (macOS Apple Silicon · Windows x64 Community)</strong><br />
-    Zero-Patch Bilingual UI · In-IDE Telemetry HUD · Dual-Window Quotas · Safe Account Switching · Reversible Cache Trim
+    <strong>面向 Google Antigravity 的跨平台增强伴侣（macOS Apple Silicon 原生主线 · Windows x64 社区共建端）</strong><br />
+    零改包双语适配 · 输入框 Telemetry HUD · 双周期配额账单 · 多账号安全切换 · 可撤回缓存瘦身
   </p>
 
   <p>
@@ -19,97 +19,101 @@
   </p>
 
   <p>
-    <b>English</b> · <a href="./README.zh-CN.md">简体中文</a>
+    <b>简体中文</b> · <a href="./README_EN.md">English</a>
   </p>
 
   <p>
-    <a href="#windows-edition">Windows Edition</a> ·
-    <a href="#overview">Overview</a> ·
-    <a href="#platform-support">Platforms</a> ·
-    <a href="#quick-start">Quick Start</a> ·
-    <a href="#in-ide-telemetry-hud">Telemetry HUD</a> ·
-    <a href="#console--workflows">Console &amp; Workflows</a> ·
-    <a href="#installation--upgrades">Installation</a> ·
-    <a href="#security--privacy">Security</a> ·
-    <a href="#architecture--build">Build</a>
+    <a href="#windows-适配版">Windows 适配版</a> ·
+    <a href="#概览">概览</a> ·
+    <a href="#平台支持与验收边界">平台支持</a> ·
+    <a href="#快速上手">快速上手</a> ·
+    <a href="#对话状态栏-hud">对话状态栏 HUD</a> ·
+    <a href="#界面与核心机制">界面与机制</a> ·
+    <a href="#安装与升级">安装与升级</a> ·
+    <a href="#安全与隐私边界">安全边界</a> ·
+    <a href="#架构与源码构建">源码构建</a>
   </p>
 </div>
 
 > [!NOTE]
-> **Windows Personal Fork (`Agonie0v0/gravitybox`, `v1.2.1-win`)** — Synced with upstream [Enzoo404/gravitybox](https://github.com/Enzoo404/gravitybox) `v1.2.1` (upstream Windows edition + `Environment × Account` orthogonal usage filters, `uiRunning` vs. detached daemon switch preflight, hardening & security audit fixes), plus personal-fork enhancements: **Account Privacy Masking (`privacyMaskAccounts`)** across Overview/Accounts/Usage/Tray, and **Usage Analytics Enhancements** (streaming output speed `tok/s` median & per-reply speed, model × thinking effort breakdown, and custom date range).
+> **个人增强分叉版（`Agonie0v0/gravitybox`，`v1.2.2-win`）** — 已同步上游 [Enzoo404/gravitybox](https://github.com/Enzoo404/gravitybox) `v1.2.2` 全量更新（双端统一账号信息隐私遮挡、删号静默清理恢复快照、Windows 关闭确认与 `EXDEV` 跨卷重试加固），并额外保留以下个人增强能力：
+> - **被动周配额客户端归因**：零新增网络请求，仅基于本地用量账本与既有配额快照被动估算「本端（含同账号 SSH） vs. 其他客户端」在每周配额池中的消耗占比，并隐藏等效 USD 金额展示。
+> - **用量统计增强**：新增回复流式输出速率（近 10 次回复中位数 `tok/s` 与明细单条速率）、模型 × 思考强度分档拆解（`Minimal` / `Extra Low` / `Low` / `Medium` / `High` / `XHigh` / `Max` / `Thinking`）以及自定义日期范围查询与导出。
 >
-> - **Windows Downloads**: Get the user-level self-contained installer (`GravityBox-<version>-win-x64-setup.exe`), portable archive (`GravityBox-<version>-win-x64.zip`), and `.sha256` checksums from [GitHub Releases](https://github.com/Agonie0v0/gravitybox/releases/latest).
-> - **Windows Local Development (Hot Reload)**:
->   - `npm run dev:win` — full-stack Windows dev (Vite HMR + Tauri Rust auto-rebuild/restart + backend `tsc --watch`).
->   - `npm run dev:backend` — backend hot reload (`tsc --watch` + `runtime/` watch + `node --watch dist/main.js`).
->   - `npm run verify` / `npm run package:win` / `npm run package:win:installer` — verification gate and self-contained packaging.
+> - **Windows 下载安装**：前往 [GitHub Releases](https://github.com/Agonie0v0/gravitybox/releases/latest) 下载用户级免 UAC 安装包（`GravityBox-<version>-win-x64-setup.exe`）或自包含便携压缩包（`GravityBox-<version>-win-x64.zip`）及对应 `.sha256` 校验文件。
+> - **Windows 本地热重载开发**：
+>   - `npm run dev:win` — 全栈 Windows 开发模式（Vite 前端 HMR + Tauri Rust 自动重编译重启 + 后端 `tsc --watch`）。
+>   - `npm run dev:backend` — 后端热重载模式（`tsc --watch` + `runtime/` 监听 + `node --watch dist/main.js` 自动重启）。
+>   - `npm run verify` / `npm run package:win` / `npm run package:win:installer` — 全量门禁校验与自包含便携包 / NSIS 安装包构建。
 >
-> <a id="windows-edition"></a>
+> <a id="windows-适配版"></a>
 
 <br />
 
 <div align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en-hero-dark.png" />
-    <img src="assets/screenshots/en-hero.png" alt="GravityBox Native Console and Menu Bar Floating Panel" width="100%" />
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/hero-dark.png" />
+    <img src="assets/screenshots/hero.png" alt="GravityBox 主控制台与常驻菜单栏浮窗" width="100%" />
   </picture>
-  <sub><em>macOS Native Console &amp; Menu Bar Panel (Swift 6 / AppKit, Light &amp; Dark) — Windows x64 ships a feature-parity Tauri 2 / React console &amp; system tray panel</em></sub>
+  <sub><em>macOS 原生主控制台与菜单栏浮窗（Swift 6 / AppKit，跟随深浅色模式）— Windows x64 端提供功能对等的 Tauri 2 / React 控制台与系统托盘浮窗</em></sub>
 </div>
 
 ---
 
-## Overview
+## 概览
 
-**GravityBox** (`GravityBox v1.2.1`) is a lightweight, privacy-first companion for the official stable release of **Google Antigravity** across **macOS (native primary edition, author-verified)** and **Windows x64 (community-contributed edition added in `v1.2.1` via `#27`, `#30`, `#32` — implemented and real-machine verified by `@Agonie0v0`, distributed alongside `v1.2.1`)**. Both editions share a self-contained Node 22 engine and communicate via local loopback CDP and read-only SQLite transactions—never unpacking, modifying, or re-signing the official Antigravity application bundle.
+**GravityBox**（`GravityBox v1.2.2`）是一款专为 **Google Antigravity** 官方正式版打造的轻量级、零侵入、重隐私伴侣工具箱，覆盖 **macOS（原生主线，作者主导并实机验收）** 与 **Windows x64（`v1.2.1` 起由社区共建合入：`#27`、`#30`、`#32` 致谢 `@Agonie0v0` 贡献实现并完成真机验收，随 `v1.2.1` 同步分发）**。双端共享同一套内置 Node 22 核心引擎，全程通过本机回环 CDP 与只读 SQLite 事务工作，绝不解包、篡改或重签名官方应用包。
 
-| Capability | What It Solves |
+| 核心能力 | 解决什么问题 |
 | :--- | :--- |
-| **Runtime Localization** | Dynamically toggles Antigravity UI between English and Simplified Chinese (`2.23.0`–`2.34.0` verified dictionaries plus adaptive fallback for `2.35.0+`) with zero binary patches. Prompts, chats, code, diffs, CSV viewports, LSP references, and notebook code/output regions remain untouched. |
-| **In-IDE Telemetry HUD** | Mounts a compact 3-capsule toolbar below each chat composer displaying turn time, TPS, token totals, cache hit rate, compaction state, and model context usage. |
-| **Dual-Window Quotas & Usage** | Separates **5-Hour** rolling limits from **Weekly** caps and standalone high-tier pools (e.g. `Gemini 4 Argon`), aggregates thinking variants (`-low` to `-max`) in summaries, and tracks historical spend via dated official API rates. |
-| **SSH Remote & Multi-Env Ledger** | Adapts Antigravity `2.33.0+` SSH remote windows over local CDP with zero external `ssh` calls—providing bilingual UI, live HUD, read-only per-host quotas, and a unified Local + SSH usage ledger with `Environment × Account` filtering. |
-| **HTTP / HTTPS Network Proxy** | Supports **Off**, automatic **System Proxy** (macOS / Windows settings), or **Manual** `http://` / `https://` endpoints—injecting proxy variables into Antigravity, routing GravityBox outbound requests through the same proxy, and detecting shell overrides. |
-| **Multi-Account & CLI Sync** | Supports zero-config session capture, batch JSON import/export (`0600` on macOS), standby recommendations, non-invasive `agy` CLI token sync, and atomic 4-phase manual switching with rollback. |
-| **Reversible Storage Trim** | Moves runtime caches and optional aged task logs (archiving ledgers before cleanup) to macOS Trash or Windows Recycle Bin (`IFileOperation`) with one-click undo, while locking credentials, workspaces, and active chats behind a strict allowlist. |
+| **零改包双语适配** | 运行时动态切换简体中文与英文界面（词典指纹已覆盖 `2.23.0`–`2.34.0`，`2.35.0+` 自动进入自适应兼容模式），同时严格保护对话内容、代码块、Diff、CSV 视口、LSP 引用与 Notebook 代码/输出区不被改动。 |
+| **对话状态栏 (HUD)** | 在每个聊天输入框正下方嵌入三联遥测条，实时展示轮次用时、输出速度、Token 消耗、缓存命中率、压缩次数与上下文水位。 |
+| **双周期配额与账单** | 将 **5 小时** 滚动限额、**每周** 限额与独立高阶池（如 `Gemini 4 Argon`）拆开展示；汇总页自动合并同一模型的各思考档位变体（`-low` 至 `-max`），并按时序官方单价核算等效 API 费用。 |
+| **SSH 远程窗口与统一账本** | 无需调用外部 `ssh` 进程即可适配 Antigravity `2.33.0+` SSH 远程窗口（双语界面、实时 HUD、按主机只读配额），并将本机与 SSH 会话用量统一合账且支持「环境 × 账号」正交筛选。 |
+| **HTTP / HTTPS 网络代理** | 支持 **关闭**、**自动跟随系统代理**（macOS / Windows 系统设置）或 **手动指定** `http://` / `https://` 代理地址，自动为 Antigravity 注入代理环境变量、让 GravityBox 后台外联复用同一代理，并检测 Shell 覆盖冲突。 |
+| **多账号、隐私遮挡与 CLI 同步** | 支持保存当前会话、JSON 批量导入与确认后备份导出（macOS 锁定 `0600`）、一键账号隐私遮挡（`⇧⌘M` / `Ctrl+Shift+M`）、删号静默清理恢复快照、低配额智能推荐、同源 `agy` CLI 凭据非侵入同步，以及四阶段原子安全切换与异常自动回滚。 |
+| **可撤回缓存瘦身** | 仅清理无状态运行缓存与可选超期后台日志（清理前归档账单），统一移入 macOS 废纸篓或 Windows 回收站（`IFileOperation`）并支持一键原位还原，登录凭据与聊天正文受白名单隔离保护。 |
 
 ---
 
-## Platform Support
+## 平台支持与验收边界
 
-| Platform | Frontend & Helper | IPC & Credentials | Distribution & Acceptance Status |
+| 目标平台 | 前端与系统助手 | IPC 与凭据机制 | 分发产物与验收状态 |
 | :--- | :--- | :--- | :--- |
-| **macOS 14+ (Apple Silicon `arm64`)** | Native **Swift 6 / AppKit** 5-page console & `MenuFloatingPanel` (`native/`) | Unix Domain Socket IPC · macOS Keychain & `0600` local files | **Primary Edition (Author-verified)**: Prebuilt `GravityBox-<version>-arm64.dmg` via [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) |
-| **Windows 10/11 (x64)** | **Tauri 2 / React 19** 5-page console & tray panel (`windows/app/`) + static Rust Win32 helper (`windows/win-helper/`) | Per-startup randomized Named Pipe (256-bit `authToken`, SID & integrity verified) · Windows Credential Manager (2560-byte cap & zeroization) | **Community Edition (Verified by `@Agonie0v0`)**: Prebuilt self-contained `-setup.exe` & portable `.zip` (**no user compilation required**), distributed alongside `v1.2.1` via [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) |
+| **macOS 14+ (Apple Silicon `arm64`)** | 原生 **Swift 6 / AppKit** 五页主控制台与 `MenuFloatingPanel`（`native/`） | Unix Domain Socket IPC · macOS 钥匙串与 `0600` 本地文件 | **原生主线（作者已实机验收）**：通过 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 直接下载预构建 `GravityBox-<version>-arm64.dmg` |
+| **Windows 10/11 (x64)** | **Tauri 2 / React 19** 五页控制台与系统托盘面板（`windows/app/`）+ 静态链接 Rust Win32 助手（`windows/win-helper/`） | 每启动随机 Named Pipe（256-bit `authToken`、同用户 SID 与完整性校验）· Windows Credential Manager（2560 字节容量边界与内存清零） | **社区共建端（`@Agonie0v0` 已完成真机验收）**：通过 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 随 `v1.2.1` 同步提供预构建自包含 `-setup.exe` 与便携 `.zip`（**普通用户无需自行构建**） |
 
 ---
 
-## Quick Start
+## 快速上手
 
-### macOS (Primary · Apple Silicon)
+> GitHub Releases 的 macOS 预构建包目前仅面向 Apple Silicon（`arm64`）。Intel（`x86_64`）用户可[从源码在本机验证并打包](#架构与源码构建)。
 
-1. **Install**: Download `GravityBox-<version>-arm64.dmg` from [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest), drag **GravityBox.app** into **Applications**, and clear Gatekeeper quarantine once (or click **Open Anyway** in **System Settings → Privacy & Security**; open-source builds are not Apple-notarized):
+### macOS（原生主线 · Apple Silicon）
+
+1. **下载与安装**：前往 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 获取最新 `GravityBox-<version>-arm64.dmg`，将 **GravityBox.app** 拖入 **Applications**。因开源版本未经过 Apple 付费公证，首次运行前在终端执行一次放行命令即可（也可在「系统设置 → 隐私与安全性」点击仍要打开）：
    ```bash
    xattr -cr /Applications/GravityBox.app
    ```
-2. **Launch & Connect**: Open **GravityBox** and start official `/Applications/Antigravity.app` from the sidebar/menu bar (`Open Antigravity`), or enable **Settings → Auto-Open Antigravity on Launch** so GravityBox stays in the menu bar and launches Antigravity with debugging enabled. If Antigravity `2.33.0+` was opened externally without a debugging port, click **Safe Relaunch to Connect** in the banner for a clean restart without force-killing active work.
-3. **Use Across Three Surfaces**: Glance at the **HUD** below the composer while coding, click the **Menu Bar Panel** (`⌘1` / `⌘2` / `⌘3`) for instant checks across full-screen Spaces, or open the **Main Console** (`Overview · Accounts · Usage · Settings · About`).
+2. **启动并连接**：打开 **GravityBox**，通过侧栏或菜单栏点击 **「打开 Antigravity」**，或在 **设置 → 启动时自动打开 Antigravity** 开启后，打开 GravityBox 自动驻留菜单栏并拉起带调试端口的 Antigravity。若 `2.33.0+` 客户端是从外部直接启动且未开启调试端口，面板会弹出「未开启调试端口」横幅，点击 **「安全重启以连接」** 即可直接优雅重启并挂载（不在后台强杀进程）。
+3. **日常协作**：写代码时直接看输入框下方 **HUD**；查额度/快速切号直接唤起 **菜单栏浮窗**（支持 `⌘1/2/3` 快捷键与全屏跨空间展示）；深度分析与整理打开 **主控制台**（总览 · 账号 · 用量 · 设置 · 关于）。
 
-### Windows x64 (Community Edition)
+### Windows x64（社区共建端）
 
-1. **Download (No Building Required)**: Download the ready-to-use self-contained package from [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest)—`GravityBox-<version>-win-x64-setup.exe` (user-level installer targeting `%LOCALAPPDATA%\Programs\GravityBox`, no admin elevation needed) or `GravityBox-<version>-win-x64.zip` (portable, extract and run). Both embed Node 22 and the Win32 helper—**end users never need to compile anything**. *(Real-machine verified on Windows by `@Agonie0v0` and distributed alongside `v1.2.1`.)*
-2. **Launch & Connect**: Run `GravityBox.exe` (requires Windows 10/11 x64 and the system WebView2 runtime). Launch official stable **Antigravity** from the sidebar or system tray (`Open Antigravity`), or enable **Settings → Auto-Open Antigravity on Launch**. If Antigravity was started externally without a remote debugging port, use **Safe Relaunch to Connect** (GravityBox respects Windows UIPI / same-user SID boundaries and never silently `TerminateProcess`-kills the editor).
-3. **Use Across Three Surfaces**: Inspect the **HUD** inside Antigravity, click the **System Tray Panel** for quick quota/usage/account checks, or open the **Main Console** (`Overview · Accounts · Usage · Settings · About`).
+1. **直接下载（无需自行打包构建）**：前往 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) 直接下载开箱即用的自包含产物——`GravityBox-<version>-win-x64-setup.exe`（用户级安装程序，默认安装到 `%LOCALAPPDATA%\Programs\GravityBox`，无需管理员权限）或 `GravityBox-<version>-win-x64.zip`（便携包，解压即用），已内置 Node 22 与 Win32 助手，**普通用户无需自己运行编译或打包命令**。*（已由 `@Agonie0v0` 完成 Windows 真机验收，随 `v1.2.1` 同步分发。）*
+2. **启动并连接**：运行 `GravityBox.exe`（需 Windows 10/11 x64 及系统 WebView2 运行时）。通过侧栏或系统托盘菜单点击 **「打开 Antigravity」**，或开启 **设置 → 启动时自动打开 Antigravity**。若外部启动的 Antigravity 未开启调试端口，点击横幅 **「安全重启以连接」** 即可优雅重启（严格遵守 Windows UIPI 与同用户 SID 边界，绝不静默调用 `TerminateProcess` 强杀官方编辑器）。
+3. **日常协作**：在 Antigravity 内直接查看 **HUD**；点击 **系统托盘浮窗** 快速浏览额度、用量与切换账号；打开 **主控制台**（总览 · 账号 · 用量 · 设置 · 关于）进行多账号与账单管理。
 
 ---
 
-## In-IDE Telemetry HUD
+## 对话状态栏 (HUD)
 
-The HUD embeds cleanly beneath every Antigravity composer—including isolated **BTW** side-question panes on `2.34.0+` (with cloned-prefix usage deduplicated)—without overlapping controls or taking keyboard focus.
+HUD 挂载于每个 Antigravity 对话输入框下方（含 `2.34.0+` 的 BTW 侧边提问独立分栏，且自动去重克隆前缀用量），支持分栏独立状态且不抢占输入焦点。
 
 <div align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en-hud-dark.png" />
-    <img src="assets/screenshots/en-hud.png" alt="In-IDE Telemetry HUD and Token Usage Popover" width="94%" />
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/hud-dark.png" />
+    <img src="assets/screenshots/hud.png" alt="IDE 对话状态栏与向上展开卡片" width="94%" />
   </picture>
 </div>
 
@@ -117,174 +121,178 @@ The HUD embeds cleanly beneath every Antigravity composer—including isolated *
 
 <div align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en-hud-capsules-dark.png" />
-    <img src="assets/screenshots/en-hud-capsules.png" alt="Close-up of the three always-on HUD capsules" width="82%" />
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/hud-capsules-dark.png" />
+    <img src="assets/screenshots/hud-capsules.png" alt="IDE 输入框下方三枚常驻 HUD 胶囊特写" width="82%" />
   </picture>
 </div>
 
-| Segment | Readout & Indicators | Meaning |
+| 位置 | 示例读数 | 说明 |
 | :--- | :--- | :--- |
-| **1. Session & Speed** | `Gray` / `Solid Blue` / `Breathing Blue` dot + `3T · Turn 18s · 90 tok/s · 2` | Dot reflects foreground state (**Gray** idle/waiting or background-only subagents, **Solid Blue** streaming/thinking, **Breathing Blue** tool execution). Shows user turns, live turn elapsed time, output speed, and active subagent count. |
-| **2. Tokens & Cache** | `58.6M tok · Cache Hit 97%` | Cumulative session + subagent token volume and prompt cache reuse share. |
-| **3. Context Meter** | Badge (`1` / `2` / `3+`) + Model tag + Meter (`66%`) | Compaction count badge (hidden until compacted), short active model tag when switching or orchestrating, and context fill (`~` denotes reference estimate when upstream capacity is omitted). |
+| **1. 对话与速度** | 灰 / 实心蓝 / 呼吸蓝圆点 + `3 轮 · 本轮 18s · 90 tok/s · 2` | 状态灯指示当前前台活动（**灰** 空闲或仅后台子智能体运行，**实心蓝** 模型思考/输出，**呼吸蓝** 工具调用）；右侧依次为轮次、当前轮用时、平均吐字速度及并行子智能体数量。 |
+| **2. Token 与缓存** | `58.6M tok · 缓存命中 97%` | 本会话（含关联子智能体）累计消耗总 Token 及输入缓存复用比例。 |
+| **3. 上下文水位** | 压缩徽章 (`1` / `2` / `3+`) + 模型短标 + 进度条 (`66%`) | 发生自动压缩后才显现对应颜色角标；多模型或编排场景显示当前模型简称；未返回精确容量时带 `~` 按参考上限估算。 |
 
-### Upward Detail Popovers
+### 向上展开详情卡片
 
-Hover over or click any capsule to inspect its breakdown (`Esc` or click outside to dismiss):
+悬停或点击任意胶囊可弹出明细卡片（`Esc` 或点击空白处收起）：
 
 <table>
   <tr>
     <td width="33.3%" align="center">
-      <b>Session Stats</b><br /><br />
+      <b>对话统计</b><br /><br />
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en-hud-card-session-dark.png" />
-        <img src="assets/screenshots/en-hud-card-session.png" alt="Session Stats Popover" width="100%" />
+        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/hud-card-session-dark.png" />
+        <img src="assets/screenshots/hud-card-session.png" alt="对话统计明细卡片" width="100%" />
       </picture>
     </td>
     <td width="33.3%" align="center">
-      <b>Token Usage</b><br /><br />
+      <b>Token 用量</b><br /><br />
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en-hud-card-tokens-dark.png" />
-        <img src="assets/screenshots/en-hud-card-tokens.png" alt="Token Usage Popover" width="100%" />
+        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/hud-card-tokens-dark.png" />
+        <img src="assets/screenshots/hud-card-tokens.png" alt="Token 用量明细卡片" width="100%" />
       </picture>
     </td>
     <td width="33.3%" align="center">
-      <b>Current Context</b><br /><br />
+      <b>当前上下文</b><br /><br />
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en-hud-card-context-dark.png" />
-        <img src="assets/screenshots/en-hud-card-context.png" alt="Current Context Popover with Prior Model Context" width="100%" />
+        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/hud-card-context-dark.png" />
+        <img src="assets/screenshots/hud-card-context.png" alt="当前上下文与曾用模型上下文卡片" width="100%" />
       </picture>
     </td>
   </tr>
 </table>
 
 <details>
-<summary>Popover field highlights &amp; Orchestrator context tracking</summary>
+<summary>卡片指标补充与编排器上下文追踪</summary>
 
-- **Session Stats**: Splits cumulative Model vs. Tool duration (with parallel tool intervals deduplicated), overall Avg TTFT/TPS, and latest foreground step TTFT/TPS plus subagent step totals.
-- **Token Usage**: Breaks down Uncached Input, Cached Read, Cache Write, and Output (with `Reasoning / Reply` split when provided), plus step-locked equivalent API dollar spend (`≥ $X` when an unpriced model is present) and Cache Saved.
-- **Current Context**: Single-line header with active role pill (`Exec` / `Plan`), two-color fill bar (Cached Context vs. New Uncached Input), latest step output, model peak context, and a unified **Prior Model Context** list with neutral frosted role pills and compaction counts—preserving historical Orchestrator planner/executor roles across conversation truncation via incremental `executor_metadata` scanning (`v1.2.1`).
+- **对话统计**：拆分模型与工具累计耗时（自动合并并行工具重叠时间），展示全局平均与最近一步的 TTFT / TPS，以及子智能体运行步数。
+- **Token 用量**：细分为未缓存输入、缓存读取、缓存写入与输出（模型支持时自动拆分 `思维链 / 回复`），并按当时生效费率折算等效 API 费用与缓存节省金额（含未公开定价模型时显示 `≥ $X`）。
+- **当前上下文**：单行标题融合当前模型名与角色徽章（`规划` / `执行`），配合双色进度条（缓存复用 vs. 本步新增输入）、本步输出与模型历史峰值，并以统一磨砂中性灰胶囊在 **曾用模型上下文** 列表展示切换过的模型水位与压缩次数（`v1.2.1` 通过 `executor_metadata` 增量扫描在对话回退/截断场景下保留历史编排器角色）。
 
 </details>
 
 ---
 
-## Console & Workflows
+## 界面与核心机制
 
-> *Screenshots below showcase the verified macOS Swift 6 / AppKit edition. On Windows x64, the Tauri 2 / React desktop app implements a feature-parity 5-page console (`Overview · Accounts · Usage · Settings · About`) and system tray panel (real-machine verified by `@Agonie0v0`; Windows UI screenshots will be added in a follow-up update).*
+> *以下截图摄于已实机验收的 macOS 原生端（Swift 6 / AppKit）。Windows x64 端（Tauri 2 / React）已同步实现功能对等的五页主控制台（总览 · 账号 · 用量 · 设置 · 关于）与系统托盘面板（已由 `@Agonie0v0` 完成真机验收，Windows 实机截图后续补充）。*
 
 <table>
   <tr>
     <td width="50%" align="center">
-      <b>Overview</b><br /><br />
+      <b>总览</b><br /><br />
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en-dark-overview.png" />
-        <img src="assets/screenshots/en-overview.png" alt="GravityBox Overview" width="100%" />
+        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/dark-overview.png" />
+        <img src="assets/screenshots/overview.png" alt="GravityBox 总览看板" width="100%" />
       </picture>
     </td>
     <td width="50%" align="center">
-      <b>Accounts</b><br /><br />
+      <b>账号</b><br /><br />
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en-dark-accounts.png" />
-        <img src="assets/screenshots/en-accounts.png" alt="GravityBox Accounts" width="100%" />
+        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/dark-accounts.png" />
+        <img src="assets/screenshots/accounts.png" alt="GravityBox 账号管理" width="100%" />
       </picture>
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
-      <b>Usage &amp; API Cost</b><br /><br />
+      <b>用量与费用</b><br /><br />
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en-dark-usage.png" />
-        <img src="assets/screenshots/en-usage.png" alt="GravityBox Usage" width="100%" />
+        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/dark-usage.png" />
+        <img src="assets/screenshots/usage.png" alt="GravityBox 用量明细" width="100%" />
       </picture>
     </td>
     <td width="50%" align="center">
-      <b>Settings</b><br /><br />
+      <b>设置</b><br /><br />
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en-dark-settings.png" />
-        <img src="assets/screenshots/en-settings.png" alt="GravityBox Settings" width="100%" />
+        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/dark-settings.png" />
+        <img src="assets/screenshots/settings.png" alt="GravityBox 偏好设置" width="100%" />
       </picture>
     </td>
   </tr>
 </table>
 
 <details>
-<summary>More previews: Menu Bar Floating Panel, Storage Maintenance, and About</summary>
+<summary>展开更多截图：常驻菜单栏浮窗、存储与维护、关于页面</summary>
 <br />
 <table>
   <tr>
     <td width="33.3%" align="center">
-      <b>Menu Bar · Usage</b><br /><br />
+      <b>菜单栏 · 用量</b><br /><br />
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en-dark-menubar.png" />
-        <img src="assets/screenshots/en-menubar.png" alt="Menu Bar Usage" width="100%" />
+        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/dark-menubar.png" />
+        <img src="assets/screenshots/menubar.png" alt="菜单栏用量浮窗" width="100%" />
       </picture>
     </td>
     <td width="33.3%" align="center">
-      <b>Menu Bar · Quota</b><br /><br />
+      <b>菜单栏 · 配额</b><br /><br />
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en-dark-menubar-quota.png" />
-        <img src="assets/screenshots/en-menubar-quota.png" alt="Menu Bar Quota" width="100%" />
+        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/dark-menubar-quota.png" />
+        <img src="assets/screenshots/menubar-quota.png" alt="菜单栏配额浮窗" width="100%" />
       </picture>
     </td>
     <td width="33.3%" align="center">
-      <b>Menu Bar · Accounts</b><br /><br />
+      <b>菜单栏 · 账号</b><br /><br />
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en-dark-menubar-accounts.png" />
-        <img src="assets/screenshots/en-menubar-accounts.png" alt="Menu Bar Accounts" width="100%" />
+        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/dark-menubar-accounts.png" />
+        <img src="assets/screenshots/menubar-accounts.png" alt="菜单栏账号浮窗" width="100%" />
       </picture>
     </td>
   </tr>
   <tr>
     <td colspan="2" align="center">
-      <b>Storage &amp; Maintenance (Trash + Undo)</b><br /><br />
+      <b>存储与维护（废纸篓清理与原位还原）</b><br /><br />
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en-dark-maintenance.png" />
-        <img src="assets/screenshots/en-maintenance.png" alt="Storage Maintenance" width="90%" />
+        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/dark-maintenance.png" />
+        <img src="assets/screenshots/maintenance.png" alt="存储与维护弹窗" width="90%" />
       </picture>
     </td>
     <td align="center">
-      <b>About &amp; Updates</b><br /><br />
+      <b>关于与更新</b><br /><br />
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en-dark-about.png" />
-        <img src="assets/screenshots/en-about.png" alt="About GravityBox" width="100%" />
+        <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/dark-about.png" />
+        <img src="assets/screenshots/about.png" alt="关于与更新" width="100%" />
       </picture>
     </td>
   </tr>
 </table>
 </details>
 
-### Key Behaviors in v1.2.1
+### v1.2.2 核心机制说明
 
-- **Co-Located Windows x64 Cross-Platform Support (`#27`, `#30`, `#32` — thanks to `@Agonie0v0`)**: Adds `src/platform/` backend abstractions, the static Rust Win32 helper (`windows/win-helper`), the Tauri 2 desktop UI & tray (`windows/app`), and independent non-blocking `windows-latest` CI / ZIP + NSIS packaging (`tools/package-win.mjs`). All Windows-specific files are excluded from the macOS release `sourceDigest`.
-- **Process Isolation, View Guards & Ledger Accuracy (`#28`, `#33` — thanks to `@lvyandev` & `@MongoRolls`)**: Isolates `chrome_crashpad_handler` and detached background daemons (`language_server` / `sidecar`) during account switching and maintenance (`#28`); refines permission-preset translations and protects code, diff, CSV, LSP reference, and notebook code/output regions (`#33`); preserves historical Orchestrator roles across truncation via incremental `executor_metadata` scanning; aligns Windows 2560-byte credential limits, Named Pipe integrity checks, NTFS lock backoff, and full-page Request Log exports.
-- **Auto-Open Antigravity on Launch**: Because newer Antigravity builds disable the debugging port by default and GravityBox never patches the official bundle, enabling **Settings → Auto-Open Antigravity on Launch** keeps GravityBox in the menu bar / system tray and launches Antigravity with `--remote-debugging-port=0`.
-- **Zero-SSH Remote Windows & Multi-Host UI**: Adapts Antigravity `2.33.0+` SSH remote windows over local CDP without spawning external `ssh` processes—delivering bilingual UI, live HUD, isolated read-only `Local / SSH: <host>` dual-window quota views, active-SSH safety reminders, companion SSH host lists in **Overview**, and a scope selector in the menu bar / tray panel.
-- **Unified Local + SSH Usage Ledger**: Incrementally syncs remote session usage into the local SQLite ledger (deduplicated by remote trajectory ID with timeline-based account attribution), surfacing a merged total, `Local % · SSH %` split bar, orthogonal `Environment × Account` filters, and offline SSH history badges.
-- **BTW Side-Question Isolation & `2.34.0` Catalog**: Tracks `2.34.0` BTW side-question panes in their own isolated HUD instance and deduplicates cloned prefix generations in usage accounting, alongside verified `2.34.0` dictionaries and `>200K` tiered pricing for `gemini-2.5-pro`.
-- **HTTP / HTTPS Proxy Support**: Choose **Off**, **Follow System Proxy**, or **Manual** `http://` / `https://` proxy in **Settings** (PAC and SOCKS5 are not supported). GravityBox injects `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` when launching Antigravity, reuses the configured proxy for its own outbound requests, and inspects running Antigravity processes for proxy mismatches or shell overrides.
-- **Standby Account Quotas on Antigravity `2.34.0+`**: The active account refreshes passwordlessly via local process environment probing. Because `2.34.0` restricts local quota RPC to the active session and GravityBox stays local-only without bundling official OAuth client secrets or relay servers, inactive standby accounts stop background cloud refreshes once their token expires (~1 hour). GravityBox refreshes right before expiry, skips expired polls silently, marks passed reset timestamps as **Est. Reset**, factors likely-reset candidates into **Standby Advisor**, and syncs live balances as soon as you switch.
-- **JSON Account Management & `agy` CLI Sync**: Save the live account, batch-import JSON files or directories (deduplicated by email), or export backups (confirmed before write, `0600` on macOS). Switching and rollback also sync existing same-origin CLI token files (`antigravity-oauth-token` and `jetski-standalone-oauth-token`) without touching `@google/gemini-cli` credentials.
-- **Thinking-Variant Folding & Live Pricing Feed**: Usage cards fold `-low`, `-medium`, `-high`, `-xhigh`, `-thinking`, `-max`, and `-tiered` variants under each base model while preserving raw entries in **Request Log**. Enable **Auto-Sync Pricing Feed** (or click **Check Now**) to pull catalog updates via GitHub / jsDelivr with SHA-256 deduplication.
-- **Independent Language & HUD Control**: Select `Follow System`, `English`, or `简体中文` in **Settings** (or the menu bar / tray `···` menu) to hot-switch both apps; you can keep Antigravity in clean English while keeping the English HUD enabled.
+- **账号信息隐私遮挡（PR `#34`，致谢 `@Agonie0v0` 发起并贡献 Windows 实现，macOS / Windows 双端统一）**：在 **总览**、**账号** 与菜单栏 / 托盘浮窗的身份或标题旁提供纯图标小眼睛一键切换与眨眼/淡入动效（遵守系统减少动态效果设置），支持全局快捷键（macOS `⇧⌘M` 与「显示」菜单项，Windows `Ctrl+Shift+M`）；同步脱敏昵称（`首字 + •••`）与邮箱，覆盖账号卡片、推荐横幅、SSH 伴随行、用量筛选下拉框、请求明细、切号/删号确认弹窗、辅助功能标签、弹窗内联报错与全局 Toast 提示；总览页右键仍可复制完整原邮箱，重命名输入框保留原昵称防误覆写。
+- **macOS Intel (`x86_64`) 本地源码构建与更新架构保护（Issue `#29`、PR `#31`，致谢 `@lvyandev`）**：按宿主架构统一解析 Swift 编译目标、`lipo` 单架构一致性校验（主程序与内置 Node）、`mac-arm64` / `mac-x64` 无头测试浏览器下载及关于页右键复制的环境架构标签；应用内更新仅接受当前编译架构安装包防止跨架构误装（GitHub Releases 仅自动分发 `arm64` 成品，Intel 端由本机源码验证打包）。
+- **删号静默清理关联恢复快照与 Windows 关闭/跨卷加固**：删除账号时后台自动清空 `account-switch-journal-stable.json` 中命中该账号的切号凭据与文件快照（覆盖索引引用、`go-keyring-base64:` 钥匙串载荷及 `state.vscdb` 双层 Base64 Protobuf `userStatus` 行，中断待恢复事务跳过保护），停止写入 `accounts-removed/` 并清理对应历史旧留档；Windows 端为全部 4 处 `closeAntigravitySafely` 透传 `detachedOnly`、完善 `user_cancelled` / `uipi_access_denied` 提示优先级，并为 `EXDEV` 跨卷回退补齐 `rmSync` 重试参数。
+- **Windows x64 社区共建跨平台支持（`v1.2.1` — 响应 Issue `#17` 致谢 `@dysonkai`；PR `#27`、`#30`、`#32` 致谢 `@Agonie0v0` 贡献实现）**：引入同仓隔离的跨平台后端抽象（`src/platform/`）、原生 Rust Win32 助手（`windows/win-helper`，提供凭据管理器、SID 鉴权 Named Pipe、非破坏性 `IFileOperation` 回收站迁移与严格优雅退出边界）、Tauri 2 Windows 桌面控制台与托盘浮窗（`windows/app`），以及独立非阻塞 `windows-latest` CI 与自包含 ZIP / NSIS 安装包构建流（`tools/package-win.mjs`），所有 Windows 专属文件与 macOS `sourceDigest` 彻底隔离。
+- **进程隔离、HUD 精度与视图保护加固（`#28`、`#33`，致谢 `@lvyandev` 与 `@MongoRolls`）**：在切号、回滚与存储维护期间隔离 `chrome_crashpad_handler` 与已脱离主进程树的后台守护进程（`language_server` / `sidecar`，`#28`）；细化权限四档翻译并新增代码查看、Diff、CSV 视口、LSP 引用与 Notebook 代码/输出区防误译保护（`#33`）；通过 `executor_metadata` 增量扫描保留对话回退/截断后的历史编排器角色；对齐 Windows 凭据 2560 字节边界、Named Pipe 完整性校验、NTFS 锁退避及请求明细全量分页导出。
+- **启动时自动打开 Antigravity**：因新版 Antigravity 默认不再开启调试端口（且本工具坚持不修改官方安装包），原「跟随 Antigravity 启停」已替换为 **设置 → 启动时自动打开 Antigravity**。开启后，打开 GravityBox 会自动静默驻留菜单栏 / 系统托盘并拉起带 `--remote-debugging-port=0` 调试端口的 Antigravity。
+- **SSH 远程窗口零外部 SSH 适配与多主机视图**：通过本机 CDP 通道直接适配 Antigravity `2.33.0+` SSH 远程窗口，不拉起任何外部 `ssh` 进程——提供完整双语热适配、实时对话状态栏 HUD、严格隔离本机账号的 `本机 / SSH: <host>` 只读双周期配额查看、切号/安全重启/维护时的活跃 SSH 保护提醒，以及 **总览** 伴生 SSH 主机列表与 **菜单栏 / 托盘浮窗** 可展开范围切换器。
+- **本机 + SSH 统一多环境用量账本**：增量同步远端会话用量至本地 SQLite 账本（按远端轨迹 ID 去重并基于时间线判定账号归属），提供默认合并总览、`本机 % · SSH %` 环境占比条、`环境 × 账号` 正交筛选与离线 SSH 历史徽标。
+- **BTW 侧边提问分栏隔离与 `2.34.0` 目录更新**：独立观测 `2.34.0` BTW 侧边提问分栏 HUD 并在用量核算中自动去重克隆前缀生成记录，同时收录 `2.34.0` 官方词典并为 `gemini-2.5-pro` 补全 `>200K` 上下文阶梯定价。
+- **HTTP / HTTPS 网络代理支持**：在 **设置** 中选择 **关闭**、**跟随系统代理** 或 **手动配置** `http://` / `https://` 代理（不支持 PAC 与 SOCKS5）。GravityBox 启动 Antigravity 时自动注入 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`，自身外联请求共享同一代理通道，并实时检测运行中进程的代理不匹配或 Shell 覆盖状态。
+- **Antigravity `2.34.0+` 备用账号配额追踪**：当前正在使用的账号通过进程环境变量读取，无需额外配置即可持续实时刷新。受 `2.34.0` 本地通道仅限单一活跃会话、以及 GravityBox 坚持纯本地开源（不内置官方客户端密钥、不设中转服务器）的限制，未激活的备用账号离开约 1 小时登录态过期后不再后台拉取云端额度；GravityBox 会在过期前自动补刷、超时后静默跳过不弹窗报错、保留上次快照并按重置时间标示 **「预计已重置」** 供智能推荐参考，待手动切回该账号时同步最新余额。
+- **JSON 批量管理与 `agy` CLI 同步**：集成保存当前账号、JSON 文件/目录批量导入（按邮箱去重）与二次确认备份导出（macOS 锁定 `0600`）；切号与撤销回滚时会顺带更新本机已存在的 `antigravity-oauth-token` 与 `jetski-standalone-oauth-token`，不干扰 `@google/gemini-cli` 凭据。
+- **思考档位折叠与价格表热更新**：主界面与浮窗自动将同一基础模型的 `-low`、`-medium`、`-high`、`-xhigh`、`-thinking`、`-max`、`-tiered` 等变体合并展示汇总消耗（请求明细流水保留原始标识）；开启 **「自动更新价格基准」** 或点击 **「立即检查」** 可在线热同步最新公开模型单价表。
+- **独立双语与 HUD 开关**：在设置页或菜单栏 / 托盘 `···` 菜单随时切换 **跟随系统 / 简体中文 / English**，无需重启；选择 `English` 恢复官方英文界面时，仍可保持英文版 HUD 正常工作。
 
 ---
 
-## Installation & Upgrades
+## 安装与升级
 
-- **macOS (Primary)**: Requires macOS 14 (Sonoma) or macOS 15+ (Sequoia), Apple Silicon (`arm64`), and official stable `/Applications/Antigravity.app` (Insiders is neither supported nor altered). Zero external runtime dependencies.
-  - Optional checksum check: `shasum -a 256 -c GravityBox-<version>-arm64.dmg.sha256`
-  - Upgrade by quitting GravityBox and dragging the new app over `/Applications/GravityBox.app` (or enabling **Auto-Check Updates** in **About**, off by default).
-- **Windows x64 (Community Edition)**: Requires Windows 10/11 x64, system WebView2 runtime, and official stable Antigravity. Prebuilt self-contained artifacts (`GravityBox-<version>-win-x64-setup.exe` and portable `GravityBox-<version>-win-x64.zip` with `.sha256` sidecars) are real-machine verified by `@Agonie0v0` and distributed alongside `v1.2.1` on [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest)—**end users do not need to build from source**.
-  - Optional PowerShell checksum check: `Get-FileHash GravityBox-<version>-win-x64.zip -Algorithm SHA256`
-- **Persistent User Data**:
-  - macOS: `~/Library/Application Support/GravityBox` (caches in `~/Library/Caches/GravityBox`)
-  - Windows: `%APPDATA%\GravityBox` (caches in `%LOCALAPPDATA%\GravityBox\Cache`, logs in `%LOCALAPPDATA%\GravityBox\Logs`)
+- **macOS（原生主线）**：macOS 14 (Sonoma) 或更高版本、官方正式版 `/Applications/Antigravity.app`（不支持也不干扰 Insiders 预览版），内置运行环境、零外部依赖。
+  - SHA-256 校验（可选）：`shasum -a 256 -c GravityBox-<version>-arm64.dmg.sha256`
+  - 无损升级：退出旧版 GravityBox 后将新版拖入 `/Applications` 替换，或在 **关于** 页检查更新（默认关闭后台检查）。
+  - GitHub Releases 提供 Apple Silicon（`arm64`）DMG。Intel（`x86_64`）在源码目录运行 `npm run verify` 与 `npm run package:mac`，再安装本地产出的 DMG；升级时用新版源码重新构建。
+- **Windows x64（社区共建端）**：Windows 10/11 x64（需系统 WebView2 运行时）及官方正式版 Antigravity；由维护者/CI 统一构建开箱即用的自包含安装版（`GravityBox-<version>-win-x64-setup.exe`）与便携版（`GravityBox-<version>-win-x64.zip`，均附 `.sha256` 校验文件），已由 `@Agonie0v0` 完成真机验收，随 `v1.2.1` 直接发布至 [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest)，**普通用户无需自行编译打包**。
+  - PowerShell 校验（可选）：`Get-FileHash GravityBox-<version>-win-x64.zip -Algorithm SHA256`
+- **本地数据与缓存路径**：
+  - macOS：状态库 `~/Library/Application Support/GravityBox`（缓存位于 `~/Library/Caches/GravityBox`）
+  - Windows：状态库 `%APPDATA%\GravityBox`（缓存位于 `%LOCALAPPDATA%\GravityBox\Cache`，日志位于 `%LOCALAPPDATA%\GravityBox\Logs`）
 
 <details>
-<summary>Optional: Background OAuth refresh credentials for expired standby accounts</summary>
+<summary>进阶可选：为过期备用账号配置后台云端刷新凭据</summary>
 
-No `.env` setup is required for daily use, active-account live quotas, HUD, usage accounting, or switching. If you provide your own compatible OAuth client credentials for continuous background cloud polling of expired standby accounts, place them in `~/Library/Application Support/GravityBox/.env` (macOS) or `%APPDATA%\GravityBox\.env` (Windows):
+日常使用（多账号切号、当前账号实时配额、HUD 状态栏、用量账单与汉化）无需此配置。仅当需要未激活备用账号在过期后继续自动拉取云端配额时，才需在 `~/Library/Application Support/GravityBox/.env`（macOS）或 `%APPDATA%\GravityBox\.env`（Windows）中写入兼容的 OAuth 客户端凭据：
 
 ```bash
 GRAVITYBOX_GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
@@ -295,96 +303,98 @@ GRAVITYBOX_GOOGLE_CLIENT_SECRET="your-client-secret"
 
 ---
 
-## Security & Privacy
+## 安全与隐私边界
 
-| Guarantee | Mechanism |
+| 安全原则 | 工程实现 |
 | :--- | :--- |
-| **Zero Telemetry** | No analytics SDKs, crash reporting, or unprompted outbound traffic. Update checks and remote pricing sync default to Off. |
-| **Untouched Official App** | Runs via local loopback (`127.0.0.1`) CDP isolated worlds; never unpacks or alters the official Antigravity bundle or executable. |
-| **Protected User Content** | Composers, drafts, chat history, code blocks, diffs, CSV viewports, LSP references, notebook code/outputs, terminal logs, and workspace names are excluded by DOM allowlists/guards. |
-| **Scoped Local Storage & IPC** | **macOS**: `~/Library/Application Support/GravityBox` (`0700`/`0600`), Keychain, and Unix Domain Socket IPC.<br/>**Windows**: `%APPDATA%\GravityBox`, Credential Manager (2560-byte guard & buffer zeroization), randomized Named Pipe with 256-bit `authToken` + same-user SID / integrity verification, strict Tauri CSP / URL allowlist, `IFileOperation` Recycle Bin guards, and UIPI-compliant graceful close. |
+| **零遥测零上报** | 无第三方统计或崩溃上报 SDK，无后台静默外联请求；更新检查与价格同步默认均关闭。 |
+| **不改动官方包** | 仅通过本机回环（`127.0.0.1`）CDP 隔离世界运行，不解包、不改写、不重签名官方 Antigravity 安装包或可执行文件。 |
+| **用户内容隔离** | 输入框草稿、对话正文、代码块、Diff、CSV 视口、LSP 引用、Notebook 代码/输出区、终端输出、文件名与项目名由 DOM 选择器与白名单严格隔离。 |
+| **本机隔离存储与 IPC 鉴权** | **macOS**：`~/Library/Application Support/GravityBox`（`0700`/`0600`）、Keychain 与 Unix Domain Socket IPC。<br/>**Windows**：`%APPDATA%\GravityBox`、Windows Credential Manager（2560 字节守卫与内存清零）、带 256-bit `authToken` 及同用户 SID/完整性校验的随机 Named Pipe、最小权限 Tauri CSP/URL 白名单、`IFileOperation` 回收站路径守卫及 UIPI 优雅退出边界。 |
+| **隐私遮挡与删号清理** | 支持一键脱敏界面昵称、邮箱、确认框、报错/Toast 与辅助功能标签；删除账号时自动清理关联切号恢复凭据/快照及历史 `accounts-removed/` 留档，且不再写入新留档副本。 |
 
 ---
 
-## Architecture & Build
+## 架构与源码构建
 
 ```mermaid
 flowchart LR
-  UI["Desktop UI<br/>macOS: Swift 6 / AppKit · Win: Tauri 2 / React"] <-->|"macOS: UDS · Win: SID-Verified Named Pipe"| Core["Core Engine (Node 22 / TypeScript)<br/>4-Phase Switch · SQLite Ledger · Quota Fusion"]
-  Core -->|"Loopback CDP (Zero Binary Mod)"| IDE["Official Antigravity Stable<br/>Runtime i18n · Telemetry HUD"]
-  Core -->|"Read-Only SQLite + Trash / Recycle Bin"| Local["Local App Data & Credentials<br/>macOS App Support / Keychain · Win %APPDATA% / CredMan"]
+  UI["桌面前端<br/>macOS: Swift 6 / AppKit · Win: Tauri 2 / React"] <-->|"macOS: UDS · Win: SID 鉴权 Named Pipe"| Core["核心引擎 (Node 22 / TypeScript)<br/>四阶段切号 · 只读 SQLite 账本 · 配额融合"]
+  Core -->|"本机回环 CDP (零改包)"| IDE["官方正式版 Antigravity<br/>界面热汉化 · 对话状态栏 HUD"]
+  Core -->|"只读快照 + 废纸篓 / 回收站还原"| Local["本机数据与凭据<br/>macOS App Support / Keychain · Win %APPDATA% / 凭据管理器"]
 ```
 
-- **macOS Build**: Requires Xcode Command Line Tools and Node.js `>=22.15.0 <23`.
-- **Windows Build**: Requires Windows 10/11 x64, Node.js `>=22.15.0 <23`, Rust (`cargo` / `rustc`), MSVC & WebView2 build tools (plus NSIS for `-setup.exe`). Maintainers/CI also produce prebuilt Windows artifacts via the manual `Package Windows (Artifact Only)` workflow.
+- **macOS 构建依赖**：Xcode Command Line Tools 与匹配构建架构（`arm64` 或 `x64`）的 Node.js `>=22.15.0 <23`。运行 `node tools/setup-test-browser.mjs` 准备固定版本的无头浏览器，也可指定 `CHROME_BIN`。
+- **Windows 构建依赖**：Windows 10/11 x64、Node.js `>=22.15.0 <23`、Rust（`cargo` / `rustc`）、MSVC 与 WebView2 构建工具（构建 `.exe` 安装包另需 NSIS）。维护者与 CI 亦可通过手动运行 `Package Windows (Artifact Only)` 工作流直接产出预构建 Windows 测试包。
 
 ```bash
 git clone https://github.com/Enzoo404/gravitybox.git
 cd gravitybox
 npm ci
 
-npm test                # Build TS, verify pricing parity, and run unit/integration suites
-npm run check:swift     # Typecheck Swift 6 AppKit UI and test harness (macOS)
-npm run verify          # Full gate: TS, tests, headless browser CDP E2E, Swift -O (macOS), dict gates
-npm run package:mac     # Build arm64 .app and distributable .dmg (macOS)
-npm run test:win        # Run backend fast tests + Win32 helper & Tauri Rust tests (Windows)
-npm run package:win     # Build self-contained Windows .zip (pass --installer for NSIS .exe)
+npm test                # 编译 TS、校验价格资产并运行单元/集成测试
+npm run check:swift     # Swift 6 AppKit 编译与布局检查（macOS）
+npm run verify          # 全量发布门禁（TS + 单测 + 无头浏览器 E2E + Swift -O + 词典门禁）
+npm run package:mac     # 按本机 macOS 架构（arm64 / x86_64）构建 .app 与 .dmg
+npm run test:win        # 运行后端快测 + Win32 助手与 Tauri Rust 测试（Windows）
+npm run package:win     # 构建 Windows 自包含 .zip（附加 --installer 生成 NSIS .exe）
 ```
 
 <details>
-<summary>Repository layout</summary>
+<summary>仓库目录结构</summary>
 
 ```text
 gravitybox/
-├── native/       # Swift 6 / AppKit console, MenuFloatingPanel, L10n runtime, updater (macOS)
-├── src/          # Node 22 / TypeScript backend (IPC, i18n, atomic switch, quota, SQLite ledger, HUD, platform/)
-├── windows/      # Co-located Windows x64 client (win-helper Rust Win32 helper + Tauri 2 / React app)
-├── runtime/      # CDP isolated-world scripts (DOM localization engine, guards, Telemetry HUD)
-├── dict/         # Layered bilingual dictionaries and custom overrides
-├── ui-strings/   # Versioned official bundle extraction snapshots (2.23.0 – 2.34.0)
-├── assets/       # Icons, i18n JSON packs, model catalog, pricing feed, macOS Retina screenshots
-├── test/         # Unit, integration, headless Chromium E2E, cross-platform & Swift UI layout suites
-└── tools/        # Release integrity, privacy check, docs parity, screenshot, DMG & Windows packaging scripts
+├── native/       # Swift 6 / AppKit 主控制台、MenuFloatingPanel、双语运行时与更新器（macOS）
+├── src/          # TypeScript 核心引擎（IPC、双语控制、四阶段切号、配额融合、SQLite 账本、HUD、platform/）
+├── windows/      # 同仓隔离的 Windows x64 客户端（win-helper Rust Win32 助手 + Tauri 2 / React 桌面端）
+├── runtime/      # CDP 注入脚本（DOM 增量翻译、保护守卫与双语 Telemetry HUD）
+├── dict/         # 分层词典与本地覆盖配置
+├── ui-strings/   # 各受支持正式版官方界面文案快照（2.23.0 – 2.34.0）
+├── assets/       # 图标、i18n 语言包、模型目录、时序价格表与 macOS Retina 实机截图
+├── test/         # 单元/集成、无头 Chromium 浏览器回归、跨平台隔离及原生 Swift UI 测试套件
+└── tools/        # 发布完整性校验、隐私扫描、文档检查、截图生成、DMG 与 Windows 打包脚本
 ```
 
 </details>
 
 ---
 
-## FAQ
+## 常见问题
 
 <details>
-<summary><b>Why must Antigravity be closed before switching accounts?</b></summary>
+<summary><b>为什么切号前需要先退出 Antigravity？</b></summary>
 
-Antigravity holds live SQLite (`state.vscdb`) and credential locks while running. Force-killing or overwriting files underneath an active instance risks database corruption or lost drafts. GravityBox checks for a clean exit first (using graceful close only), writes via a 4-phase snapshot transaction, and rolls back automatically on failure—requiring user confirmation every time.
+Antigravity 运行时会持续持有本地 SQLite（`state.vscdb`）与认证文件锁，后台强杀或覆写运行中的数据库文件存在损库与草稿丢失风险。GravityBox 先确认安全退出（仅使用优雅关闭），再执行四阶段快照切换并在异常时原位回滚，切号动作始终由你确认。
 
 </details>
 
 <details>
-<summary><b>Can I use only the Telemetry HUD without translating the IDE?</b></summary>
+<summary><b>只想开启输入框 HUD，不汉化 Antigravity 可以吗？</b></summary>
 
-Yes. Set **Settings → Display Language** to **English** and keep **Session HUD** enabled. Both GravityBox and Antigravity stay in English while displaying the English HUD beneath the chat composer.
+可以。在 **设置 → 显示语言** 中选择 **English**，同时保持 **对话状态栏** 开关开启，Antigravity 将保持原生英文界面并在输入框下方展示英文 HUD。
 
 </details>
 
 <details>
-<summary><b>How do I uninstall GravityBox?</b></summary>
+<summary><b>如何卸载 GravityBox？</b></summary>
 
-Quit GravityBox (Antigravity requires no cleanup because its files are never altered):
-- **macOS**: Move `/Applications/GravityBox.app` to Trash, and optionally remove `~/Library/Application Support/GravityBox`.
-- **Windows**: Run the uninstaller (or delete the portable `GravityBox` folder), and optionally remove `%APPDATA%\GravityBox` and `%LOCALAPPDATA%\GravityBox`.
+退出 GravityBox（官方 Antigravity 从未被修改过，无需额外还原）：
+- **macOS**：将 `/Applications/GravityBox.app` 移入废纸篓即可；如无需保留历史账单与账号配置，再删除 `~/Library/Application Support/GravityBox`。
+- **Windows**：运行卸载程序（或删除便携目录），如无需保留历史账单与账号配置，再删除 `%APPDATA%\GravityBox` 与 `%LOCALAPPDATA%\GravityBox`。
 
 </details>
 
 ---
 
-## Contributing, Acknowledgements & License
+## 参与贡献、致谢与开源协议
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md), [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md), [SECURITY.md](./SECURITY.md), and [CHANGELOG.md](./CHANGELOG.md). Feedback and bug reports are welcome via [GitHub Issues](https://github.com/Enzoo404/gravitybox/issues).
+提交代码或反馈请先阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)、[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)、[SECURITY.md](./SECURITY.md) 与 [CHANGELOG.md](./CHANGELOG.md)，欢迎在 [GitHub Issues](https://github.com/Enzoo404/gravitybox/issues) 提交讨论。
 
-**Community Acknowledgements**:
-- **Code Contributions**: `@Agonie0v0` (`#26` `sqlite-worker` stability fix; `#27`, `#30`, `#32` Windows x64 cross-platform implementation)
-- **Bug Reports & Feature Proposals**: `@Rentrer` (`#15`), `@Allenbayern` (`#19`, `#20`), `@willingning-coder` (`#21`), `@YangFuting` (`#24`), `@lvyandev` (`#28`), `@MongoRolls` (`#33`)
+**社区致谢**：
+- **代码贡献**：`@Agonie0v0`（`#26` `sqlite-worker` 稳定性修复；`#27`、`#30`、`#32` Windows x64 跨平台同仓三阶段实现；`#34` 账号信息隐私遮挡）、`@lvyandev`（`#31` macOS Intel `x86_64` 源码构建、门禁与更新架构保护）
+- **问题反馈与特性建议**：`@Rentrer`（`#15`）、`@dysonkai`（`#17`）、`@Allenbayern`（`#19`、`#20`）、`@willingning-coder`（`#21`）、`@YangFuting`（`#24`）、`@lvyandev`（`#28`、`#29`）、`@MongoRolls`（`#33`）
+- **交流社区**：感谢 [LINUX DO](https://linux.do/) 社区提供技术交流与开源分享平台，欢迎前往社区交流使用体验与改进建议。
 
 <div align="center">
   <a href="https://star-history.com/#Enzoo404/gravitybox&Date">
@@ -393,5 +403,5 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md), [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT
 </div>
 
 <p align="center">
-  <sub>Released under the <a href="./LICENSE">MIT License</a> · Third-party notices in <a href="./THIRD_PARTY_NOTICES.md">THIRD_PARTY_NOTICES.md</a> · Not affiliated with or endorsed by Google, Apple, or Microsoft.</sub>
+  <sub>基于 <a href="./LICENSE">MIT License</a> 开源 · 第三方许可见 <a href="./THIRD_PARTY_NOTICES.md">THIRD_PARTY_NOTICES.md</a> · 与 Google、Apple 或 Microsoft 官方无从属或背书关系。</sub>
 </p>

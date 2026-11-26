@@ -1,11 +1,15 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile, writeFile } from 'node:fs/promises';
+import { access, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { fileSha256, parseSha256Sidecar, sourceDigest, verifySha256Sidecar } from './release-integrity.mjs';
 
 const run = promisify(execFile);
+
+async function fileExists(path) {
+  try { await access(path); return true; } catch { return false; }
+}
 
 export function validateVersion(tag, pkg, lock) {
   if (tag !== tag.trim() || !/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag)) throw Error('需要 vX.Y.Z 正式版本标签');
@@ -18,6 +22,12 @@ export function validateVersion(tag, pkg, lock) {
 export function releaseAssetNames(version) {
   const dmg = `GravityBox-${version}-arm64.dmg`;
   return [dmg, `${dmg}.sha256`, 'release-manifest.json'];
+}
+
+export function optionalReleaseAssetNames(version) {
+  const zip = `GravityBox-${version}-win-x64.zip`;
+  const installer = `GravityBox-${version}-win-x64-setup.exe`;
+  return [zip, `${zip}.sha256`, installer, `${installer}.sha256`];
 }
 
 export function assertNewRelease(release) {
@@ -42,9 +52,18 @@ export async function findReleaseByTag(api, tag) {
 
 export function validateDraft(release, tag) {
   if (!release || release.draft !== true || release.prerelease || release.tag_name !== tag || !Number.isSafeInteger(release.id)) throw Error('只允许发布指定标签的正式版本草稿；已公开版本不可重发');
-  const expected = releaseAssetNames(tag.slice(1)).sort();
+  const version = tag.slice(1);
+  const required = releaseAssetNames(version);
+  const optional = optionalReleaseAssetNames(version);
+  const allowed = new Set([...required, ...optional]);
   const assets = release.assets ?? [];
-  if (JSON.stringify(assets.map(a => a.name).sort()) !== JSON.stringify(expected) || assets.some(a => a.state !== 'uploaded' || !(a.size > 0))) throw Error('草稿附件不完整、重复或包含非预期文件');
+  const names = assets.map(a => a.name);
+  const nameSet = new Set(names);
+  const missingRequired = required.some(name => !nameSet.has(name));
+  const hasDuplicates = nameSet.size !== names.length;
+  const hasUnexpected = names.some(name => !allowed.has(name));
+  const hasOrphanSidecar = optional.some(name => name.endsWith('.sha256') && nameSet.has(name) && !nameSet.has(name.slice(0, -'.sha256'.length)));
+  if (missingRequired || hasDuplicates || hasUnexpected || hasOrphanSidecar || assets.some(a => a.state !== 'uploaded' || !(a.size > 0))) throw Error('草稿附件不完整、重复或包含非预期文件');
   return release;
 }
 
@@ -107,6 +126,14 @@ export async function verifyAcceptedFiles(directory, context, expectedHash) {
   const sidecar = parseSha256Sidecar(await readFile(join(directory, sidecarName), 'utf8'), dmgName);
   const actual = await fileSha256(join(directory, dmgName));
   if (actual !== expectedHash || actual !== manifest.dmg.sha256 || actual !== sidecar.hash) throw Error('实际 DMG、校验文件、发布清单或人工验收的 SHA-256 不一致');
+  for (const optionalPkg of optionalReleaseAssetNames(context.version).filter(name => !name.endsWith('.sha256'))) {
+    const pkgPath = join(directory, optionalPkg);
+    const sidecarPath = join(directory, `${optionalPkg}.sha256`);
+    const hasPkg = await fileExists(pkgPath);
+    const hasSidecar = await fileExists(sidecarPath);
+    if (hasSidecar && !hasPkg) throw Error(`缺少 ${optionalPkg}，无法匹配其 sha256 校验文件`);
+    if (hasPkg && hasSidecar) await verifySha256Sidecar(pkgPath, { sidecarPath });
+  }
   return actual;
 }
 

@@ -3,7 +3,7 @@ import { bt } from './i18n.js';
 import { resolveOutboundFetch } from './proxy.js';
 import { inspectBundle } from './discovery.js';
 import { readFileSync, statSync } from 'node:fs';
-import { lstat, mkdir, readFile, readdir, unlink } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rmdir, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -34,6 +34,7 @@ import {
   isWindows,
   lsInspect,
   pathsEqual,
+  unlinkWithRetry,
 } from './platform/index.js';
 import {
   CloudQuotaAuthorityError,
@@ -1459,47 +1460,6 @@ export class AccountsManager {
       if (summary || existing) tombstones.push({ id, email, at: Math.floor(Date.now()/1000) });
       index.accounts = index.accounts.filter(a => a.id !== id);
       if (index.current_account_id === id) index.current_account_id = null;
-      const original = await readFile(accountPath, 'utf8').catch(error => { if (error.code !== 'ENOENT') throw error; return null; });
-      if (original !== null) {
-        const removedDir = join(this.stateDir, 'accounts-removed');
-        await mkdir(removedDir, { recursive: true, mode: 0o700 });
-        let redactedAccount: Record<string, unknown> | null = null;
-        try {
-          const parsedOriginal = JSON.parse(sanitizeJsonString(Buffer.from(original, 'utf8')));
-          redactedAccount = parsedOriginal && typeof parsedOriginal === 'object'
-            ? {
-                ...parsedOriginal,
-                token: parsedOriginal.token && typeof parsedOriginal.token === 'object'
-                  ? {
-                      redacted: true,
-                      email: parsedOriginal.token.email ?? null,
-                      project_id: parsedOriginal.token.project_id ?? null,
-                      token_type: parsedOriginal.token.token_type ?? null,
-                    }
-                  : undefined,
-              }
-            : null;
-        } catch {
-          redactedAccount = { parseError: true, redacted: true };
-        }
-        await atomicJson(join(removedDir, `${id}-${Date.now()}.json`), {
-          schema: 1, removedAt: new Date().toISOString(), account: redactedAccount,
-        });
-        try {
-          const entries = (await readdir(removedDir)).filter(f => f.endsWith('.json'));
-          if (entries.length > 10) {
-            const withTime = await Promise.all(entries.map(async name => {
-              const p = join(removedDir, name);
-              const st = await lstat(p).catch(() => null);
-              return { p, mtime: st?.mtimeMs ?? 0 };
-            }));
-            withTime.sort((a, b) => a.mtime - b.mtime);
-            for (const stale of withTime.slice(0, withTime.length - 10)) {
-              await unlink(stale.p).catch(() => {});
-            }
-          }
-        } catch {}
-      }
       await commitFileSet(join(this.stateDir, 'account-delete-commit.json'), [
         { path: this.tombstonesPath, after: JSON.stringify(tombstones.slice(-500), null, 2)+'\n' },
         { path: accountPath, after: null },
@@ -1507,8 +1467,37 @@ export class AccountsManager {
       ]);
       this.indexCache = null;
       this.accountCache.delete(id);
+      await this.purgeLegacyRemovedSnapshots(id, email).catch(() => {});
       return true;
     });
+  }
+
+  private async purgeLegacyRemovedSnapshots(id: string, email: string): Promise<void> {
+    const removedDir = join(this.stateDir, 'accounts-removed');
+    const entries = await readdir(removedDir).catch(() => null);
+    if (!entries) return;
+    const emailLower = email.trim().toLowerCase();
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue;
+      const entryPath = join(removedDir, entry);
+      let matched = entry.startsWith(`${id}-`);
+      if (!matched && emailLower) {
+        try {
+          const parsed = JSON.parse(sanitizeJsonString(await readFile(entryPath)));
+          const archivedEmail = typeof parsed?.account?.email === 'string'
+            ? parsed.account.email.trim().toLowerCase()
+            : '';
+          matched = parsed?.account?.id === id || (archivedEmail !== '' && archivedEmail === emailLower);
+        } catch {}
+      }
+      if (matched) {
+        await unlinkWithRetry(entryPath).catch(() => unlink(entryPath).catch(() => {}));
+      }
+    }
+    const remaining = await readdir(removedDir).catch(() => []);
+    if (remaining.length === 0) {
+      await rmdir(removedDir).catch(() => {});
+    }
   }
 
   async reorderAccounts(ids: string[]): Promise<AccountIndex> {

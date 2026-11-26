@@ -2323,7 +2323,16 @@ async function run() {
             }); return;
           }
           if (command === 'account_delete') {
+            const deleteId = typeof parsed.id === 'string' ? parsed.id.trim() : '';
+            const existingAccount = deleteId ? await accountsManager.getAccount(deleteId).catch(() => null) : null;
+            const indexSummary = (!existingAccount && deleteId)
+              ? (await accountsManager.loadIndex().catch(() => null))?.accounts.find(item => item.id === deleteId)
+              : undefined;
+            const deletedEmail = existingAccount?.email ?? indexSummary?.email ?? null;
             await accountsManager.deleteAccount(parsed.id);
+            if (deleteId) {
+              await switchService.purgeRecoveryForDeletedAccount({ id: deleteId, email: deletedEmail }).catch(() => {});
+            }
             reply({ ok: true });
             return;
           }

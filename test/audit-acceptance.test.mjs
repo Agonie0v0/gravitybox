@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { isoLocal, parseTestCounts, parseBrowserLog, parseGateLog, parseCodesignIdentity, collectAcceptance, buildSummary, formatDiff, updateAcceptance } from '../tools/update-acceptance.mjs';
 import { checkDocs, collectDocFacts, lastClaim, formatIssues } from '../tools/check-docs.mjs';
 import { fileSha256, sourceDigest } from '../tools/release-integrity.mjs';
+import { releaseArchSuffix, releaseDmgName } from '../tools/native-target.mjs';
 
 const run = promisify(execFile);
 const repo = fileURLToPath(new URL('../', import.meta.url));
@@ -31,7 +32,8 @@ async function makeFixture({ stale = false } = {}) {
 
   const dmgDir = join(root, '成品');
   await mkdir(dmgDir, { recursive: true });
-  const dmg = join(dmgDir, 'GravityBox-0.9.0-arm64.dmg');
+  const dmgName = releaseDmgName('0.9.0');
+  const dmg = join(dmgDir, dmgName);
   await writeFile(dmg, 'synthetic-dmg-bytes-for-dry-run');
   const dmgSHA256 = await fileSha256(dmg);
 
@@ -62,7 +64,7 @@ async function makeFixture({ stale = false } = {}) {
   if (stale) Object.assign(summary, {
     revision: 'deadbeef',
     sourceDigest: OTHER_DIGEST,
-    dmg: '/nonexistent/history/Antigravity汉化/成品/GravityBox-0.9.0-arm64.dmg',
+    dmg: `/nonexistent/history/Antigravity汉化/成品/${releaseDmgName('0.9.0')}`,
     dmgSHA256: 'd'.repeat(64),
     installedFilesVerified: 999,
   });
@@ -71,12 +73,12 @@ async function makeFixture({ stale = false } = {}) {
 
   const agents = [
     '# 项目约定',
-    '- 当前运行程序为 `/Applications/GravityBox.app`；保留 `成品/GravityBox-0.9.0-arm64.dmg`。',
+    '- 当前运行程序为 `/Applications/GravityBox.app`；保留 `成品/GravityBox-0.9.0-' + releaseArchSuffix() + '.dmg`。',
     '- 0.9.0 最终已安装：12/12 单元与集成测试、5/5 浏览器回归测试；账号示例 `current@example.test`。',
     '',
   ].join('\n').replace('12/12 单元与集成测试', stale ? '74/74 单元与集成测试' : '12/12 单元与集成测试').replace('5/5 浏览器回归测试', stale ? '46/46 浏览器回归测试' : '5/5 浏览器回归测试').replace('current@example.test', stale ? 'old@example.test' : 'current@example.test');
-  await writeFile(join(root, 'AGENTS.md'), stale ? `${agents}\n- 历史保留 成品/GravityBox-0.8.1-arm64.dmg\n` : agents);
-  await writeFile(join(root, 'README.md'), '# GravityBox 0.9.0\n\n1. 安装包：`成品/GravityBox-0.9.0-arm64.dmg`\n');
+  await writeFile(join(root, 'AGENTS.md'), stale ? `${agents}\n- 历史保留 成品/GravityBox-0.8.1-${releaseArchSuffix()}.dmg\n` : agents);
+  await writeFile(join(root, 'README.md'), `# GravityBox 0.9.0\n\n1. 安装包：\`成品/GravityBox-0.9.0-${releaseArchSuffix()}.dmg\`\n`);
   return { root, dmg, dmgSHA256, installedApp, accountsPath, installedFiles };
 }
 

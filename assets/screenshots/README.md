@@ -1,6 +1,6 @@
 # GravityBox Screenshot Assets
 
-This directory contains all **60 high-DPI (2x Retina) screenshots** referenced by [`README.md`](../../README.md) (English default) and [`README.zh-CN.md`](../../README.zh-CN.md) (Simplified Chinese), captured from the verified macOS Swift 6 / AppKit edition and In-IDE Telemetry HUD with automatic Light and Dark appearance pairs.
+This directory contains all **60 high-DPI (2x Retina) screenshots** referenced by [`README.md`](../../README.md) (Simplified Chinese default) and [`README_EN.md`](../../README_EN.md) (English), captured from the verified macOS Swift 6 / AppKit edition and In-IDE Telemetry HUD with automatic Light and Dark appearance pairs.
 
 > UI screenshots for the Windows x64 (`Tauri 2 / React`) edition introduced in `v1.2.1` (real-machine verified by `@Agonie0v0`) will be added in a follow-up update.
 
@@ -27,7 +27,7 @@ All accounts, emails, quotas, and token metrics are generated from isolated synt
 | **Main · Accounts** | `en-accounts.png` / `en-dark-accounts.png` | `accounts.png` / `dark-accounts.png` | `2200×1520` |
 | **Main · Usage** | `en-usage.png` / `en-dark-usage.png` | `usage.png` / `dark-usage.png` | `2200×1520` |
 | **Main · Settings** | `en-settings.png` / `en-dark-settings.png` | `settings.png` / `dark-settings.png` | `2200×1520` |
-| **Main · About** (`about.png`, `v1.2.1`) | `en-about.png` / `en-dark-about.png` | `about.png` / `dark-about.png` | `2200×1520` |
+| **Main · About** (`about.png`, `v1.2.2`) | `en-about.png` / `en-dark-about.png` | `about.png` / `dark-about.png` | `2200×1520` |
 | **Menu Bar · Usage** | `en-menubar.png` / `en-dark-menubar.png` | `menubar.png` / `dark-menubar.png` | `848×1280` |
 | **Menu Bar · Quota** | `en-menubar-quota.png` / `en-dark-menubar-quota.png` | `menubar-quota.png` / `dark-menubar-quota.png` | `848×994` |
 | **Menu Bar · Accounts** | `en-menubar-accounts.png` / `en-dark-menubar-accounts.png` | `menubar-accounts.png` / `dark-menubar-accounts.png` | `848×1082` |

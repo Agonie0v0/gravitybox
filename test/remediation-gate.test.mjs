@@ -121,14 +121,14 @@ test('P1-Batch2: 归档容量裁剪、只读 StateDb、四档套餐权重与基�
  const dir=await mkdtemp(join(tmpdir(),'gb-p1-batch2-'));
  t.after(()=>rm(dir,{recursive:true,force:true}));
 
- // 1) accounts-removed 最多保留最近 10 份快照
+ // 1) 删除账号不生成 accounts-removed 快照副本
  const mgr=new AccountsManager(dir);
  for(let i=0;i<13;i++){
   const acc=await mgr.upsertAccount({email:`u${i}@example.invalid`,refreshToken:`rt-${i}`});
   await mgr.deleteAccount(acc.id);
  }
- const removedFiles=(await readdir(join(dir,'accounts-removed'))).filter(f=>f.endsWith('.json'));
- assert.ok(removedFiles.length<=10,`accounts-removed 应裁剪至 <=10 份，实际 ${removedFiles.length}`);
+ const removedFiles=await readdir(join(dir,'accounts-removed')).catch(()=>[]);
+ assert.equal(removedFiles.length,0,`accounts-removed 不应写入留档副本，实际 ${removedFiles.length}`);
 
  // 2) 四档套餐等级权重：ULTRA > PRO > 待确认 > FREE（真实 PRO 严格优先于等级未确认账号）
  const makeQuota=(rem,tier)=>({...mgr.fuseQuota(
@@ -304,16 +304,13 @@ test('Release-Audit-P0: 费率重估同步 JSON 锁、HUD 编排器模型消歧�
  assert.equal(hudHydrogen.context.capacitySource,'reference');
  assert.equal(hudHydrogen.tokens.estimatedCostUsd,1.5,'Orchestrator (Hydrogen) 应按 Hydrogen $1.5/1M 计费而非 Argon $2.0/1M');
 
- // 3) deleteAccount 写入 accounts-removed 快照时必须脱敏 OAuth 令牌
+ // 3) deleteAccount 删除账号后不保留 accounts-removed 留档且彻底清除原账号文件与令牌
  const accMgr=new AccountsManager(dir);
  const victim=await accMgr.upsertAccount({email:'sec@example.invalid',refreshToken:'1//secret-rt',accessToken:'ya29.secret-at',idToken:'eyJ.secret-id'});
  await accMgr.deleteAccount(victim.id);
- const removedSnapFiles=(await readdir(join(dir,'accounts-removed'))).filter(f=>f.startsWith(victim.id));
- const removedSnap=JSON.parse(await readFile(join(dir,'accounts-removed',removedSnapFiles[0]),'utf8'));
- assert.equal(removedSnap.account.token.redacted,true);
- assert.equal(JSON.stringify(removedSnap).includes('secret-rt'),false);
- assert.equal(JSON.stringify(removedSnap).includes('secret-at'),false);
- assert.equal(JSON.stringify(removedSnap).includes('secret-id'),false);
+ const removedSnapFiles=await readdir(join(dir,'accounts-removed')).catch(()=>[]);
+ assert.equal(removedSnapFiles.length,0);
+ assert.equal(await readFile(join(dir,'accounts',`${victim.id}.json`),'utf8').catch(()=>null),null);
 
  // 4) typescript-ast-v2 对账与 2.32.1 新增 JSX 词条核验
  const jsxSource='(0,r.jsx)("h2",{children:"Agent working"});';

@@ -281,20 +281,16 @@ test('删除事务中断后按原日志前进恢复；外部修改阻断且保�
   assert.equal(await readFile(b,'utf8'),'external-change'); await access(journal);
 });
 
-test('账号移除保留可恢复材料，文件、索引与墓碑一致，不能重新同步复活', async t => {
+test('账号移除不新建留档且清理历史 accounts-removed，文件、索引与墓碑一致且不能重新同步复活', async t => {
   const dir=await fixture(t), manager=new AccountsManager(dir);
   const account=await manager.upsertAccount({email:'remove@example.invalid',refreshToken:'synthetic-refresh',accessToken:'synthetic-access'});
+  await mkdir(join(dir, 'accounts-removed'), { recursive: true });
+  await writeFile(join(dir, 'accounts-removed', `${account.id}-12345.json`), JSON.stringify({ schema: 1, account: { id: account.id, email: account.email } }));
   await manager.deleteAccount(account.id);
   assert.equal(await manager.getAccount(account.id),null);
   assert.equal((await manager.loadIndex()).accounts.length,0);
   assert.equal(JSON.parse(await readFile(join(dir,'accounts-deleted.json'),'utf8'))[0].id,account.id);
-  const {readdir}=await import('node:fs/promises');const copies=await readdir(join(dir,'accounts-removed'));
-  assert.equal(copies.length,1);
-  const saved=JSON.parse(await readFile(join(dir,'accounts-removed',copies[0]),'utf8'));
-  assert.equal(saved.account.email,account.email);
-  assert.equal(saved.account.token.redacted,true);
-  assert.equal('refresh_token' in saved.account.token,false);
-  assert.equal('access_token' in saved.account.token,false);
+  await assert.rejects(access(join(dir,'accounts-removed')));
 });
 
 test('读取损坏账号明确失败，原件及索引不被当作不存在清掉', async t => {
@@ -306,7 +302,7 @@ test('读取损坏账号明确失败，原件及索引不被当作不存在清�
   assert.equal((await manager.loadIndex()).accounts[0].id,account.id);
 });
 
-test('P1-39 & P1-41: 损坏账号文件可正常删除并归档；decodeTopicRow 遇到前置非 field 1 字段仍能前向兼容解码', async t => {
+test('P1-39 & P1-41: 损坏账号文件可正常删除且不写留档；decodeTopicRow 遇到前置非 field 1 字段仍能前向兼容解码', async t => {
   const dir = await fixture(t);
   const manager = new AccountsManager(dir);
   const account = await manager.upsertAccount({ email: 'corrupt-del@example.invalid', refreshToken: 'synthetic-refresh' });
@@ -317,11 +313,7 @@ test('P1-39 & P1-41: 损坏账号文件可正常删除并归档；decodeTopicRow
   const deleted = await manager.deleteAccount(account.id);
   assert.equal(deleted, true);
   assert.equal((await manager.loadIndex()).accounts.length, 0);
-  const { readdir } = await import('node:fs/promises');
-  const removedCopies = await readdir(join(dir, 'accounts-removed'));
-  assert.equal(removedCopies.length, 1);
-  const archived = JSON.parse(await readFile(join(dir, 'accounts-removed', removedCopies[0]), 'utf8'));
-  assert.deepEqual(archived.account, { parseError: true, redacted: true });
+  await assert.rejects(access(join(dir, 'accounts-removed')));
 
   // P1-41: decodeTopicRow 面对前置 wire type 0 / 1 / 5 / 2 (非 field 1) 字段仍能跳过并提取目标 sentinel
   const { decodeTopicRow } = await import('../dist/account-state.js');
@@ -1099,6 +1091,155 @@ test('v1.1.3 Issue #20: JSON 批量导入、嵌套 token 解析、过期时间�
     /有效|路径|path/i,
     '导出绝不允许覆写 stateDir 内部受管文件'
   );
+});
+
+test('删号同步静默清理命中的切号恢复快照，并保护未完成事务与无关账号快照', async t => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'gb-purge-recovery-'));
+  t.after(() => rm(rootDir, { recursive: true, force: true }));
+  const stateDir = join(rootDir, 'state');
+  const profileDir = join(rootDir, 'profile');
+  await mkdir(stateDir, { recursive: true });
+  await mkdir(profileDir, { recursive: true });
+
+  const mgr = new AccountsManager(stateDir);
+  const service = new AccountSwitchService(mgr, {
+    stateDir,
+    profile: profileDir,
+    isRunning: async () => false,
+  });
+  const journalPath = join(stateDir, 'account-switch-journal-stable.json');
+  const rollbackPath = `${journalPath}.rollback.json`;
+  const completedJournal = {
+    version: 1,
+    status: 'complete',
+    at: new Date().toISOString(),
+    before: {
+      'antigravityUnifiedStateSync.userStatus': Buffer.from('{"email":"victim@example.invalid"}', 'utf8').toString('base64'),
+    },
+    after: {},
+    files: [
+      {
+        path: join(stateDir, 'accounts.json'),
+        before: JSON.stringify({
+          current_account_id: 'acc-victim',
+          accounts: [
+            { id: 'acc-victim', email: 'victim@example.invalid' },
+            { id: 'acc-active', email: 'active@example.invalid' },
+            { id: 'acc-other', email: 'other@example.invalid' },
+          ],
+        }),
+        after: JSON.stringify({
+          current_account_id: 'acc-active',
+          accounts: [
+            { id: 'acc-victim', email: 'victim@example.invalid' },
+            { id: 'acc-active', email: 'active@example.invalid' },
+            { id: 'acc-other', email: 'other@example.invalid' },
+          ],
+        }),
+      },
+    ],
+    cliSnapshots: [
+      { path: join(rootDir, 'cli.json'), existedBefore: true, before: '{"refresh_token":"1//victim-cli-secret","email":"victim@example.invalid"}', afterEmail: 'active@example.invalid' },
+    ],
+    keychainBefore: JSON.stringify({ refresh_token: '1//victim-keychain-secret', email: 'victim@example.invalid' }),
+    keychainAfter: '[REDACTED]',
+  };
+  await writeFile(journalPath, JSON.stringify(completedJournal, null, 2));
+
+  // 1) 无关账号 acc-other 即使出现在 accounts.json 列表里也不误清 A<->B 的恢复快照
+  const unrelatedRes = await service.purgeRecoveryForDeletedAccount({ id: 'acc-other', email: 'other@example.invalid' });
+  assert.deepEqual(unrelatedRes, { cleared: false, reason: 'unmatched' });
+  assert.equal(JSON.parse(await readFile(journalPath, 'utf8')).status, 'complete');
+
+  // 2) 若存在未完成回滚文件 .rollback.json，绝不擅自清除
+  await writeFile(rollbackPath, JSON.stringify({ version: 1, phase: 'prepared' }));
+  const rollbackPendingRes = await service.purgeRecoveryForDeletedAccount({ id: 'acc-victim', email: 'victim@example.invalid' });
+  assert.deepEqual(rollbackPendingRes, { cleared: false, reason: 'rollback_pending' });
+  await rm(rollbackPath);
+
+  // 3) 若 journal 本身处于非稳态（如 prepared），也保持不动
+  await writeFile(journalPath, JSON.stringify({ ...completedJournal, status: 'prepared' }, null, 2));
+  const pendingRes = await service.purgeRecoveryForDeletedAccount({ id: 'acc-victim', email: 'victim@example.invalid' });
+  assert.deepEqual(pendingRes, { cleared: false, reason: 'pending' });
+
+  // 4) 恢复为 complete 状态，删除命中账号后应静默清空所有凭据与快照引用
+  await writeFile(journalPath, JSON.stringify(completedJournal, null, 2));
+  const purgedRes = await service.purgeRecoveryForDeletedAccount({ id: 'acc-victim', email: 'victim@example.invalid' });
+  assert.deepEqual(purgedRes, { cleared: true, reason: 'cleared' });
+  const clearedRaw = await readFile(journalPath, 'utf8');
+  const cleared = JSON.parse(clearedRaw);
+  assert.equal(cleared.status, 'cleared');
+  assert.deepEqual(cleared.before, {});
+  assert.deepEqual(cleared.after, {});
+  assert.deepEqual(cleared.files, []);
+  assert.deepEqual(cleared.cliSnapshots, []);
+  assert.equal(cleared.keychainBefore, null);
+  assert.equal(clearedRaw.includes('victim@example.invalid'), false);
+  assert.equal(clearedRaw.includes('victim-keychain-secret'), false);
+  assert.equal(clearedRaw.includes('victim-cli-secret'), false);
+  assert.equal((await service.recoveryInfo()).available, false);
+
+  // 5) 真实 state.vscdb 双层 Base64 + Protobuf userStatus 行（不依赖 accounts.json id 命中）
+  const { replaceTopicRow } = await import('../dist/account-state.js');
+  const { encodeKeychainOauthPayload } = await import('../dist/account-keychain.js');
+  const { ProtobufWriter } = await import('../dist/protobuf.js');
+  const realUserStatus = replaceTopicRow(
+    undefined,
+    'userStatusSentinelKey',
+    Buffer.concat([ProtobufWriter.encodeString(3, 'Victim'), ProtobufWriter.encodeString(7, 'victim@example.invalid')]),
+  );
+  const userStatusOnlyJournal = {
+    version: 1,
+    status: 'complete',
+    at: new Date().toISOString(),
+    before: {
+      'antigravityUnifiedStateSync.userStatus': realUserStatus,
+    },
+    after: {},
+    files: [],
+    cliSnapshots: [],
+    keychainBefore: null,
+    keychainAfter: '[REDACTED]',
+  };
+  await writeFile(journalPath, JSON.stringify(userStatusOnlyJournal, null, 2));
+  assert.deepEqual(
+    await service.purgeRecoveryForDeletedAccount({ id: 'acc-recreated', email: 'other@example.invalid' }),
+    { cleared: false, reason: 'unmatched' },
+  );
+  assert.deepEqual(
+    await service.purgeRecoveryForDeletedAccount({ id: 'acc-recreated', email: 'victim@example.invalid' }),
+    { cleared: true, reason: 'cleared' },
+  );
+  assert.equal(JSON.parse(await readFile(journalPath, 'utf8')).status, 'cleared');
+
+  // 6) 真实 macOS go-keyring-base64:<b64> keychainBefore（不依赖 accounts.json id 命中）
+  const macKeychainPayload = encodeKeychainOauthPayload(
+    {
+      email: 'victim@example.invalid',
+      token: { access_token: 'ya29.victim', refresh_token: '1//victim-rt', expiry_timestamp: 1700000000 },
+    },
+    'go-keyring-base64',
+  );
+  const keychainOnlyJournal = {
+    version: 1,
+    status: 'complete',
+    at: new Date().toISOString(),
+    before: {},
+    after: {},
+    files: [],
+    cliSnapshots: [],
+    keychainBefore: macKeychainPayload,
+    keychainAfter: '[REDACTED]',
+  };
+  await writeFile(journalPath, JSON.stringify(keychainOnlyJournal, null, 2));
+  assert.deepEqual(
+    await service.purgeRecoveryForDeletedAccount({ id: 'acc-recreated', email: 'victim@example.invalid' }),
+    { cleared: true, reason: 'cleared' },
+  );
+  const clearedKeychainRaw = await readFile(journalPath, 'utf8');
+  assert.equal(JSON.parse(clearedKeychainRaw).status, 'cleared');
+  assert.equal(clearedKeychainRaw.includes('victim'), false);
+  assert.equal(clearedKeychainRaw.includes('1//victim-rt'), false);
 });
 });
 

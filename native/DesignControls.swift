@@ -13,14 +13,29 @@ class DesignButton: NSButton {
     private var hoverTracking: NSTrackingArea?
     private let hoverMotion = DesignMotion()
     private let pressMotion = DesignMotion()
+    private let iconTransitionMotion = DesignMotion()
     private(set) var hoverProgress: CGFloat = 0
     private(set) var pressProgress: CGFloat = 0
+    private var outgoingTransitionImage: NSImage?
+    private var iconTransitionProgress: CGFloat = 1.0
     private var lastHighlighted = false
     var isQuietAccessory: Bool = false {
         didSet {
             guard oldValue != isQuietAccessory else { return }
             invalidateIntrinsicContentSize()
             needsDisplay = true
+        }
+    }
+    var hidesQuietHoverBackground: Bool = false {
+        didSet {
+            guard oldValue != hidesQuietHoverBackground else { return }
+            needsDisplay = true
+        }
+    }
+    var preferredIconButtonSize: CGFloat? {
+        didSet {
+            guard oldValue != preferredIconButtonSize else { return }
+            invalidateIntrinsicContentSize()
         }
     }
 
@@ -66,6 +81,7 @@ class DesignButton: NSButton {
     deinit {
         hoverMotion.cancel()
         pressMotion.cancel()
+        iconTransitionMotion.cancel()
     }
     override var wantsDefaultClipping: Bool { true }
     override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsets() }
@@ -84,6 +100,9 @@ class DesignButton: NSButton {
         if window == nil {
             hoverMotion.cancel()
             pressMotion.cancel()
+            iconTransitionMotion.cancel()
+            outgoingTransitionImage = nil
+            iconTransitionProgress = 1.0
             if hoverProgress != 0 { hoverProgress = 0 }
             if pressProgress != 0 { pressProgress = 0 }
         } else {
@@ -102,10 +121,53 @@ class DesignButton: NSButton {
     override func mouseEntered(with event: NSEvent) { if isEnabled { hovered = true } }
     override func mouseExited(with event: NSEvent) { hovered = false }
 
+    func resetInteractionState() {
+        hovered = false
+        hoverMotion.cancel()
+        pressMotion.cancel()
+        iconTransitionMotion.cancel()
+        outgoingTransitionImage = nil
+        iconTransitionProgress = 1.0
+        lastHighlighted = false
+        let changed = hoverProgress != 0 || pressProgress != 0
+        hoverProgress = 0
+        pressProgress = 0
+        if changed { needsDisplay = true }
+    }
+
+    func setImage(_ newImage: NSImage?, animated: Bool) {
+        let previous = self.image
+        let hasPreviousGlyph = (previous?.size.width ?? 0) > 2 && (previous?.size.height ?? 0) > 2
+        if !animated || !hasPreviousGlyph || previous === newImage || !Design.shouldAnimate(in: self) {
+            iconTransitionMotion.cancel()
+            outgoingTransitionImage = nil
+            iconTransitionProgress = 1.0
+            self.image = newImage
+            needsDisplay = true
+            return
+        }
+        outgoingTransitionImage = previous
+        iconTransitionProgress = 0.0
+        self.image = newImage
+        iconTransitionMotion.animate(in: self, from: 0.0, to: 1.0, curve: .slide, threshold: 0.01, apply: { [weak self] val in
+            guard let self else { return }
+            self.iconTransitionProgress = val
+            self.needsDisplay = true
+        }, completion: { [weak self] in
+            guard let self else { return }
+            self.outgoingTransitionImage = nil
+            self.iconTransitionProgress = 1.0
+            self.needsDisplay = true
+        })
+    }
+
     override var intrinsicContentSize: NSSize {
         let isSmall = controlSize == .small
         let btnHeight: CGFloat = isSmall ? 24 : 28
         if title.isEmpty, image != nil {
+            if let side = preferredIconButtonSize {
+                return NSSize(width: side, height: side)
+            }
             return NSSize(width: isQuietAccessory ? 26 : 30, height: isQuietAccessory ? 26 : btnHeight)
         }
         let defaultFont = NSFont.systemFont(ofSize: isSmall ? 11.5 : 12, weight: .medium)
@@ -164,6 +226,17 @@ class DesignButton: NSButton {
                 grad.draw(in: path, angle: 90)
             }
             Design.drawSpecularBevel(in: rect, cornerRadius: cornerR, isDark: true)
+        } else if isQuietAccessory {
+            if !hidesQuietHoverBackground {
+                let activeHighlight = max(hp, pp)
+                if isEnabled && activeHighlight > 0.01 {
+                    let fill = isDark
+                        ? NSColor.white.withAlphaComponent(0.10 * hp + 0.06 * pp)
+                        : NSColor.black.withAlphaComponent(0.055 * hp + 0.04 * pp)
+                    fill.setFill()
+                    NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7).fill()
+                }
+            }
         } else if inPopover {
             // Pure translucent glass overlay that blends with the popover's vibrant wallpaper tint in both Light and Dark mode.
             let enableScale: CGFloat = isEnabled ? 1.0 : 0.45
@@ -187,15 +260,6 @@ class DesignButton: NSButton {
             path.stroke()
             if isEnabled {
                 Design.drawSpecularBevel(in: rect, cornerRadius: cornerR, isDark: isDark)
-            }
-        } else if isQuietAccessory {
-            let activeHighlight = max(hp, pp)
-            if isEnabled && activeHighlight > 0.01 {
-                let fill = isDark
-                    ? NSColor.white.withAlphaComponent(0.10 * hp + 0.06 * pp)
-                    : NSColor.black.withAlphaComponent(0.055 * hp + 0.04 * pp)
-                fill.setFill()
-                NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7).fill()
             }
         } else {
             // 主窗口轻玻璃立体胶囊按钮（与左侧毛玻璃导航栏和菜单栏质感拉齐）
@@ -249,7 +313,23 @@ class DesignButton: NSButton {
         }
 
         let fgAlpha: CGFloat = primary ? ((isEnabled || isActivitySpinning) ? 1.0 : 0.88) : (isEnabled ? 1.0 : (isActivitySpinning ? 0.86 : 0.42))
-        let baseFg: NSColor = primary ? .white : (isQuietAccessory ? (hp > 0.25 ? Design.primary : Design.secondary) : Design.primary)
+        let baseFg: NSColor
+        if primary {
+            baseFg = .white
+        } else if isQuietAccessory {
+            if let tint = contentTintColor {
+                baseFg = tint
+            } else if hidesQuietHoverBackground {
+                let hoverMix = min(1.0, max(hp, pp * 1.15))
+                baseFg = isDark
+                    ? NSColor(white: 0.58 + 0.18 * hoverMix, alpha: 0.86 + 0.09 * hoverMix)
+                    : NSColor(white: 0.48 - 0.18 * hoverMix, alpha: 0.88 + 0.08 * hoverMix)
+            } else {
+                baseFg = hp > 0.25 ? Design.primary : Design.secondary
+            }
+        } else {
+            baseFg = Design.primary
+        }
         let fgColor = baseFg.withAlphaComponent(fgAlpha)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font ?? NSFont.systemFont(ofSize: 12, weight: .medium),
@@ -308,17 +388,48 @@ class DesignButton: NSButton {
                 cg.rotate(by: signedRotation)
                 cg.translateBy(x: -iconRect.midX, y: -iconRect.midY)
             }
-            if img.isTemplate, let cg = gctx?.cgContext {
-                cg.saveGState()
-                cg.beginTransparencyLayer(in: iconRect, auxiliaryInfo: nil)
-                img.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1.0, respectFlipped: true, hints: [.interpolation: NSNumber(value: NSImageInterpolation.high.rawValue)])
-                cg.setBlendMode(.sourceAtop)
-                fgColor.setFill()
-                cg.fill(iconRect)
-                cg.endTransparencyLayer()
-                cg.restoreGState()
+            func drawGlyph(_ glyph: NSImage, scale glyphScale: CGFloat, alpha glyphAlpha: CGFloat) {
+                let ctx = gctx?.cgContext
+                if abs(glyphScale - 1.0) > 0.001, let cg = ctx {
+                    cg.saveGState()
+                    cg.translateBy(x: iconRect.midX, y: iconRect.midY)
+                    cg.scaleBy(x: glyphScale, y: glyphScale)
+                    cg.translateBy(x: -iconRect.midX, y: -iconRect.midY)
+                }
+                if glyph.isTemplate, let cg = ctx {
+                    let layerRect = iconRect.insetBy(dx: -1, dy: -1)
+                    cg.saveGState()
+                    if glyphAlpha < 0.999 {
+                        cg.setAlpha(glyphAlpha)
+                    }
+                    cg.beginTransparencyLayer(in: layerRect, auxiliaryInfo: nil)
+                    glyph.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1.0, respectFlipped: true, hints: [.interpolation: NSNumber(value: NSImageInterpolation.high.rawValue)])
+                    cg.setBlendMode(.sourceIn)
+                    fgColor.setFill()
+                    cg.fill(layerRect)
+                    cg.endTransparencyLayer()
+                    cg.restoreGState()
+                } else {
+                    glyph.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: glyphAlpha, respectFlipped: true, hints: [.interpolation: NSNumber(value: NSImageInterpolation.high.rawValue)])
+                }
+                if abs(glyphScale - 1.0) > 0.001, let cg = ctx {
+                    cg.restoreGState()
+                }
+            }
+            if let outgoing = outgoingTransitionImage, iconTransitionProgress < 0.999 {
+                let p = max(0, min(1, iconTransitionProgress))
+                let outAlpha = max(0, 1.0 - p * 1.65)
+                let outScale = 1.0 - 0.22 * p
+                let inAlpha = min(1, max(0, (p - 0.14) / 0.86))
+                let inScale = 0.78 + 0.22 * p
+                if outAlpha > 0.01 {
+                    drawGlyph(outgoing, scale: outScale, alpha: outAlpha)
+                }
+                if inAlpha > 0.01 {
+                    drawGlyph(img, scale: inScale, alpha: inAlpha)
+                }
             } else {
-                img.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1.0, respectFlipped: true, hints: [.interpolation: NSNumber(value: NSImageInterpolation.high.rawValue)])
+                drawGlyph(img, scale: 1.0, alpha: 1.0)
             }
             if let cg = rotatedCG {
                 cg.restoreGState()

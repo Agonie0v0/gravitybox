@@ -82,6 +82,7 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
     private let headerTitleLabel = text(L10n.t("usage_log.title"), size: 18, weight: .semibold)
     private var closeButtonRef: NSButton!
     private var languageObserver: NSObjectProtocol?
+    private var privacyMaskObserver: NSObjectProtocol?
     private var cachedHasSshRows = false
     private var cachedRemoteHosts: [CanonicalHostEnvironment] = []
     var rows: [[String: Any]] = [] {
@@ -98,6 +99,9 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
         searchDebounce?.cancel()
         if let languageObserver {
             NotificationCenter.default.removeObserver(languageObserver)
+        }
+        if let privacyMaskObserver {
+            NotificationCenter.default.removeObserver(privacyMaskObserver)
         }
     }
     init(app: Assistant, period selected: String, environmentId: String? = nil, accountId: String? = nil) {
@@ -203,6 +207,18 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
             } else {
                 DispatchQueue.main.async { [weak self] in self?.syncLocalizedChrome() }
             }
+        }
+        privacyMaskObserver = NotificationCenter.default.addObserver(
+            forName: Assistant.privacyMaskDidChangeNotification,
+            object: app,
+            queue: nil
+        ) { [weak self] _ in
+            let refresh = {
+                guard let self, !self.closed else { return }
+                self.syncFilterControls()
+                self.table.reloadData()
+            }
+            if Thread.isMainThread { refresh() } else { DispatchQueue.main.async(execute: refresh) }
         }
     }
 
@@ -620,7 +636,7 @@ final class UsageLogController: NSObject, NSTableViewDataSource, NSTableViewDele
     }
     private var exporting = false
     @objc func exportRows() {
-        guard !exporting, !loading, total > 0, let activeApp = app else { return }
+        guard !exporting, !loading, total > 0, app != nil else { return }
         exporting = true
         status.textColor = Design.secondary
         refreshButton.isEnabled = false

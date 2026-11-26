@@ -72,6 +72,9 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     }
     var bridge: BackendBridge!
     var configuration: ConfigurationStore!
+    static let privacyMaskDidChangeNotification = Notification.Name("GravityBoxPrivacyMaskDidChange")
+    weak var privacyMaskMenuItem: NSMenuItem?
+    var privacyMaskAccounts: Bool { configuration?.value.privacyMaskAccounts ?? false }
     var item: NSStatusItem!
     var menuPanel: MenuFloatingPanel?
     private var isClosingMenuPanel = false
@@ -294,6 +297,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
             try? configuration.save()
         }
         Self.applicationChannel = effectiveChannel
+        AccountIdentity.isPrivacyMaskEnabled = configuration.value.privacyMaskAccounts
         let configuredLanguage = resolveAndPersistInitialLanguage()
         bridge = BackendBridge(resources: resources, state: state)
         bridge.preferredLocale = configuredLanguage
@@ -393,6 +397,16 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         let viewTitle = L10n.t("menu.view")
         let view = NSMenu(title: viewTitle); let viewItem = NSMenuItem(title: viewTitle, action: nil, keyEquivalent: ""); viewItem.submenu = view; main.addItem(viewItem)
         for (index, name) in names.enumerated() { let value = add(view, name, #selector(menuNavigate(_:)), String(index + 1)); value.tag = index }
+        view.addItem(.separator())
+        let maskTitle = privacyMaskAccounts
+            ? L10n.t("accounts.privacy.show", fallback: "显示账号信息")
+            : L10n.t("accounts.privacy.hide", fallback: "隐藏账号信息")
+        let maskItem = NSMenuItem(title: maskTitle, action: #selector(togglePrivacyMaskAccounts(_:)), keyEquivalent: "m")
+        maskItem.target = self
+        maskItem.keyEquivalentModifierMask = [.command, .shift]
+        maskItem.state = privacyMaskAccounts ? .on : .off
+        view.addItem(maskItem)
+        privacyMaskMenuItem = maskItem
         let windowTitle = L10n.t("menu.window")
         let windows = NSMenu(title: windowTitle); let windowItem = NSMenuItem(title: windowTitle, action: nil, keyEquivalent: ""); windowItem.submenu = windows; main.addItem(windowItem)
         add(windows, L10n.t("menu.close_window"), #selector(NSWindow.performClose(_:)), "w", target: nil)
@@ -400,6 +414,28 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         add(windows, L10n.t("menu.zoom"), #selector(NSWindow.performZoom(_:)), "", target: nil)
         NSApp.windowsMenu = windows
         NSApp.mainMenu = main
+    }
+    @objc func togglePrivacyMaskAccounts(_ sender: Any? = nil) {
+        setPrivacyMaskAccounts(!privacyMaskAccounts)
+    }
+    func setPrivacyMaskAccounts(_ masked: Bool) {
+        guard configuration != nil else { return }
+        if configuration.value.privacyMaskAccounts != masked {
+            configuration.value.privacyMaskAccounts = masked
+            try? configuration.save()
+        }
+        AccountIdentity.isPrivacyMaskEnabled = masked
+        if let privacyMaskMenuItem {
+            privacyMaskMenuItem.title = masked
+                ? L10n.t("accounts.privacy.show", fallback: "显示账号信息")
+                : L10n.t("accounts.privacy.hide", fallback: "隐藏账号信息")
+            privacyMaskMenuItem.state = masked ? .on : .off
+        }
+        overview?.refreshPrivacyMaskState()
+        accountsPage?.refreshPrivacyMaskState()
+        usagePage?.refreshPrivacyMaskState()
+        menuPanelController?.refreshPrivacyMaskState()
+        NotificationCenter.default.post(name: Self.privacyMaskDidChangeNotification, object: self)
     }
     @discardableResult func add(_ menu: NSMenu, _ title: String, _ action: Selector, _ key: String = "", target: AnyObject? = nil) -> NSMenuItem {
         let entry = NSMenuItem(title: title, action: action, keyEquivalent: key); entry.target = target ?? self
@@ -2008,13 +2044,15 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     }
     func showMessage(_ message: String, error: Bool = false) {
         guard error, !message.isEmpty else { lastOperationError = nil; pageHost.setAccessibilityHelp(nil); return }
-        lastOperationError = message
-        pageHost.setAccessibilityHelp(message)
+        let knownEmails = cachedAccounts.compactMap { $0["email"] as? String } + [statusValue.liveAccountEmail]
+        let safeMessage = AccountIdentity.maskEmailsInText(message, knownEmails: knownEmails, masked: privacyMaskAccounts)
+        lastOperationError = safeMessage
+        pageHost.setAccessibilityHelp(safeMessage)
         #if !NATIVE_UI_TEST
         guard presentedError == nil else { return }
-        presentedError = message
+        presentedError = safeMessage
         let alert = NSAlert(); alert.alertStyle = .warning
-        alert.messageText = L10n.t("assistant.action_incomplete", fallback: "操作未完成"); alert.informativeText = message
+        alert.messageText = L10n.t("assistant.action_incomplete", fallback: "操作未完成"); alert.informativeText = safeMessage
         alert.addButton(withTitle: L10n.t("common.ok", fallback: "好"))
         presentSheetAlert(alert) { [weak self] _ in self?.presentedError = nil }
         #endif

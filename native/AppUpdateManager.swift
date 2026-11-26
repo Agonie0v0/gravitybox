@@ -267,17 +267,19 @@ final class AppUpdateManager {
             let publishedDate = publishedRaw.count >= 10 ? String(publishedRaw.prefix(10)) : L10n.t("update.latest_build", fallback: "最新构建")
             let htmlURL = Self.httpsURL(from: json["html_url"] as? String) ?? Self.releasesPageURL
 
-            var dmgURL: URL?
-            var sha256URL: URL?
-            if let assets = json["assets"] as? [[String: Any]] {
-                for asset in assets {
-                    guard let assetName = asset["name"] as? String,
-                          let downloadStr = asset["browser_download_url"] as? String,
-                          let url = Self.httpsURL(from: downloadStr) else { continue }
-                    let expectedName = "GravityBox-\(remoteVersion)-arm64.dmg"
-                    if assetName == expectedName { dmgURL = url }
-                    else if assetName == expectedName + ".sha256" { sha256URL = url }
-                }
+            let assetList = (json["assets"] as? [[String: Any]]) ?? []
+            let assetNames = assetList.compactMap { $0["name"] as? String }
+            func assetURL(named name: String) -> URL? {
+                let asset = assetList.first { $0["name"] as? String == name }
+                return Self.httpsURL(from: asset?["browser_download_url"] as? String)
+            }
+            guard let assetChoice = Self.selectReleaseAssetNames(version: remoteVersion, assetNames: assetNames),
+                  let dmgURL = assetURL(named: assetChoice.dmg),
+                  let sha256URL = assetURL(named: assetChoice.sha256) else {
+                self.availableRelease = nil
+                self.downloadedDMGURL = nil
+                self.transition(.upToDate)
+                return
             }
 
             let info = AppReleaseInfo(
@@ -410,7 +412,7 @@ final class AppUpdateManager {
     }
 
     private func cachedDMGPath(for version: String) -> URL {
-        app.state.appendingPathComponent("updates/v\(version)/GravityBox-\(version)-arm64.dmg")
+        app.state.appendingPathComponent("updates/v\(version)/\(Self.releaseDMGName(forVersion: version))")
     }
 
     private static func configureSilentProcess(_ proc: Process) {
@@ -649,6 +651,26 @@ final class AppUpdateManager {
         pattern: #"^GravityBox[-_ ]v?(\d+\.\d+\.\d+(?:-[A-Za-z0-9._-]+)?)(?:-(?:arm64|universal|x86_64|mac))?\.dmg(?:\.sha256)?$"#,
         options: [.caseInsensitive]
     )
+
+    /// 当前编译架构对应的发行包后缀（arm64 / x86_64）。
+    static var releaseArchSuffix: String {
+        #if arch(x86_64)
+        return "x86_64"
+        #else
+        return "arm64"
+        #endif
+    }
+
+    private static func releaseDMGName(forVersion version: String) -> String {
+        "GravityBox-\(version)-\(releaseArchSuffix).dmg"
+    }
+
+    static func selectReleaseAssetNames(version: String, assetNames: [String]) -> (dmg: String, sha256: String)? {
+        let dmg = releaseDMGName(forVersion: version)
+        let sha256 = dmg + ".sha256"
+        guard assetNames.contains(dmg), assetNames.contains(sha256) else { return nil }
+        return (dmg, sha256)
+    }
 
     static func extractGravityBoxDMGVersion(from fileName: String) -> String? {
         let ns = fileName as NSString
